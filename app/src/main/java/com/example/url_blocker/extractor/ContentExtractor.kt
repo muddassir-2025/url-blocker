@@ -57,14 +57,21 @@ class ContentExtractor {
 
     /**
      * Extracts a full snapshot of the current visible content.
+     *
+     * @param packageName The package being inspected
+     * @param rootNode The root node of the accessibility tree
+     * @param event The accessibility event that triggered this extraction (may be null)
+     * @param windowTitle The window title from AccessibilityWindowInfo (may be null).
+     *        For Google, this is the most reliable source of the search query.
      */
     fun extract(
         packageName: String,
         rootNode: AccessibilityNodeInfo?,
-        event: AccessibilityEvent?
+        event: AccessibilityEvent?,
+        windowTitle: String? = null
     ): ContentSnapshot {
         if (rootNode == null) {
-            val titleFromEvent = extractFromEvent(event)
+            val titleFromEvent = extractFromEvent(event) ?: windowTitle
             return ContentSnapshot(packageName, null, null, titleFromEvent)
         }
 
@@ -84,7 +91,18 @@ class ContentExtractor {
             }
         }
 
-        // 3. Use event data to extract query, URL, or title
+        // 3a. PRIMARY APPROACH FOR GOOGLE: extract query from window title
+        //     This is the most reliable source when the search results page is displayed
+        //     and the search bar is not focused.
+        if (query == null && packageName == GOOGLE_PACKAGE && windowTitle != null) {
+            val extractedQuery = extractQueryFromGoogleTitle(windowTitle)
+            if (extractedQuery != null) {
+                query = extractedQuery
+                Log.d(TAG, "GOOGLE_QUERY_SOURCE=WINDOW_TITLE query=$extractedQuery")
+            }
+        }
+
+        // 3b. Use event data to extract query, URL, or title
         if (event != null) {
             val eventTitle = extractFromEvent(event)
             if (eventTitle != null && !isGenericSearchHint(eventTitle)) {
@@ -95,6 +113,15 @@ class ContentExtractor {
                     val extractedQuery = extractQueryFromGoogleTitle(eventTitle)
                     if (extractedQuery != null) {
                         query = extractedQuery
+                        Log.d(TAG, "GOOGLE_QUERY_SOURCE=EVENT_TITLE query=$extractedQuery")
+                    } else if (eventTitle.length in 2..100 &&
+                               !isGenericSearchHint(eventTitle) &&
+                               !looksLikeUrl(eventTitle)) {
+                        // Fallback: if the event text is a raw query (not a formatted title),
+                        // use it directly. This handles TYPE_VIEW_FOCUSED events from the
+                        // search box where event.text = "porn" (raw query, no suffix).
+                        query = eventTitle
+                        Log.d(TAG, "GOOGLE_QUERY_SOURCE=EVENT_RAW_TEXT query=$query")
                     }
                 } else if (title == null && !looksLikeUrl(eventTitle)) {
                     title = eventTitle
@@ -110,9 +137,13 @@ class ContentExtractor {
             }
         }
 
-        // 5. If still no url or query for Google, try extracting from page title/event text
+        // 5. If still no url or query for Google, try extracting from page content
         if (packageName == GOOGLE_PACKAGE && query == null) {
-            query = extractQueryFromGooglePage(rootNode)
+            val pageQuery = extractQueryFromGooglePage(rootNode)
+            if (pageQuery != null) {
+                query = pageQuery
+                Log.d(TAG, "GOOGLE_QUERY_SOURCE=PAGE_SCAN query=$pageQuery")
+            }
         }
 
         return ContentSnapshot(packageName, url, query, title)
@@ -170,14 +201,16 @@ class ContentExtractor {
         }
         if (editText != null) return editText
 
-        // Phase 3: Broad fallback - scan ALL visible text and return the LONGEST
-        // non-generic text. This prefers actual search queries over short UI labels
-        // (like "Images", "Videos", "News") that happen to appear first in the tree.
-        val broadText = findLongestText(rootNode) { text ->
-            text.length >= 3 && !isGenericSearchHint(text) && !isAppUiText(text) && !looksLikeUrl(text)
+        // Phase 3: Broad fallback - scan ALL nodes and return the first text that
+        // looks like a search query (short, not a generic hint, not a URL).
+        // We use FIRST found (not longest) because the search box is near the top
+        // of the accessibility tree, so its text would appear early in BFS order.
+        // We also prefer SHORTER text (query is typically 1-5 words, not a sentence).
+        val broadText = findFirstQueryLikeText(rootNode, maxDepth = 80) { text ->
+            text.length in 3..40 && !isGenericSearchHint(text) && !looksLikeUrl(text)
         }
         if (broadText != null) {
-            Log.d(TAG, "Found Google query (broad fallback - longest): $broadText")
+            Log.d(TAG, "Found Google query (broad fallback - first query-like): $broadText")
             return broadText
         }
 
@@ -249,24 +282,31 @@ class ContentExtractor {
      * This is useful for Phase 3 where we want to prefer longer text (which is
      * more likely to be the actual search query) over short UI labels.
      */
-    private fun findLongestText(
+    /**
+     * Scan ALL nodes and return the SHORTEST text matching the predicate.
+     * The search query (e.g., "porn") is typically short and would be preferred
+     * over longer text like "About 1,240,000 results" or result snippets.
+     * No early exit — we scan the full tree to find the globally shortest text.
+     */
+    private fun findFirstQueryLikeText(
         rootNode: AccessibilityNodeInfo,
+        maxDepth: Int = MAX_TRAVERSAL_DEPTH,
         predicate: (text: String) -> Boolean
     ): String? {
-        var longest: String? = null
-        var maxLen = 0
+        var bestText: String? = null
+        var bestLen = Int.MAX_VALUE
 
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(rootNode)
         var depth = 0
 
-        while (queue.isNotEmpty() && depth < MAX_TRAVERSAL_DEPTH) {
+        while (queue.isNotEmpty() && depth < maxDepth) {
             val node = queue.removeFirst()
             val text = extractNodeText(node)
 
-            if (text != null && predicate(text) && text.length > maxLen) {
-                maxLen = text.length
-                longest = text
+            if (text != null && predicate(text) && text.length < bestLen) {
+                bestLen = text.length
+                bestText = text
             }
 
             for (i in 0 until node.childCount) {
@@ -275,7 +315,7 @@ class ContentExtractor {
             }
             depth++
         }
-        return longest
+        return bestText
     }
 
     private fun findTextByResourceIds(

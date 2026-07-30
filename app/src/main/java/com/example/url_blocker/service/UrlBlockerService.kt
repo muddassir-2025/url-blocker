@@ -65,6 +65,9 @@ class UrlBlockerService : AccessibilityService() {
     /** Timestamp of last Google foreground detection. */
     private var lastGoogleForegroundTime = 0L
 
+    /** Whether we've performed the one-time diagnostic tree dump for the current session. */
+    private var googleDiagnosticDumped = false
+
     // ── Lifecycle ──────────────────────────────────────────────────
 
     override fun onCreate() {
@@ -139,6 +142,9 @@ class UrlBlockerService : AccessibilityService() {
 
                 Log.i(TAG, "GOOGLE_FOREGROUND_DETECTED (session=$googleForegroundSession, forceReeval=true)")
                 Log.i(TAG, "GOOGLE_FORCED_RECHECK")
+
+                // Reset diagnostic flag so tree dump runs on this new session
+                googleDiagnosticDumped = false
 
                 // Stop any existing Google polling to ensure only ONE polling job
                 stopGooglePolling()
@@ -239,21 +245,37 @@ class UrlBlockerService : AccessibilityService() {
         } ?: return
 
         try {
+            Log.i(TAG, "GOOGLE_SCAN_STARTED")
             Log.i(TAG, "GOOGLE_ROOT_FOUND")
-            val snapshot = contentExtractor.extract(GOOGLE_PACKAGE, rootNode, null)
+
+            // One-time diagnostic tree dump per Google foreground session
+            if (!googleDiagnosticDumped) {
+                googleDiagnosticDumped = true
+                diagnoseGoogleTree(rootNode)
+            }
+
+            // Get window title from accessibility event data (passed through extract path)
+            val snapshot = contentExtractor.extract(
+                GOOGLE_PACKAGE,
+                rootNode,
+                null,
+                null
+            )
 
             Log.i(TAG, "GOOGLE_CONTENT_EXTRACTED: url=${snapshot.url}, query=${snapshot.query}, title=${snapshot.title}")
-            if (snapshot.query != null) {
-                Log.i(TAG, "GOOGLE_QUERY_EXTRACTED: ${snapshot.query}")
-            }
+            Log.i(TAG, "GOOGLE_EXTRACTED_QUERY=${snapshot.query ?: "null"}")
             Log.i(TAG, "GOOGLE_CURRENT_STATE: ${snapshot.toIdentityString()}")
 
             // Check against keywords
+            var blocked = false
             if (snapshot.url != null || snapshot.query != null || snapshot.title != null) {
                 val result = keywordMatcher.check(snapshot, GOOGLE_PACKAGE)
 
                 if (result is MatchResult.Blocked) {
+                    blocked = true
                     Log.w(TAG, "GOOGLE_BLOCKED_MATCH: matched=${result.matchedItem} (${result.matchType}) source=${result.matchSource}")
+                    Log.i(TAG, "GOOGLE_MATCHED_KEYWORD=${result.matchedItem}")
+                    Log.i(TAG, "GOOGLE_BLOCK_DECISION=true")
                     repository.addLogEntry("BLOCKED: ${result.matchedItem} in Google app")
                     lastBlockedResult = result
                     forceGoogleReevaluate = false
@@ -262,9 +284,19 @@ class UrlBlockerService : AccessibilityService() {
                     initiateBlockingSequence(rootNode, GOOGLE_PACKAGE)
                 } else {
                     Log.d(TAG, "GOOGLE_BLOCKED=false")
+                    Log.i(TAG, "GOOGLE_BLOCK_DECISION=false")
                 }
             } else {
                 Log.d(TAG, "GOOGLE_NO_CONTENT_EXTRACTED")
+                Log.i(TAG, "GOOGLE_BLOCK_DECISION=false")
+            }
+
+            // If query was not found and no block occurred, try focusing the search box.
+            // This triggers a TYPE_VIEW_FOCUSED event that carries the query text.
+            // The event handler will process it on the next cycle.
+            if (!blocked && snapshot.query == null && snapshot.url == null) {
+                val focused = tryFocusGoogleSearchBox()
+                Log.i(TAG, "GOOGLE_FOCUS_ATTEMPT: $focused (triggered because query=null)")
             }
 
             // Reset force flag after evaluation
@@ -278,6 +310,72 @@ class UrlBlockerService : AccessibilityService() {
                 // ignore
             }
         }
+    }
+
+    /**
+     * As a last resort, programmatically focus the Google search box.
+     * This triggers a TYPE_VIEW_FOCUSED accessibility event which carries
+     * the search query in event.text. Our existing event handler
+     * (onAccessibilityEvent → evaluateCurrentState) will then extract
+     * the query and detect the block on the next cycle.
+     *
+     * NOTE: This may cause the keyboard to briefly appear.
+     * Returns true if the focus action was sent successfully.
+     */
+    private fun tryFocusGoogleSearchBox(): Boolean {
+        val rootNode = try {
+            rootInActiveWindow
+        } catch (e: Exception) { null } ?: return false
+
+        try {
+            // Find the Google search box — any EditText or search-related view
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(AccessibilityNodeInfo.obtain(rootNode))
+            var depth = 0
+
+            while (queue.isNotEmpty() && depth < 30) {
+                val node = queue.removeFirst()
+                val className = node.className?.toString() ?: ""
+                val viewId = node.viewIdResourceName ?: ""
+
+                // Look for the search input field
+                val isSearchField = className.contains("EditText") ||
+                        className.contains("AutoComplete") ||
+                        viewId.contains("search") ||
+                        viewId.contains("omnibox")
+
+                if (isSearchField) {
+                    // Already focused? Skip
+                    if (node.isFocused) {
+                        Log.d(TAG, "GOOGLE_FOCUS_ATTEMPT: search box already focused")
+                        node.recycle()
+                        return false
+                    }
+
+                    // Send ACTION_FOCUS to trigger TYPE_VIEW_FOCUSED event
+                    val success = node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                    if (success) {
+                        Log.i(TAG, "GOOGLE_FOCUS_ATTEMPT: focus sent successfully (className=$className, viewId=$viewId)")
+                        node.recycle()
+                        return true
+                    }
+                    Log.w(TAG, "GOOGLE_FOCUS_ATTEMPT: ACTION_FOCUS failed on $className ($viewId)")
+                }
+
+                for (i in 0 until node.childCount) {
+                    val child = node.getChild(i) ?: continue
+                    queue.add(child)
+                }
+                node.recycle()
+                depth++
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "GOOGLE_FOCUS_ATTEMPT: error: ${e.message}")
+        } finally {
+            try { rootNode.recycle() } catch (e: Exception) {}
+        }
+        Log.w(TAG, "GOOGLE_FOCUS_ATTEMPT: search box not found")
+        return false
     }
 
     // ── General Polling ────────────────────────────────────────────
@@ -320,7 +418,7 @@ class UrlBlockerService : AccessibilityService() {
         } ?: return
 
         try {
-            val snapshot = contentExtractor.extract(packageName, rootNode, event)
+            val snapshot = contentExtractor.extract(packageName, rootNode, event, null)
             val snapshotId = snapshot.toIdentityString()
 
             // ── Determine if we should evaluate ─────────────────────────
@@ -483,6 +581,50 @@ class UrlBlockerService : AccessibilityService() {
         if (!cleared && !backResult && !backResult2) {
             Log.w(TAG, "GOOGLE_CLEAR_FAILED - both clear and back actions failed")
         }
+    }
+
+    /**
+     * One-time diagnostic dump of the Google app's accessibility tree.
+     * Logs key info about the first ~50 nodes to help identify where the
+     * search query exists (or doesn't) in the unfocused/results state.
+     */
+    private fun diagnoseGoogleTree(rootNode: AccessibilityNodeInfo) {
+        Log.i(TAG, "GOOGLE_DIAGNOSTIC_START")
+        var nodeCount = 0
+
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+        var depth = 0
+
+        while (queue.isNotEmpty() && depth < 70 && nodeCount < 50) {
+            val node = queue.removeFirst()
+            val text = try { node.text?.toString() } catch (e: Exception) { null }
+            val desc = try { node.contentDescription?.toString() } catch (e: Exception) { null }
+            val viewId = try { node.viewIdResourceName } catch (e: Exception) { null }
+            val className = try { node.className?.toString() } catch (e: Exception) { null }
+            val isFocused = try { node.isFocused } catch (e: Exception) { false }
+            val isVisible = try { node.isVisibleToUser } catch (e: Exception) { false }
+
+            // Only log nodes with useful info (skip empty containers)
+            if (text != null || desc != null || viewId != null ||
+                (className != null && (className.contains("EditText") || className.contains("TextView")))) {
+                nodeCount++
+                Log.i(TAG, "DIAG_NODE#$nodeCount: cls=$className " +
+                        "text=${if (text != null) "\"$text\"" else "null"} " +
+                        "desc=${if (desc != null) "\"$desc\"" else "null"} " +
+                        "vid=$viewId " +
+                        "focused=$isFocused " +
+                        "visible=$isVisible")
+            }
+
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null }
+                if (child != null) queue.add(child)
+            }
+            depth++
+        }
+
+        Log.i(TAG, "GOOGLE_DIAGNOSTIC_END: scanned depth=$depth, logged=$nodeCount nodes")
     }
 
     /**
