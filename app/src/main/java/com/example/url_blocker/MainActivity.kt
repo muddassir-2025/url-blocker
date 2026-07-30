@@ -1,5 +1,6 @@
 package com.example.url_blocker
 
+import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -26,17 +27,37 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.url_blocker.ui.theme.UrlblockerTheme
 import com.example.url_blocker.viewmodel.MainViewModel
 
-class MainActivity : ComponentActivity() {
+open class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Lock the app when it goes to background
+        // Use ViewModelProvider (not @Composable viewModel()) since we're in onCreate
+        val viewModel = ViewModelProvider(this).get(MainViewModel::class.java)
+        lifecycle.addObserver(LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                viewModel.lockApp()
+            }
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.checkHasPassword()
+            }
+        })
+
         setContent {
             UrlblockerTheme {
                 MainScreen()
@@ -56,11 +77,28 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
         viewModel.checkAccessibilityStatus(context)
     }
 
-    // Periodically check accessibility status
+    // Periodically check accessibility and device admin status
     LaunchedEffect(Unit) {
         while (true) {
             kotlinx.coroutines.delay(3000)
             viewModel.checkAccessibilityStatus(context)
+            viewModel.checkDeviceAdminStatus(context)
+        }
+    }
+
+    // Auto-start the protection monitor service when Accessibility Service is active
+    LaunchedEffect(viewModel.isAccessibilityEnabled) {
+        if (viewModel.isAccessibilityEnabled && !viewModel.isMonitorServiceRunning) {
+            viewModel.startMonitorService(context)
+        }
+    }
+
+    // Device Admin launcher — hoisted to MainScreen level for stability
+    val deviceAdminLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            android.util.Log.i("MainActivity", "Device Admin activated via result")
         }
     }
 
@@ -77,6 +115,26 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                             "Safe browsing protection",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                actions = {
+                    // Lock indicator
+                    IconButton(onClick = {
+                        if (viewModel.hasPassword) {
+                            viewModel.lockApp()
+                        }
+                    }) {
+                        Icon(
+                            imageVector = if (viewModel.isAppLocked && viewModel.hasPassword)
+                                Icons.Filled.Lock
+                            else
+                                Icons.Outlined.LockOpen,
+                            contentDescription = if (viewModel.hasPassword) "Lock app" else "No password set",
+                            tint = if (viewModel.hasPassword && viewModel.isAppLocked)
+                                MaterialTheme.colorScheme.error
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 },
@@ -115,11 +173,158 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
         }
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
-            when (selectedTab) {
-                0 -> DashboardTab(viewModel)
-                1 -> KeywordsTab(viewModel)
-                2 -> WebsitesTab(viewModel)
-                3 -> LogTab(viewModel)
+            // Show lock screen overlay when app is locked
+            // (either with existing password or for initial password setup)
+            if (viewModel.shouldShowLockScreen()) {
+                LockScreen(
+                    onUnlock = { password -> viewModel.verifyAppPassword(password) },
+                    onSetupPassword = { password -> viewModel.setAppPassword(password) },
+                    hasPassword = viewModel.hasPassword
+                )
+            } else {
+                when (selectedTab) {
+                    0 -> DashboardTab(viewModel, deviceAdminLauncher)
+                    1 -> KeywordsTab(viewModel)
+                    2 -> WebsitesTab(viewModel)
+                    3 -> LogTab(viewModel)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LockScreen(
+    onUnlock: (String) -> Boolean,
+    onSetupPassword: (String) -> Unit,
+    hasPassword: Boolean
+) {
+    var passwordInput by remember { mutableStateOf("") }
+    var setupPasswordInput by remember { mutableStateOf("") }
+    var setupConfirmInput by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var isSetupMode by remember { mutableStateOf(!hasPassword) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(32.dp)
+                .fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(
+                Icons.Filled.Lock,
+                contentDescription = null,
+                modifier = Modifier.size(48.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = if (isSetupMode) "Set App Password" else "App Locked",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = if (isSetupMode)
+                    "Create a password to protect your blocked keywords and websites"
+                else
+                    "Enter password to view protected content",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            if (isSetupMode) {
+                OutlinedTextField(
+                    value = setupPasswordInput,
+                    onValueChange = { setupPasswordInput = it; errorMessage = null },
+                    label = { Text("New password") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                    isError = errorMessage != null
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = setupConfirmInput,
+                    onValueChange = { setupConfirmInput = it; errorMessage = null },
+                    label = { Text("Confirm password") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                    isError = errorMessage != null
+                )
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage!!,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = {
+                        if (setupPasswordInput.trim().length < 4) {
+                            errorMessage = "Password must be at least 4 characters"
+                        } else if (setupPasswordInput != setupConfirmInput) {
+                            errorMessage = "Passwords do not match"
+                        } else {
+                            onSetupPassword(setupPasswordInput)
+                            setupPasswordInput = ""
+                            setupConfirmInput = ""
+                            isSetupMode = false
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Set Password")
+                }
+            } else {
+                OutlinedTextField(
+                    value = passwordInput,
+                    onValueChange = { passwordInput = it; errorMessage = null },
+                    label = { Text("Password") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                    isError = errorMessage != null
+                )
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage!!,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = {
+                        if (onUnlock(passwordInput)) {
+                            passwordInput = ""
+                            errorMessage = null
+                        } else {
+                            errorMessage = "Incorrect password"
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Unlock")
+                }
             }
         }
     }
@@ -128,7 +333,10 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
 // ── Dashboard Tab ─────────────────────────────────────────────────
 
 @Composable
-private fun DashboardTab(viewModel: MainViewModel) {
+private fun DashboardTab(
+    viewModel: MainViewModel,
+    deviceAdminLauncher: androidx.activity.result.ActivityResultLauncher<android.content.Intent>
+) {
     val context = LocalContext.current
 
     LazyColumn(
@@ -197,7 +405,7 @@ private fun DashboardTab(viewModel: MainViewModel) {
                             onClick = { viewModel.openAccessibilitySettings(context) },
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
                         ) {
-                            Text("Enable", fontSize = 13.sp)
+                            Text("Restore Protection", fontSize = 13.sp)
                         }
                     }
                 }
@@ -317,6 +525,254 @@ private fun DashboardTab(viewModel: MainViewModel) {
             }
         }
 
+        // ── Device Admin Status ───────────────────────────────────────
+        item {
+            val isAdmin = viewModel.isDeviceAdminEnabled
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isAdmin)
+                        MaterialTheme.colorScheme.surfaceVariant
+                    else
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Outlined.AdminPanelSettings,
+                        contentDescription = null,
+                        tint = if (isAdmin) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Device Admin",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = if (isAdmin)
+                                "Active — adds uninstall protection step"
+                            else
+                                "Inactive — app can be uninstalled freely",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (!isAdmin) {
+                        TextButton(
+                            onClick = {
+                                val intent = android.content.Intent(
+                                    android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN
+                                ).apply {
+                                    putExtra(
+                                        android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN,
+                                        android.content.ComponentName(
+                                            context,
+                                            com.example.url_blocker.receiver.DeviceAdminReceiver::class.java
+                                        )
+                                    )
+                                    putExtra(
+                                        android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                                        "Activating device admin adds a deactivation step before uninstall, " +
+                                        "making it harder to accidentally remove the protection app. " +
+                                        "The launcher icon will also be hidden for additional protection."
+                                    )
+                                }
+                                try {
+                                    deviceAdminLauncher.launch(intent)
+                                } catch (e: Exception) {
+                                    android.util.Log.e("MainActivity", "Failed to launch Device Admin: ${e.message}")
+                                    // Fallback: just open Device Admin settings manually
+                                    val fallbackIntent = android.content.Intent(
+                                        android.provider.Settings.ACTION_SECURITY_SETTINGS
+                                    ).apply {
+                                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(fallbackIntent)
+                                }
+                            }
+                        ) {
+                            Text("Activate", fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── App Password / Lock ───────────────────────────────────────
+        item {
+            val hasPwd = viewModel.hasPassword
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (hasPwd)
+                        MaterialTheme.colorScheme.surfaceVariant
+                    else
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        if (hasPwd) Icons.Filled.Lock else Icons.Outlined.LockOpen,
+                        contentDescription = null,
+                        tint = if (hasPwd) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "App Lock",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = if (hasPwd)
+                                "Password set — app locks on background"
+                            else
+                                "No password — all content visible freely",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (hasPwd) {
+                        TextButton(onClick = { viewModel.clearAppPassword() }) {
+                            Text("Remove", fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                        }
+                    } else {
+                        TextButton(onClick = { viewModel.appLockTriggered = true }) {
+                            Text("Set", fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Private DNS (Network-level filtering) ────────────────────
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Outlined.Dns,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "Private DNS (Network Filter)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Set a filtered DNS provider to block adult content at the network level — works on ALL apps including Chrome, incognito mode, and Google Images. Cannot be bypassed by installing a new browser.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { viewModel.openPrivateDnsSettings(context) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Filled.Settings, contentDescription = null,
+                                modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Open DNS Settings", fontSize = 12.sp)
+                        }
+                        OutlinedButton(
+                            onClick = { viewModel.openDnsSetupGuide(context) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Outlined.OpenInNew, contentDescription = null,
+                                modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("DNS Providers", fontSize = 12.sp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Recommended: CleanBrowsing Family Filter or Cloudflare 1.1.1.3 (Family)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+
+        // ── Protection Monitor Status ─────────────────────────────────
+        item {
+            val isMonitoring = viewModel.isMonitorServiceRunning
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isMonitoring)
+                        MaterialTheme.colorScheme.surfaceVariant
+                    else
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Outlined.Visibility,
+                        contentDescription = null,
+                        tint = if (isMonitoring) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Protection Monitor",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = if (isMonitoring)
+                                "Running — will prompt to re-enable after 5 min"
+                            else
+                                "Not running — automatic re-enable prompting disabled",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (!isMonitoring) {
+                        TextButton(
+                            onClick = { viewModel.startMonitorService(context) }
+                        ) {
+                            Text("Start", fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+        }
+
         item {
             Spacer(modifier = Modifier.height(8.dp))
         }
@@ -328,6 +784,13 @@ private fun DashboardTab(viewModel: MainViewModel) {
 @Composable
 private fun KeywordsTab(viewModel: MainViewModel) {
     val context = LocalContext.current
+    var filterText by remember { mutableStateOf("") }
+    var deleteTarget by remember { mutableStateOf<String?>(null) }
+    var editTarget by remember { mutableStateOf<String?>(null) }
+    var editText by remember { mutableStateOf("") }
+    val visibleKeywords = viewModel.userKeywords.filter {
+        filterText.isBlank() || it.contains(filterText.trim(), ignoreCase = true)
+    }
 
     Column(
         modifier = Modifier
@@ -371,10 +834,59 @@ private fun KeywordsTab(viewModel: MainViewModel) {
             )
             Spacer(modifier = Modifier.width(6.dp))
             Text(
-                text = "Built-in protection includes 80+ adult-content keywords",
+                text = "Built-in protection includes expanded adult-content keywords",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Strict Mode toggle
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = if (viewModel.isStrictMode)
+                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
+                else
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Outlined.Warning,
+                    contentDescription = null,
+                    tint = if (viewModel.isStrictMode)
+                        MaterialTheme.colorScheme.error
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Strict Mode",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Blocks broader terms (hot, babe, bikini, etc.). " +
+                                "May cause false positives on legitimate sites like weather, fashion, or news.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Switch(
+                    checked = viewModel.isStrictMode,
+                    onCheckedChange = { viewModel.toggleStrictMode(context) }
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -387,8 +899,20 @@ private fun KeywordsTab(viewModel: MainViewModel) {
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        if (viewModel.userKeywords.size > 5) {
+            OutlinedTextField(
+                value = filterText,
+                onValueChange = { filterText = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Filter custom keywords") },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) }
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
         // Keywords list
-        if (viewModel.userKeywords.isEmpty()) {
+        if (visibleKeywords.isEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -402,7 +926,11 @@ private fun KeywordsTab(viewModel: MainViewModel) {
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        "No custom keywords added yet.\nAdd keywords above to block specific terms.",
+                        if (viewModel.userKeywords.isEmpty()) {
+                            "No custom keywords added yet.\nAdd keywords above to block specific terms."
+                        } else {
+                            "No keywords match the current filter."
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -411,21 +939,69 @@ private fun KeywordsTab(viewModel: MainViewModel) {
             }
         } else {
             LazyColumn(
+                modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                items(viewModel.userKeywords.toList(), key = { it }) { keyword ->
+                items(visibleKeywords, key = { it }) { keyword ->
                     KeywordItem(
                         keyword = keyword,
-                        onDelete = { viewModel.removeKeyword(keyword) }
+                        onEdit = {
+                            editTarget = keyword
+                            editText = keyword
+                        },
+                        onDelete = { deleteTarget = keyword }
                     )
                 }
             }
+        }
+
+        deleteTarget?.let { keyword ->
+            AlertDialog(
+                onDismissRequest = { deleteTarget = null },
+                title = { Text("Remove keyword?") },
+                text = { Text("Remove \"$keyword\"? It will no longer be blocked.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        viewModel.removeKeyword(keyword)
+                        deleteTarget = null
+                    }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deleteTarget = null }) { Text("Cancel") }
+                }
+            )
+        }
+
+        editTarget?.let { keyword ->
+            AlertDialog(
+                onDismissRequest = { editTarget = null },
+                title = { Text("Edit keyword") },
+                text = {
+                    OutlinedTextField(
+                        value = editText,
+                        onValueChange = { editText = it },
+                        singleLine = true,
+                        label = { Text("Keyword") }
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (editText.trim().isNotEmpty()) {
+                            viewModel.editKeyword(keyword, editText)
+                            editTarget = null
+                        }
+                    }) { Text("Save") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { editTarget = null }) { Text("Cancel") }
+                }
+            )
         }
     }
 }
 
 @Composable
-private fun KeywordItem(keyword: String, onDelete: () -> Unit) {
+private fun KeywordItem(keyword: String, onEdit: () -> Unit, onDelete: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -450,6 +1026,9 @@ private fun KeywordItem(keyword: String, onDelete: () -> Unit) {
                 modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.bodyLarge
             )
+            IconButton(onClick = onEdit) {
+                Icon(Icons.Filled.Edit, contentDescription = "Edit $keyword")
+            }
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Filled.Delete,
@@ -465,6 +1044,7 @@ private fun KeywordItem(keyword: String, onDelete: () -> Unit) {
 
 @Composable
 private fun WebsitesTab(viewModel: MainViewModel) {
+    var deleteTarget by remember { mutableStateOf<String?>(null) }
 
     Column(
         modifier = Modifier
@@ -527,15 +1107,33 @@ private fun WebsitesTab(viewModel: MainViewModel) {
             }
         } else {
             LazyColumn(
+                modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 items(viewModel.blockedDomains.toList(), key = { it }) { domain ->
                     DomainItem(
                         domain = domain,
-                        onDelete = { viewModel.removeDomain(domain) }
+                        onDelete = { deleteTarget = domain }
                     )
                 }
             }
+        }
+
+        deleteTarget?.let { domain ->
+            AlertDialog(
+                onDismissRequest = { deleteTarget = null },
+                title = { Text("Remove website?") },
+                text = { Text("Remove \"$domain\"? Its subdomains will no longer be blocked.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        viewModel.removeDomain(domain)
+                        deleteTarget = null
+                    }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deleteTarget = null }) { Text("Cancel") }
+                }
+            )
         }
     }
 }

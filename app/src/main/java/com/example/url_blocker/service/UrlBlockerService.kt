@@ -21,7 +21,8 @@ enum class BlockingState {
     NORMAL,
     CLEARING_TARGET,
     WAITING_FOR_SAFE_STATE,
-    RETURNING_HOME
+    RETURNING_HOME,
+    OVERLAY_ACTIVE
 }
 
 /**
@@ -32,8 +33,9 @@ class UrlBlockerService : AccessibilityService() {
 
     companion object {
         private const val TAG = "UrlBlockerService"
-        private const val POLLING_INTERVAL_MS = 800L
+        private const val POLLING_INTERVAL_MS = 500L
         private const val GOOGLE_POLLING_INTERVAL_MS = 500L
+        private const val GOOGLE_QUERY_CACHE_WINDOW_MS = 15_000L
         private const val SAFE_STATE_TIMEOUT_MS = 2500L
         private const val OUR_PACKAGE = "com.example.url_blocker"
         private const val GOOGLE_PACKAGE = "com.google.android.googlequicksearchbox"
@@ -68,6 +70,20 @@ class UrlBlockerService : AccessibilityService() {
     /** Whether we've performed the one-time diagnostic tree dump for the current session. */
     private var googleDiagnosticDumped = false
 
+    /** Tracks whether a delayed re-scan has been scheduled for the current session. */
+    private var googleDelayedRescanScheduled = false
+
+    /** Prevents the fallback focus action from repeatedly changing Google UI state. */
+    private var googleFocusAttempted = false
+
+    /**
+     * The Google results screen can temporarily stop exposing its search chip
+     * while the page is being rebuilt. Keep the last observed query briefly so
+     * that a content update cannot create a detection gap.
+     */
+    private var lastGoogleQuery: String? = null
+    private var lastGoogleQueryTime = 0L
+
     // ── Lifecycle ──────────────────────────────────────────────────
 
     override fun onCreate() {
@@ -101,6 +117,19 @@ class UrlBlockerService : AccessibilityService() {
 
         // 1. Update foreground package tracking
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            if (currentForegroundPackage == packageName && contentExtractor.isTargetPackage(packageName)) {
+                lastCheckedSnapshotId = null
+                if (packageName == GOOGLE_PACKAGE) forceGoogleReevaluate = true
+            }
+            // For Chrome: when a new page loads (URL changes via window state),
+            // bypass the 500ms poll and evaluate immediately
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                contentExtractor.isChromePackage(packageName) &&
+                currentForegroundPackage == packageName) {
+                serviceScope.launch {
+                    evaluateCurrentState(packageName, event)
+                }
+            }
             handlePackageChange(packageName)
         }
 
@@ -126,11 +155,19 @@ class UrlBlockerService : AccessibilityService() {
 
             if (newPackage == OUR_PACKAGE) {
                 // We reached the block overlay
-                blockingState = BlockingState.NORMAL
+                blockingState = BlockingState.OVERLAY_ACTIVE
                 stopPolling()
                 stopGooglePolling()
                 currentForegroundPackage = newPackage
                 return
+            }
+
+            if (currentForegroundPackage == OUR_PACKAGE) {
+                blockingState = BlockingState.NORMAL
+                lastCheckedSnapshotId = null
+                lastBlockedResult = null
+                lastGoogleQuery = null
+                lastGoogleQueryTime = 0L
             }
 
             if (contentExtractor.isGooglePackage(newPackage)) {
@@ -143,8 +180,12 @@ class UrlBlockerService : AccessibilityService() {
                 Log.i(TAG, "GOOGLE_FOREGROUND_DETECTED (session=$googleForegroundSession, forceReeval=true)")
                 Log.i(TAG, "GOOGLE_FORCED_RECHECK")
 
-                // Reset diagnostic flag so tree dump runs on this new session
+                // Reset diagnostic flag and delayed-rescan flag for this new session
                 googleDiagnosticDumped = false
+                googleDelayedRescanScheduled = false
+                googleFocusAttempted = false
+                lastGoogleQuery = null
+                lastGoogleQueryTime = 0L
 
                 // Stop any existing Google polling to ensure only ONE polling job
                 stopGooglePolling()
@@ -157,10 +198,19 @@ class UrlBlockerService : AccessibilityService() {
                 // Immediately perform a forced scan (synchronous — called from main-thread event handler)
                 Log.i(TAG, "GOOGLE_INITIAL_SCAN_STARTED")
                 forceEvaluateGoogle()
+            } else if (contentExtractor.isYouTubePackage(newPackage)) {
+                // ── YOUTUBE APP FOREGROUND ──────────────────────────────
+                lastCheckedSnapshotId = null
+                Log.i(TAG, "YOUTUBE_FOREGROUND_DETECTED")
+                startPolling(newPackage)
             } else if (contentExtractor.isTargetPackage(newPackage)) {
                 // ── CHROME (or other target) FOREGROUND ──────────────────
                 lastCheckedSnapshotId = null
                 startPolling(newPackage)
+                // Immediate scan — same as Google, don't wait 500ms for first poll
+                serviceScope.launch {
+                    evaluateCurrentState(newPackage, null)
+                }
             } else {
                 // ── NON-TARGET APP ───────────────────────────────────────
                 stopPolling()
@@ -207,7 +257,12 @@ class UrlBlockerService : AccessibilityService() {
                         val rootNode = try { rootInActiveWindow } catch (e: Exception) { null }
                         if (rootNode != null) {
                             try {
-                                val snapshot = contentExtractor.extract(GOOGLE_PACKAGE, rootNode, null)
+                                val snapshot = contentExtractor.extract(
+                                    GOOGLE_PACKAGE,
+                                    rootNode,
+                                    null,
+                                    activeWindowTitle()
+                                )
                                 handleSafeStateCheck(snapshot, GOOGLE_PACKAGE)
                             } finally {
                                 try { rootNode.recycle() } catch (e: Exception) {}
@@ -216,6 +271,9 @@ class UrlBlockerService : AccessibilityService() {
                     }
                     BlockingState.CLEARING_TARGET, BlockingState.RETURNING_HOME -> {
                         // In clearing or returning, wait
+                    }
+                    BlockingState.OVERLAY_ACTIVE -> {
+                        // The overlay owns the foreground until the user leaves it.
                     }
                 }
                 delay(GOOGLE_POLLING_INTERVAL_MS)
@@ -254,13 +312,31 @@ class UrlBlockerService : AccessibilityService() {
                 diagnoseGoogleTree(rootNode)
             }
 
-            // Get window title from accessibility event data (passed through extract path)
-            val snapshot = contentExtractor.extract(
+            // ── Get window title from AccessibilityWindowInfo ─────────────
+            // Google search results window titles look like:
+            //   "blockedkeyword - Google Search"
+            //   "something - Google"
+            // ContentExtractor.extractQueryFromGoogleTitle() can parse these.
+            // This is the MOST RELIABLE way to detect the search query on
+            // the results page when the search box is not focused.
+            val windowTitle = try {
+                windows?.firstOrNull { it.isActive }?.title?.toString()
+            } catch (e: Exception) {
+                null
+            }
+            if (windowTitle != null) {
+                Log.i(TAG, "GOOGLE_WINDOW_TITLE=$windowTitle")
+            } else {
+                Log.d(TAG, "GOOGLE_WINDOW_TITLE=null")
+            }
+
+            val extractedSnapshot = contentExtractor.extract(
                 GOOGLE_PACKAGE,
                 rootNode,
                 null,
-                null
+                windowTitle
             )
+            val snapshot = prepareGoogleSnapshot(extractedSnapshot)
 
             Log.i(TAG, "GOOGLE_CONTENT_EXTRACTED: url=${snapshot.url}, query=${snapshot.query}, title=${snapshot.title}")
             Log.i(TAG, "GOOGLE_EXTRACTED_QUERY=${snapshot.query ?: "null"}")
@@ -269,14 +345,21 @@ class UrlBlockerService : AccessibilityService() {
             // Check against keywords
             var blocked = false
             if (snapshot.url != null || snapshot.query != null || snapshot.title != null) {
+                // Log which Google tab is being used (Images, Videos, etc.)
+                val googleTab = contentExtractor.isGoogleTabSearch(snapshot.url)
+                if (googleTab != null) {
+                    Log.i(TAG, "GOOGLE_${googleTab.uppercase()}_TAB_DETECTED (url=${snapshot.url})")
+                }
+
                 val result = keywordMatcher.check(snapshot, GOOGLE_PACKAGE)
 
                 if (result is MatchResult.Blocked) {
                     blocked = true
-                    Log.w(TAG, "GOOGLE_BLOCKED_MATCH: matched=${result.matchedItem} (${result.matchType}) source=${result.matchSource}")
+                    val tabSuffix = if (googleTab != null) " in $googleTab tab" else ""
+                    Log.w(TAG, "GOOGLE_BLOCKED_MATCH: matched=${result.matchedItem} (${result.matchType}) source=${result.matchSource}$tabSuffix")
                     Log.i(TAG, "GOOGLE_MATCHED_KEYWORD=${result.matchedItem}")
                     Log.i(TAG, "GOOGLE_BLOCK_DECISION=true")
-                    repository.addLogEntry("BLOCKED: ${result.matchedItem} in Google app")
+                    repository.addLogEntry("BLOCKED: ${result.matchedItem} in Google app$tabSuffix")
                     lastBlockedResult = result
                     forceGoogleReevaluate = false
 
@@ -291,12 +374,32 @@ class UrlBlockerService : AccessibilityService() {
                 Log.i(TAG, "GOOGLE_BLOCK_DECISION=false")
             }
 
-            // If query was not found and no block occurred, try focusing the search box.
+            // If no block occurred and query was not found, try focusing the search box.
             // This triggers a TYPE_VIEW_FOCUSED event that carries the query text.
             // The event handler will process it on the next cycle.
-            if (!blocked && snapshot.query == null && snapshot.url == null) {
+            if (!blocked && snapshot.query == null && !googleFocusAttempted) {
+                googleFocusAttempted = true
                 val focused = tryFocusGoogleSearchBox()
                 Log.i(TAG, "GOOGLE_FOCUS_ATTEMPT: $focused (triggered because query=null)")
+            }
+
+            // ── Delayed Re-scan Safety Net ───────────────────────────────
+            // If no block occurred and no query was found, schedule a one-shot
+            // delayed re-scan. This handles cases where the accessibility tree
+            // or window title hasn't fully populated yet (e.g., page still loading).
+            if (!blocked && snapshot.query == null && snapshot.title == null && !googleDelayedRescanScheduled) {
+                googleDelayedRescanScheduled = true
+                Log.i(TAG, "GOOGLE_DELAYED_RESCAN_SCHEDULED")
+                serviceScope.launch {
+                    delay(700L)
+                    if (currentForegroundPackage == GOOGLE_PACKAGE && blockingState == BlockingState.NORMAL) {
+                        Log.i(TAG, "GOOGLE_DELAYED_RESCAN_EXECUTING")
+                        // Do NOT reset googleDelayedRescanScheduled here to prevent an
+                        // infinite re-scan loop. The regular 500ms polling loop provides
+                        // continuous coverage. This delayed scan is a one-shot safety net.
+                        forceEvaluateGoogle()
+                    }
+                }
             }
 
             // Reset force flag after evaluation
@@ -387,7 +490,8 @@ class UrlBlockerService : AccessibilityService() {
         pollingJob = serviceScope.launch {
             while (isActive) {
                 val pkg = currentForegroundPackage ?: packageName
-                if (pkg != OUR_PACKAGE && blockingState == BlockingState.NORMAL) {
+                if (pkg != OUR_PACKAGE && (blockingState == BlockingState.NORMAL ||
+                            blockingState == BlockingState.WAITING_FOR_SAFE_STATE)) {
                     evaluateCurrentState(pkg, null)
                 }
                 delay(POLLING_INTERVAL_MS)
@@ -407,7 +511,9 @@ class UrlBlockerService : AccessibilityService() {
 
     private fun evaluateCurrentState(packageName: String, event: AccessibilityEvent?) {
         // If we're in a blocking sequence, don't re-evaluate (let the state machine handle it)
-        if (blockingState != BlockingState.NORMAL) {
+        if (blockingState == BlockingState.CLEARING_TARGET ||
+            blockingState == BlockingState.RETURNING_HOME ||
+            blockingState == BlockingState.OVERLAY_ACTIVE) {
             return
         }
 
@@ -418,7 +524,21 @@ class UrlBlockerService : AccessibilityService() {
         } ?: return
 
         try {
-            val snapshot = contentExtractor.extract(packageName, rootNode, event, null)
+            // Get window title from AccessibilityWindowInfo
+            // This is especially important for Google search results pages
+            // where the title contains the search query (e.g., "keyword - Google Search")
+            val windowTitle = try {
+                windows?.firstOrNull { it.isActive }?.title?.toString()
+            } catch (e: Exception) {
+                null
+            }
+
+            val extractedSnapshot = contentExtractor.extract(packageName, rootNode, event, windowTitle)
+            val snapshot = if (packageName == GOOGLE_PACKAGE) {
+                prepareGoogleSnapshot(extractedSnapshot)
+            } else {
+                extractedSnapshot
+            }
             val snapshotId = snapshot.toIdentityString()
 
             // ── Determine if we should evaluate ─────────────────────────
@@ -459,6 +579,9 @@ class UrlBlockerService : AccessibilityService() {
                     BlockingState.RETURNING_HOME -> {
                         // In transit to home, ignore checks
                     }
+                    BlockingState.OVERLAY_ACTIVE -> {
+                        // The overlay owns the foreground until the user leaves it.
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -472,12 +595,58 @@ class UrlBlockerService : AccessibilityService() {
         }
     }
 
+    private fun activeWindowTitle(): String? = try {
+        windows?.firstOrNull { it.isActive }?.title?.toString()
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun prepareGoogleSnapshot(snapshot: ContentSnapshot): ContentSnapshot {
+        val observedQuery = snapshot.query?.trim().orEmpty()
+        if (observedQuery.isNotEmpty()) {
+            lastGoogleQuery = observedQuery
+            lastGoogleQueryTime = System.currentTimeMillis()
+            return snapshot
+        }
+
+        val cachedQuery = lastGoogleQuery
+        val cacheAge = System.currentTimeMillis() - lastGoogleQueryTime
+        return if (!cachedQuery.isNullOrBlank() && cacheAge in 0..GOOGLE_QUERY_CACHE_WINDOW_MS) {
+            Log.d(TAG, "GOOGLE_QUERY_CACHE_REUSED ageMs=$cacheAge")
+            snapshot.copy(query = cachedQuery)
+        } else {
+            snapshot
+        }
+    }
+
     private fun handleSafeStateCheck(snapshot: ContentSnapshot, packageName: String) {
         val result = keywordMatcher.check(snapshot, packageName)
-        if (result is MatchResult.Allowed) {
+        val confirmedSafe = result is MatchResult.Allowed && when {
+            contentExtractor.isChromePackage(packageName) -> !snapshot.url.isNullOrBlank()
+            contentExtractor.isYouTubePackage(packageName) -> {
+                // YouTube safe state: title must be different from blocked content
+                // or null (navigated away from video). We can't check a URL bar
+                // because YouTube doesn't expose one.
+                val blockedItem = lastBlockedResult?.matchedItem?.lowercase()
+                if (blockedItem == null) {
+                    // Defensive: if lastBlockedResult is somehow null, wait for
+                    // the timeout fallback rather than prematurely declaring safe.
+                    false
+                } else {
+                    snapshot.title?.lowercase()?.let { title ->
+                        !title.contains(blockedItem)
+                    } ?: true // null title means navigation away from the video
+                }
+            }
+            else -> snapshot.url != null || (snapshot.query == null && snapshot.title != null)
+        }
+
+        if (confirmedSafe) {
             Log.i(TAG, "SAFE STATE DETECTED for $packageName")
             if (packageName == GOOGLE_PACKAGE) {
                 Log.i(TAG, "GOOGLE_SAFE_STATE_CONFIRMED")
+            } else if (contentExtractor.isYouTubePackage(packageName)) {
+                Log.i(TAG, "YOUTUBE_SAFE_STATE_CONFIRMED")
             }
             transitionToHome(packageName)
         } else {
@@ -741,13 +910,16 @@ class UrlBlockerService : AccessibilityService() {
 
     private fun navigateToSafeIntent(packageName: String) {
         try {
+            if (contentExtractor.isYouTubePackage(packageName)) {
+                // YouTube app cannot open a URL via intent-setPackage (no browser capability).
+                // Navigate to Home instead.
+                Log.i(TAG, "YOUTUBE_SAFE_FALLBACK: navigating to Home")
+                goToHome()
+                return
+            }
             if (contentExtractor.isTargetPackage(packageName)) {
                 Log.i(TAG, "SAFE URL REQUESTED via Intent for $packageName")
-                val safeUrl = if (contentExtractor.isGooglePackage(packageName)) {
-                    "https://www.google.com"
-                } else {
-                    "https://www.google.com"
-                }
+                val safeUrl = "https://www.google.com"
                 val safeIntent = Intent(Intent.ACTION_VIEW, Uri.parse(safeUrl)).apply {
                     setPackage(packageName)
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)

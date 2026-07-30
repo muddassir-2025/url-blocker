@@ -3,6 +3,7 @@ package com.example.url_blocker.matching
 import android.net.Uri
 import android.util.Log
 import com.example.url_blocker.repository.BlockRepository
+import java.util.Locale
 
 /**
  * Result of a block check.
@@ -30,6 +31,20 @@ enum class MatchSource {
     NONE
 }
 
+enum class QueryConfidence {
+    HIGH,
+    MEDIUM,
+    NONE
+}
+
+enum class QuerySource {
+    SEARCH_BAR,
+    WINDOW_TITLE,
+    EDITABLE_FIELD,
+    ACCESSIBILITY_EVENT,
+    NONE
+}
+
 /**
  * Snapshot of the currently extracted content from an app.
  */
@@ -37,7 +52,9 @@ data class ContentSnapshot(
     val packageName: String,
     val url: String?,
     val query: String?,
-    val title: String?
+    val title: String?,
+    val queryConfidence: QueryConfidence = QueryConfidence.NONE,
+    val querySource: QuerySource = QuerySource.NONE
 ) {
     // Generate an identity for deduplication
     fun toIdentityString(): String {
@@ -83,6 +100,16 @@ class KeywordMatcher(private val repository: BlockRepository) {
         // ── GOOGLE APP: URL + QUERY ────────────────────────────────────
         if (packageName == com.example.url_blocker.extractor.ContentExtractor.GOOGLE_PACKAGE) {
             return checkGoogle(snapshot)
+        }
+
+        // ── YOUTUBE APP: TITLE + SIGNALS ───────────────────────────────
+        // YouTube has no URL bar exposed via accessibility, so we rely on
+        // the video title and detected signals (Shorts, hashtags).
+        // Title-based blocking is safe for YouTube because the video title
+        // IS the primary content identifier (unlike Chrome where page titles
+        // are arbitrary text that can cause false positives).
+        if (isYouTubePackage(packageName)) {
+            return checkYouTube(snapshot)
         }
 
         // ── FALLBACK (other packages): check everything ─────────────────
@@ -145,6 +172,44 @@ class KeywordMatcher(private val repository: BlockRepository) {
         // Log page text matches but don't block
         if (!snapshot.title.isNullOrBlank()) {
             logPageTextMatch(snapshot.title)
+        }
+
+        return MatchResult.Allowed
+    }
+
+    /**
+     * YouTube-specific check: title is the PRIMARY signal.
+     *
+     * The YouTube app does not expose a URL bar, so we cannot do
+     * domain-based or URL-based blocking. Instead we check:
+     * 1. Video title (populated as snapshot.title by ContentExtractor)
+     * 2. Detected signals (Shorts indicator, hashtags — populated as snapshot.query)
+     *
+     * Title-based blocking is appropriate here because:
+     * - The video title IS the content identifier
+     * - Users navigate YouTube by searching/tapping videos
+     * - Unlike arbitrary web page text, video titles directly describe content
+     * - YouTube has no URL bar, so URL extraction is not an alternative
+     */
+    private fun checkYouTube(snapshot: ContentSnapshot): MatchResult {
+        // 1. Check video title (primary signal)
+        if (!snapshot.title.isNullOrBlank()) {
+            val titleRes = checkString(snapshot.title, isUrl = false)
+            if (titleRes is MatchResult.Blocked) {
+                val finalRes = titleRes.copy(matchSource = MatchSource.TITLE)
+                Log.i(TAG, buildBlockLog("YOUTUBE_TITLE", snapshot.title, finalRes))
+                return finalRes
+            }
+        }
+
+        // 2. Check extracted signals (Shorts, hashtags)
+        if (!snapshot.query.isNullOrBlank()) {
+            val queryRes = checkString(snapshot.query, isUrl = false)
+            if (queryRes is MatchResult.Blocked) {
+                val finalRes = queryRes.copy(matchSource = MatchSource.QUERY)
+                Log.i(TAG, buildBlockLog("YOUTUBE_SIGNAL", snapshot.query, finalRes))
+                return finalRes
+            }
         }
 
         return MatchResult.Allowed
@@ -214,8 +279,8 @@ class KeywordMatcher(private val repository: BlockRepository) {
      * Log a page text match found but not blocked.
      */
     private fun logPageTextMatch(text: String) {
-        val lower = text.lowercase()
-        val builtIn = checkKeywords(lower, repository.builtInKeywords)
+        val lower = text.lowercase(Locale.ROOT)
+        val builtIn = checkKeywords(lower, repository.activeBuiltInKeywords, protectShortWords = true)
         if (builtIn != null) {
             Log.d(TAG, """
                 PAGE TEXT MATCH FOUND
@@ -253,7 +318,7 @@ class KeywordMatcher(private val repository: BlockRepository) {
      * Matches a domain against the blocked domains list.
      */
     private fun checkString(text: String, isUrl: Boolean): MatchResult {
-        val lower = text.lowercase()
+        val lower = text.lowercase(Locale.ROOT)
 
         // Domain matching for URLs
         if (isUrl) {
@@ -263,7 +328,7 @@ class KeywordMatcher(private val repository: BlockRepository) {
             }
         }
 
-        val matchedBuiltIn = checkKeywords(lower, repository.builtInKeywords)
+        val matchedBuiltIn = checkKeywords(lower, repository.activeBuiltInKeywords, protectShortWords = true)
         if (matchedBuiltIn != null) {
             return MatchResult.Blocked(matchedBuiltIn, MatchType.BUILT_IN_KEYWORD, MatchSource.NONE)
         }
@@ -277,12 +342,12 @@ class KeywordMatcher(private val repository: BlockRepository) {
     }
 
     private fun checkDomains(urlText: String): String? {
-        val domains = repository.getBlockedDomains()
-        if (domains.isEmpty()) return null
+        val allDomains = repository.getAllBlockedDomains()
+        if (allDomains.isEmpty()) return null
 
         val host = extractHost(urlText) ?: return null
 
-        for (domain in domains) {
+        for (domain in allDomains) {
             if (host == domain || host.endsWith(".$domain")) {
                 return domain
             }
@@ -290,21 +355,38 @@ class KeywordMatcher(private val repository: BlockRepository) {
         return null
     }
 
-    private fun checkKeywords(lowercaseText: String, keywords: Set<String>): String? {
+    private fun checkKeywords(
+        lowercaseText: String,
+        keywords: Set<String>,
+        protectShortWords: Boolean = false
+    ): String? {
         if (keywords.isEmpty()) return null
-        for (keyword in keywords) {
-            if (lowercaseText.contains(keyword)) {
+        for (keyword in keywords.sortedWith(compareByDescending<String> { it.length }.thenBy { it })) {
+            if (containsKeyword(lowercaseText, keyword, protectShortWords)) {
                 return keyword
             }
         }
         return null
     }
 
+    private fun containsKeyword(text: String, keyword: String, protectShortWords: Boolean): Boolean {
+        var start = text.indexOf(keyword)
+        while (start >= 0) {
+            val end = start + keyword.length
+            val requiresBoundary = protectShortWords && keyword.length <= 3
+            val beforeIsWord = start > 0 && text[start - 1].isLetterOrDigit()
+            val afterIsWord = end < text.length && text[end].isLetterOrDigit()
+            if (!requiresBoundary || (!beforeIsWord && !afterIsWord)) return true
+            start = text.indexOf(keyword, start + 1)
+        }
+        return false
+    }
+
     /**
      * Safely extract the host part from a URL-like string.
      */
     fun extractHost(text: String): String? {
-        var s = text.trim()
+        var s = text.trim().lowercase(Locale.ROOT)
         if (!s.startsWith("http://") && !s.startsWith("https://")) {
             s = "https://$s"
         }
@@ -319,5 +401,9 @@ class KeywordMatcher(private val repository: BlockRepository) {
 
     private fun isChromePackage(packageName: String): Boolean {
         return packageName in com.example.url_blocker.extractor.ContentExtractor.CHROME_PACKAGES
+    }
+
+    private fun isYouTubePackage(packageName: String): Boolean {
+        return packageName in com.example.url_blocker.extractor.ContentExtractor.YOUTUBE_PACKAGES
     }
 }

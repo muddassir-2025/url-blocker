@@ -140,7 +140,6 @@ private fun BlockOverlayScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                // Shield icon (using text as a simple substitute)
                 Text(
                     text = "🛡️",
                     fontSize = 64.sp
@@ -170,7 +169,6 @@ private fun BlockOverlayScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Show what was matched
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer,
                     shape = MaterialTheme.shapes.medium

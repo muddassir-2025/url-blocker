@@ -4,6 +4,9 @@
 
     <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE"
         tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="false"
@@ -15,9 +18,10 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Urlblocker">
 
-        <!-- Main launcher activity -->
+        <!-- Main activity — the only activity. Icon always visible on home screen. -->
+        <!-- Device Admin prevents uninstall. Password protects content. -->
         <activity
-            android:name=".MainActivity"
+            android:name=".LauncherActivity"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.Urlblocker"
@@ -51,6 +55,25 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- Protection Monitor Service (foreground service for auto-re-enable prompting) -->
+        <service
+            android:name=".service.ProtectionMonitorService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
+
+        <!-- Device Admin Receiver (adds uninstall friction) -->
+        <receiver
+            android:name=".receiver.DeviceAdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin_policies" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

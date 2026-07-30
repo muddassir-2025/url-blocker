@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- No policies are requested — this is purely identity-based admin
+         to add friction to uninstallation. The user must deactivate admin
+         before they can uninstall the app. -->
+</device-admin>

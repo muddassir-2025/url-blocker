@@ -1,0 +1,67 @@
+# URL Blocker manual test plan
+
+Run on a physical or emulator device with Chrome, the Google app, and the URL Blocker Accessibility Service enabled. Use a disposable test profile because Accessibility-based URL extraction varies by Android and Chrome version.
+
+## Protection and Chrome
+
+1. Open an allowed Chrome URL; it remains visible.
+2. Open a blocked keyword in the hostname, path, query, and fragment; each is blocked.
+3. Repeat a blocked URL with mixed case; it is blocked case-insensitively.
+4. Open YouTube home, then navigate to a video without a blocked URL term; it remains allowed.
+5. Navigate within YouTube without a full reload; a newly blocked URL is detected.
+6. Follow an allowed Google result into Chrome, then navigate to blocked content; Chrome monitoring continues.
+7. Leave Chrome while a blocked tab is present, return to Chrome, and confirm the same URL is evaluated again.
+8. Confirm an allowed URL containing a blocked-looking word only in a recommendation title is not blocked.
+
+## Google app
+
+1. Search an allowed term; results remain visible.
+2. Search a blocked term and confirm blocking occurs with the search bar focused.
+3. Search a blocked term, dismiss focus/keyboard, and confirm blocking still occurs without tapping the search bar.
+4. Search an allowed term whose result title contains a blocked word; confirm it is not blocked.
+5. Leave Google with blocked results visible, return, and confirm the query is evaluated again.
+6. Click an allowed result into Chrome and confirm Chrome URL monitoring takes over.
+7. Search a blocked term, submit it, and confirm blocking occurs before interacting with the search box again.
+8. From Google, open a YouTube result in an embedded/custom-tab surface. If an address-bar URL is exposed, confirm a blocked YouTube/Shorts rule is enforced; if no URL is exposed, record the diagnostic tree and treat this as an Android platform limitation rather than a passing block test.
+
+## YouTube app
+
+1. Open the YouTube app and play a video with a title that contains a blocked keyword (user or built-in); the video must be blocked and the overlay must appear.
+2. Play a Shorts video from the YouTube app while `shorts` is in a blocked-domain rule (or the video title matches a keyword); confirm the block occurs.
+3. Play an allowed video (no keyword matches); confirm it remains visible.
+4. Navigate between videos by swiping/tapping; confirm each transition is evaluated.
+5. Leave YouTube while a blocked video was detected, reopen YouTube, and confirm content is evaluated again.
+6. Confirm blocking occurs before the user can watch a full video (detection delay is at most 1-2 poll cycles; instant detection is not guaranteed by Android's accessibility framework).
+
+## YouTube via Custom Tab / embedded browser
+
+1. From Google Search, tap a YouTube result that opens inside the Google app (Custom Tab). If a URL bar is visible, confirm domain/keyword blocking works. If no URL bar is visible, check logs for DIAG/SIGNAL entries and record the outcome as a platform limitation.
+2. From a non-Chrome app (e.g., Reddit, Twitter), tap a YouTube link. If an external browser opens, Chrome monitoring applies. If an in-app browser opens without URL exposure, content-based blocking is not available.
+
+## Shorts detection
+
+1. Open youtube.com/shorts/... in Chrome; confirm the URL `shorts` in the path is checked by URL matching.
+2. Open the YouTube app and navigate to Shorts; confirm the "Shorts" accessibility label is detected and logged.
+3. Add a custom keyword `shorts`; confirm title-based blocking triggers on Shorts content in the YouTube app.
+
+## Rules and persistence
+
+1. Add, edit, and remove a custom keyword; removal requires confirmation.
+2. Expand/search the custom list and confirm every saved keyword is reachable.
+3. Add `example.com`; confirm `example.com` and `sub.example.com` block, while `notexample.com` does not.
+4. Restart the app, service, Chrome, and device; confirm rules remain.
+5. Confirm built-in rules are always active and cannot be edited or removed.
+
+## Blocking safety and service status
+
+1. When a block occurs, confirm the blocked page is not revealed after dismissing the blocking screen or pressing Back.
+2. Confirm repeated accessibility events do not launch duplicate overlays.
+3. Return to Chrome after blocking and confirm the blocked URL is blocked again without an infinite overlay loop.
+4. Disable the Accessibility Service externally; the dashboard must say `Protection Inactive` and offer `Restore Protection`.
+5. Re-enable the service and confirm the dashboard returns to `Protection Active`.
+
+## Limitations and managed-device investigation
+
+1. Verify normal Android Settings can uninstall the app; this is expected in normal mode.
+2. On a dedicated test device only, follow Android Device Owner provisioning documentation and verify any policy behavior before presenting it as protection.
+3. Confirm no URL, query, analytics event, account, or network upload is generated by the app.
