@@ -20,7 +20,8 @@ sealed class MatchResult {
 enum class MatchType {
     DOMAIN,
     BUILT_IN_KEYWORD,
-    USER_KEYWORD
+    USER_KEYWORD,
+    INCOGNITO
 }
 
 enum class MatchSource {
@@ -54,11 +55,12 @@ data class ContentSnapshot(
     val query: String?,
     val title: String?,
     val queryConfidence: QueryConfidence = QueryConfidence.NONE,
-    val querySource: QuerySource = QuerySource.NONE
+    val querySource: QuerySource = QuerySource.NONE,
+    val incognito: Boolean = false
 ) {
     // Generate an identity for deduplication
     fun toIdentityString(): String {
-        return "$packageName|${url ?: ""}|${query ?: ""}|${title ?: ""}"
+        return "$packageName|${url ?: ""}|${query ?: ""}|${title ?: ""}|incognito=$incognito"
     }
 }
 
@@ -92,6 +94,15 @@ class KeywordMatcher(private val repository: BlockRepository) {
      *   - Title is NOT used for blocking
      */
     fun check(snapshot: ContentSnapshot, packageName: String = snapshot.packageName): MatchResult {
+        // ── INCOGNITO MODE: block ALL Chrome browsing ─────────────────
+        // Permanent built-in protection (no user toggle): any strong incognito
+        // signal inside a Chrome package is blocked immediately, regardless of
+        // URL/content. This prevents bypassing the filter via private mode.
+        if (snapshot.incognito && isChromePackage(packageName)) {
+            Log.i(TAG, "INCOGNITO MODE DETECTED in $packageName — blocking all browsing")
+            return MatchResult.Blocked("Incognito browsing", MatchType.INCOGNITO, MatchSource.NONE)
+        }
+
         // ── CHROME PACKAGES: URL ONLY ──────────────────────────────────
         if (isChromePackage(packageName)) {
             return checkChrome(snapshot)
@@ -192,6 +203,20 @@ class KeywordMatcher(private val repository: BlockRepository) {
      * - YouTube has no URL bar, so URL extraction is not an alternative
      */
     private fun checkYouTube(snapshot: ContentSnapshot): MatchResult {
+        // 0. In-app browser URL (websites opened from inside the YouTube app).
+        //    When a link is tapped in a video description or comment, YouTube
+        //    renders the site in its own embedded browser — the package stays
+        //    YouTube, so the URL extracted by ContentExtractor must be checked
+        //    like any other website URL.
+        if (!snapshot.url.isNullOrBlank()) {
+            val urlRes = checkString(snapshot.url, isUrl = true)
+            if (urlRes is MatchResult.Blocked) {
+                val finalRes = urlRes.copy(matchSource = MatchSource.URL)
+                Log.i(TAG, buildBlockLog("YOUTUBE_INAPP_URL", snapshot.url, finalRes))
+                return finalRes
+            }
+        }
+
         // 1. Check video title (primary signal)
         if (!snapshot.title.isNullOrBlank()) {
             val titleRes = checkString(snapshot.title, isUrl = false)

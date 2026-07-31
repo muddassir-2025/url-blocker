@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">URL Blocker</string>
     <string name="accessibility_service_label">URL Blocker Service</string>
-    <string name="accessibility_service_description">Monitors Chrome and Google app to block adult content and blocked keywords/websites. All data stays on your device. No accounts, no cloud sync, no analytics.</string>
+    <string name="accessibility_service_description">Monitors Chrome and Google app to block adult content, blocked keywords/websites, and incognito browsing. All data stays on your device. No accounts, no cloud sync, no analytics.</string>
     <string name="protection_notification_channel_name">Protection Status</string>
     <string name="protection_notification_channel_desc">Shows whether URL blocking protection is active</string>
 </resources>

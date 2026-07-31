@@ -24,6 +24,23 @@ Run on a physical or emulator device with Chrome, the Google app, and the URL Bl
 7. Search a blocked term, submit it, and confirm blocking occurs before interacting with the search box again.
 8. From Google, open a YouTube result in an embedded/custom-tab surface. If an address-bar URL is exposed, confirm a blocked YouTube/Shorts rule is enforced; if no URL is exposed, record the diagnostic tree and treat this as an Android platform limitation rather than a passing block test.
 
+## Google app in-app browser (websites opened from search results)
+
+Logcat filter for these tests: `adb logcat -s GoogleAppUrlExtractor ContentExtractor UrlBlockerService`
+
+1. Open the Google app, search an allowed term, and tap a result (e.g. `youtube.com`). Confirm the site opens inside the Google app (package stays `com.google.android.googlequicksearchbox`).
+2. While the site is open, inspect Logcat. Expected outcomes:
+   - `GOOGLE_APP_WEBVIEW_NODE` — a WebView node is exposed.
+   - `GOOGLE_APP_CLOSE_DOMAIN_DETECTED domain=youtube.com` — the toolbar close button carries the domain (best case).
+   - `GOOGLE_APP_DOMAIN_CANDIDATE_BARE domain=youtube.com` — a bare-domain chip is visible (diagnostic only).
+   - `GOOGLE_APP_EXTRACT_RESULT inAppBrowserActive=true domain=youtube.com` — extraction succeeded.
+   If none of these appear, record the tree (the service's `GOOGLE_DIAGNOSTIC_*` lines) and treat this Google app version as not exposing the site identity — an Android platform limitation.
+3. Add `youtube.com` as a blocked website in the app (Websites tab). Open YouTube from Google search again inside the in-app browser; the overlay must appear. Remove `youtube.com` afterwards and confirm YouTube is allowed again (nothing hardcoded).
+4. Add a custom keyword, then open a site whose **URL** contains it (e.g. a site whose domain or path contains the keyword). If the in-app browser exposes an address bar (tap the domain chip), the full-URL keyword match must block; if no URL is exposed, record the limitation.
+5. From the in-app browser, perform a site-internal search (e.g. search a blocked keyword on YouTube). Confirm whether `GOOGLE_APP_*` logs show the URL or query. If only the page title is exposed (`... - YouTube`), the existing title rule (step 5b) may catch it; otherwise record that in-app website search queries are not filterable without URL/query exposure.
+6. Confirm the Google search-results page itself is never treated as a website: with no blocked domain/keyword, results remain visible and `GOOGLE_APP_EXTRACT_RESULT` reports `inAppBrowserActive=false`.
+7. Explicit Google search of a blocked keyword inside the Google app must still block (regression check — TEST 3).
+
 ## YouTube app
 
 1. Open the YouTube app and play a video with a title that contains a blocked keyword (user or built-in); the video must be blocked and the overlay must appear.

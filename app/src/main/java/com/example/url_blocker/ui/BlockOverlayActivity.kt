@@ -157,10 +157,10 @@ private fun BlockOverlayScreen(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 Text(
-                    text = if (blockedType == "DOMAIN") {
-                        "This website has been blocked"
-                    } else {
-                        "This content contains blocked keywords"
+                    text = when (blockedType) {
+                        "DOMAIN" -> "This website has been blocked"
+                        "INCOGNITO" -> "Incognito browsing is blocked"
+                        else -> "This content contains blocked keywords"
                     },
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

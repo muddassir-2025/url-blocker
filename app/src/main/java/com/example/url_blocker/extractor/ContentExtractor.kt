@@ -6,11 +6,15 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.example.url_blocker.matching.ContentSnapshot
 import com.example.url_blocker.matching.QueryConfidence
 import com.example.url_blocker.matching.QuerySource
+import java.util.Locale
 
 /**
  * Unified extractor for URLs, queries, and titles from Chrome and Google apps.
  */
 class ContentExtractor {
+
+    /** Extracts websites opened inside the Google app's in-app browser. */
+    private val googleAppUrlExtractor = GoogleAppUrlExtractor()
 
     companion object {
         private const val TAG = "ContentExtractor"
@@ -62,6 +66,111 @@ class ContentExtractor {
             "$GOOGLE_PACKAGE:id/search_src_text",
             "$GOOGLE_PACKAGE:id/search_box_text"
         )
+
+        /**
+         * Strong text phrases that only appear on Chrome's actual incognito
+         * new-tab page. Deliberately narrow so ordinary page text (e.g. an
+         * article merely discussing "incognito mode") never triggers a false
+         * block — the app's rule for Chrome is that page text is NEVER used to
+         * block, and incognito detection must respect that too.
+         */
+        val INCOGNITO_STRONG_TEXTS = listOf(
+            "you've gone incognito",
+            "you have gone incognito",
+            "now you can browse privately"
+        )
+
+        /** True when [text] contains a strong incognito-only phrase. */
+        fun matchesStrongIncognitoText(text: String): Boolean {
+            val lower = text.lowercase(Locale.ROOT)
+            return INCOGNITO_STRONG_TEXTS.any { lower.contains(it) }
+        }
+
+        // Pre-compiled patterns for isActiveIncognitoStateText — this runs on
+        // every node in the hot BFS during 500ms polling, so regex compilation
+        // must happen once, not per call.
+        private val ACTIVE_STATE_TAB_OR_WINDOW = Regex("incognito\\s+(tab|tabs|window|windows)\\b")
+        private val ACTIVE_STATE_TAB_OR_WINDOW_REV = Regex("\\b(tab|tabs|window|windows)\\s+incognito\\b")
+        private val ACTIVE_STATE_COUNT = Regex("incognito\\s*[,:]?\\s*\\d")
+        private val ACTIVE_STATE_COUNT_REV = Regex("\\d+\\s+incognito")
+        private val ACTIVE_STATE_OPEN_OFFER = Regex("open\\s+(a|an|a new|new)?\\s*incognito")
+
+        // Normal-mode offer markers for isIncognitoChromeIdentifier — matched
+        // against both underscore resource ids and CamelCase class names (see
+        // the helper). Hoisted so the hot BFS doesn't rebuild the list per node.
+        private val INCOGNITO_OFFER_MARKERS = listOf(
+            "toggle",
+            "model_selector", "mode_selector",
+            "modelselector", "modeselector", "tabmodelselector"
+        )
+
+        /**
+         * True when [text] describes an ACTIVE incognito session (a tab count,
+         * the tab-switcher chip, or a "Close Incognito tabs" action) rather
+         * than an OFFER to start incognito.
+         *
+         * This is the critical discriminator that keeps NORMAL Chrome from
+         * being blocked. Chrome's normal new-tab page and overflow menu expose
+         * the word "incognito" in offer contexts:
+         *   - NTP footer card: "You can also browse privately with Incognito mode"
+         *   - Shortcut tile: bare "Incognito"
+         *   - Tile action: "Open an Incognito window"
+         *   - Overflow menu item: "New Incognito tab"
+         *   - Tab switcher: "Switch to Incognito"
+         * None of those may ever trigger a block. Only wording that describes
+         * existing incognito state is trusted (e.g. "Incognito, 2 tabs",
+         * "2 Incognito tabs", "Close Incognito tabs", "Incognito tabs").
+         */
+        fun isActiveIncognitoStateText(text: String): Boolean {
+            val lower = text.lowercase(Locale.ROOT)
+            if (!lower.contains("incognito")) return false
+
+            // ── Normal-Chrome OFFER text: never match ──────────────────────
+            if (lower.contains("you can also")) return false                 // NTP footer card
+            if (lower.contains("switch to incognito")) return false          // tab-switcher offer
+            if (lower.startsWith("new incognito")) return false              // overflow menu item
+            if (ACTIVE_STATE_OPEN_OFFER.containsMatchIn(lower)) {
+                return false                                                  // tile action offers
+            }
+
+            // ── ACTIVE-state context markers ──────────────────────────────
+            val hasTabOrWindow =
+                ACTIVE_STATE_TAB_OR_WINDOW.containsMatchIn(lower) ||
+                    ACTIVE_STATE_TAB_OR_WINDOW_REV.containsMatchIn(lower)
+            val hasCount =
+                ACTIVE_STATE_COUNT.containsMatchIn(lower) ||
+                    ACTIVE_STATE_COUNT_REV.containsMatchIn(lower)
+            val hasClose = lower.contains("close incognito") || lower.contains("close all incognito")
+            return hasTabOrWindow || hasCount || hasClose
+        }
+
+        /**
+         * True when a node's resource id or class name marks it as Chrome's own
+         * incognito UI chrome (the incognito new-tab page view, incognito tab
+         * switcher, incognito NTP title, "Close Incognito tabs" button...).
+         *
+         * Web page content inside a WebView never carries Chrome resource ids
+         * or incognito-named class names, so this signal cannot be confused
+         * with article text — it detects the incognito state itself, even when
+         * Chrome doesn't expose the visible heading text. Views that exist in
+         * NORMAL Chrome too (the tab-switcher's "Incognito" toggle pill and
+         * tab-model selector) are explicitly excluded so opening the normal
+         * tab switcher never blocks.
+         */
+        fun isIncognitoChromeIdentifier(viewId: String?, className: String?): Boolean {
+            val id = viewId?.lowercase(Locale.ROOT) ?: ""
+            val cls = className?.lowercase(Locale.ROOT) ?: ""
+            if (!id.contains("incognito") && !cls.contains("incognito")) return false
+            val combined = "$id $cls"
+            // Normal-mode offers that merely mention incognito: the tab-switcher
+            // toggle pill and the tab-model selector exist when viewing NORMAL
+            // tabs too and must never block. Chromium uses BOTH underscore view
+            // ids (com.android.chrome:id/incognito_tab_model_selector) and
+            // CamelCase class names (org.chromium...IncognitoTabModelSelector), so
+            // match against the underscore-stripped form as well.
+            val compact = combined.replace("_", "")
+            return INCOGNITO_OFFER_MARKERS.none { combined.contains(it) || compact.contains(it) }
+        }
     }
 
     /**
@@ -93,7 +202,9 @@ class ContentExtractor {
                 query = queryFromTitle,
                 title = titleFromEvent,
                 queryConfidence = if (queryFromTitle != null) QueryConfidence.HIGH else QueryConfidence.NONE,
-                querySource = if (queryFromTitle != null) QuerySource.WINDOW_TITLE else QuerySource.NONE
+                querySource = if (queryFromTitle != null) QuerySource.WINDOW_TITLE else QuerySource.NONE,
+                incognito = packageName in CHROME_PACKAGES &&
+                    detectIncognitoMode(null, windowTitle, event)
             )
         }
 
@@ -115,9 +226,24 @@ class ContentExtractor {
             val queryFromSignals = if (extraSignals.isNotEmpty()) {
                 extraSignals.joinToString(" ")
             } else null
+
+            // YouTube's in-app browser: tapping a link in a video description or
+            // comment opens the site in an embedded WebView while the package stays
+            // YouTube. Reuse the embedded-browser extractor (address bar / close
+            // button domain) so those websites are detected like any other URL.
+            var ytUrl: String? = null
+            val ytInApp = googleAppUrlExtractor.extract(packageName, rootNode, windowTitle, event)
+            if (ytInApp.url != null) {
+                ytUrl = ytInApp.url
+                Log.i(TAG, "YOUTUBE_INAPP_URL_DETECTED url=$ytUrl")
+            } else if (ytInApp.domain != null) {
+                ytUrl = GoogleAppUrlExtractor.toDomainUrl(ytInApp.domain)
+                Log.i(TAG, "YOUTUBE_INAPP_DOMAIN_DETECTED domain=${ytInApp.domain} -> url=$ytUrl")
+            }
+
             return ContentSnapshot(
                 packageName = packageName,
-                url = null,  // No URL bar in YouTube app
+                url = ytUrl,  // null on normal YouTube screens (no in-app browser)
                 query = queryFromSignals,
                 title = title,
                 queryConfidence = if (queryFromSignals != null) QueryConfidence.MEDIUM else QueryConfidence.NONE,
@@ -255,10 +381,132 @@ class ContentExtractor {
             }
         }
 
+        // 6. IN-APP / EMBEDDED BROWSER URL (any package)
+        //    The Google app, YouTube, and third-party apps render websites in an
+        //    embedded WebView while the accessibility package stays the host app.
+        //    GoogleAppUrlExtractor only reports a URL/domain when a STRONG signal
+        //    exists (close-button domain, exposed address/editable bar), so running
+        //    it for every package cannot create false positives from ordinary app
+        //    UI or search-results pages.
+        val inApp = googleAppUrlExtractor.extract(packageName, rootNode, windowTitle, event)
+        // Guard with url == null: never clobber a URL already extracted from
+        // URL_BAR_IDS or the window title (steps 1/5a). Without this guard, a
+        // real full URL (with path/query) could be replaced by a bare-domain
+        // URL, breaking e.g. youtube.com/shorts path matching.
+        if (url == null && inApp.url != null) {
+            url = inApp.url
+            Log.i(TAG, "INAPP_URL_DETECTED pkg=$packageName url=$url")
+        } else if (url == null && inApp.domain != null) {
+            // A non-null domain implies an embedded browser is active (the
+            // extractor only reports it when a strong signal was found).
+            url = GoogleAppUrlExtractor.toDomainUrl(inApp.domain)
+            Log.i(TAG, "INAPP_DOMAIN_DETECTED pkg=$packageName domain=${inApp.domain} -> url=$url")
+        }
+
         if (title == null && !windowTitle.isNullOrBlank()) {
             title = windowTitle
         }
-        return ContentSnapshot(packageName, url, query, title, queryConfidence, querySource)
+        val incognito = packageName in CHROME_PACKAGES &&
+            detectIncognitoMode(rootNode, windowTitle, event)
+        return ContentSnapshot(packageName, url, query, title, queryConfidence, querySource, incognito)
+    }
+
+    /**
+     * Detect Chrome incognito / private browsing mode with a single-pass,
+     * early-exit BFS so it is cheap even during the 500ms polling loop.
+     *
+     * Multi-signal, WebView-aware:
+     *   1. STRONG NTP phrases ("You've gone incognito", "Now you can browse
+     *      privately") — trusted ANYWHERE (text or contentDescription, even
+     *      inside a WebView) because they occur only on the real incognito NTP.
+     *   2. ACTIVE-STATE chrome text/contentDescriptions (tab counter "Incognito,
+     *      2 tabs", tab-switcher chip "Incognito tabs", "Close Incognito tabs")
+     *      — trusted only OUTSIDE a WebView subtree (webpage image alt-text and
+     *      article text are also surfaced as description/text and live under a
+     *      WebView), and for descriptions only on nodes the user can see.
+     *   3. CHROME incognito UI chrome identified by resource id / class name
+     *      (isIncognitoChromeIdentifier) — detects the incognito state itself
+     *      even when Chrome doesn't expose the visible heading text.
+     *
+     * The offer-vs-state discriminator (isActiveIncognitoStateText) keeps NORMAL
+     * Chrome safe: the normal NTP footer ("You can also browse privately with
+     * Incognito mode"), the "Incognito" shortcut tile, "New Incognito tab" menu
+     * item and "Switch to Incognito" are all offers and never match. This
+     * respects the app's rule that Chrome page text is never used to block.
+     */
+    private fun detectIncognitoMode(
+        rootNode: AccessibilityNodeInfo?,
+        windowTitle: String?,
+        event: AccessibilityEvent?
+    ): Boolean {
+        // Cheap signals first.
+        if (windowTitle != null && matchesStrongIncognitoText(windowTitle)) {
+            Log.i(TAG, "INCOGNITO_DETECTED via window title: $windowTitle")
+            return true
+        }
+        event?.let {
+            extractFromEvent(it)?.let { e ->
+                if (matchesStrongIncognitoText(e)) {
+                    Log.i(TAG, "INCOGNITO_DETECTED via event text: $e")
+                    return true
+                }
+            }
+        }
+        if (rootNode == null) return false
+
+        // BFS carrying an "inside WebView" flag so web-page content (which lives
+        // under a WebView node) can never be mistaken for Chrome's own incognito
+        // UI chrome.
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Boolean>>()
+        queue.add(rootNode to false)
+        var depth = 0
+        while (queue.isNotEmpty() && depth < MAX_TRAVERSAL_DEPTH) {
+            val (node, insideWebView) = queue.removeFirst()
+            val className = node.className?.toString() ?: ""
+            val childInsideWebView = insideWebView || className.contains("WebView", ignoreCase = true)
+
+            val text = node.text?.toString()
+            val desc = node.contentDescription?.toString()
+
+            // 1. Strong NTP phrases match anywhere, including inside the WebView.
+            if (!text.isNullOrBlank() && matchesStrongIncognitoText(text)) {
+                Log.i(TAG, "INCOGNITO_DETECTED via strong text: $text")
+                return true
+            }
+            if (!desc.isNullOrBlank() && matchesStrongIncognitoText(desc)) {
+                Log.i(TAG, "INCOGNITO_DETECTED via strong description: $desc")
+                return true
+            }
+
+            // 2. Active-state chrome signals are trusted only outside WebView
+            //    subtrees, and only when the node is actually visible.
+            if (!childInsideWebView) {
+                val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
+                if (!text.isNullOrBlank() && visible && isActiveIncognitoStateText(text)) {
+                    Log.i(TAG, "INCOGNITO_DETECTED via active-state text: $text")
+                    return true
+                }
+                if (!desc.isNullOrBlank() && visible && isActiveIncognitoStateText(desc)) {
+                    Log.i(TAG, "INCOGNITO_DETECTED via active-state description: $desc")
+                    return true
+                }
+                // 3. Chrome's own incognito UI chrome (view id / class name).
+                //    Catches the incognito state even when Chrome doesn't expose
+                //    the NTP heading text to accessibility (the user's reported
+                //    gap: direct open of an incognito tab wasn't detected).
+                if (isIncognitoChromeIdentifier(node.viewIdResourceName, className)) {
+                    Log.i(TAG, "INCOGNITO_DETECTED via chrome view id/class: viewId=${node.viewIdResourceName} class=$className")
+                    return true
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                queue.add(child to childInsideWebView)
+            }
+            depth++
+        }
+        return false
     }
 
     /**
@@ -695,6 +943,31 @@ class ContentExtractor {
 
     fun isTargetPackage(packageName: String): Boolean {
         return packageName in CHROME_PACKAGES || packageName == GOOGLE_PACKAGE || packageName in YOUTUBE_PACKAGES
+    }
+
+    /**
+     * True when the active accessibility tree contains a WebView node, which
+     * indicates the foreground app may be rendering a website in an embedded
+     * browser (in-app browser). Used by the service to extend monitoring to
+     * non-target packages that show web content.
+     */
+    fun hasWebView(rootNode: AccessibilityNodeInfo?): Boolean {
+        if (rootNode == null) return false
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+        var depth = 0
+        while (queue.isNotEmpty() && depth < MAX_TRAVERSAL_DEPTH) {
+            val node = queue.removeFirst()
+            if (node.className?.toString()?.contains("WebView", ignoreCase = true) == true) {
+                return true
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                queue.add(child)
+            }
+            depth++
+        }
+        return false
     }
 
     fun isChromePackage(packageName: String): Boolean {

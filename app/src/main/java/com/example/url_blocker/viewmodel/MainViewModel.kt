@@ -100,10 +100,12 @@ class MainViewModel : ViewModel() {
     fun lockApp() {
         if (hasPassword) {
             isAppLocked = true
-        } else {
-            // No password yet — show lock screen in setup mode
-            appLockTriggered = true
         }
+        // NOTE: When no password is set, backgrounding the app must NOT trigger
+        // the password-setup screen. Otherwise every trip to another app/screen
+        // (e.g., Accessibility Settings to toggle protection) would hijack the
+        // dashboard with the "Set App Password" lock screen. Setup is triggered
+        // only explicitly from the App Lock card's "Set" button.
     }
 
     /** Unlock the app (used after password verified). */

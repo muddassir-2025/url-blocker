@@ -55,6 +55,12 @@ open class MainActivity : ComponentActivity() {
             }
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.checkHasPassword()
+                // Immediately re-read protection status when the user returns to
+                // the app (e.g., after toggling the Accessibility Service in
+                // Settings). Without this, the dashboard can keep showing a
+                // stale "Protection Inactive" until the next poll tick.
+                viewModel.checkAccessibilityStatus(this)
+                viewModel.checkDeviceAdminStatus(this)
             }
         })
 
@@ -77,12 +83,18 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
         viewModel.checkAccessibilityStatus(context)
     }
 
-    // Periodically check accessibility and device admin status
+    // Periodically check accessibility and device admin status.
+    // Wrapped in try/catch so a single failure can never silently kill the
+    // refresh loop and leave the dashboard stuck on a stale status.
     LaunchedEffect(Unit) {
         while (true) {
+            try {
+                viewModel.checkAccessibilityStatus(context)
+                viewModel.checkDeviceAdminStatus(context)
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "Status refresh failed: ${e.message}")
+            }
             kotlinx.coroutines.delay(3000)
-            viewModel.checkAccessibilityStatus(context)
-            viewModel.checkDeviceAdminStatus(context)
         }
     }
 

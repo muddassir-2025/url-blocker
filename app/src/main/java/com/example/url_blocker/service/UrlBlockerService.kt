@@ -9,6 +9,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.url_blocker.extractor.ContentExtractor
+import java.util.Locale
 import com.example.url_blocker.matching.ContentSnapshot
 import com.example.url_blocker.matching.KeywordMatcher
 import com.example.url_blocker.matching.MatchResult
@@ -35,8 +36,24 @@ class UrlBlockerService : AccessibilityService() {
         private const val TAG = "UrlBlockerService"
         private const val POLLING_INTERVAL_MS = 500L
         private const val GOOGLE_POLLING_INTERVAL_MS = 500L
+        // Embedded browsers (in-app WebViews in non-target apps) are monitored at
+        // a slower rate — full-tree scans of arbitrary apps are heavier, and a
+        // lower cadence keeps battery impact reasonable.
+        private const val EMBEDDED_POLLING_INTERVAL_MS = 1500L
         private const val GOOGLE_QUERY_CACHE_WINDOW_MS = 15_000L
         private const val SAFE_STATE_TIMEOUT_MS = 2500L
+        // After an incognito block is initiated, suppress further incognito
+        // re-blocks for this long. During the closing sequence (Back presses that
+        // keep changing the tree) and right after Chrome settles, incognito
+        // signals can still be present; without a lock the block would fire in a
+        // tight loop and the user could never reach normal Chrome.
+        private const val INCOGNITO_BLOCK_COOLDOWN_MS = 4000L
+        // Chrome may not have finished rendering the incognito UI when the window
+        // event fires, so a one-shot delayed re-scan is scheduled this long after
+        // the event to catch the rendered state.
+        private const val CHROME_DELAYED_SCAN_MS = 400L
+        // Throttle Chrome diagnostic tree dumps so they don't spam logcat.
+        private const val CHROME_DIAG_INTERVAL_MS = 2000L
         private const val OUR_PACKAGE = "com.example.url_blocker"
         private const val GOOGLE_PACKAGE = "com.google.android.googlequicksearchbox"
     }
@@ -51,6 +68,19 @@ class UrlBlockerService : AccessibilityService() {
     private var blockingState = BlockingState.NORMAL
     private var lastBlockedResult: MatchResult.Blocked? = null
     private var safeStateTimeoutJob: Job? = null
+
+    /**
+     * Timestamp until which INCOGNITO re-blocks are suppressed (loop guard).
+     * Set when an incognito block is initiated and checked before initiating
+     * another one. See [INCOGNITO_BLOCK_COOLDOWN_MS].
+     */
+    private var incognitoBlockCooldownUntil = 0L
+
+    /** Whether a one-shot delayed Chrome re-scan is already scheduled. */
+    private var chromeDelayedScanScheduled = false
+
+    /** Timestamp of the last Chrome diagnostic tree dump (throttle). */
+    private var lastChromeDiagTime = 0L
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var pollingJob: Job? = null
@@ -96,6 +126,7 @@ class UrlBlockerService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         Log.i(TAG, "UrlBlockerService connected and running")
+        Log.i(com.example.url_blocker.extractor.GoogleAppUrlExtractor.TAG, "Accessibility Service connected")
     }
 
     override fun onInterrupt() {
@@ -115,20 +146,38 @@ class UrlBlockerService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         val packageName = event.packageName?.toString() ?: return
 
-        // 1. Update foreground package tracking
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        // Debug: log every event for target packages so detection issues (why an
+        // incognito window was / wasn't caught) can be diagnosed from logcat.
+        if (contentExtractor.isTargetPackage(packageName)) {
+            Log.d(TAG, "ACCESSIBILITY_EVENT pkg=$packageName type=${eventTypeName(event.eventType)}")
+        }
+
+        // 1. Update foreground package tracking. Both window-level events are
+        //    treated as signals that the active Chrome window may have changed
+        //    (opening an incognito window/tab fires WINDOWS_CHANGED and/or
+        //    WINDOW_STATE_CHANGED), so they reset the dedup cache to force a
+        //    fresh evaluation on the next scan.
+        val isWindowEvent = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        if (isWindowEvent) {
             if (currentForegroundPackage == packageName && contentExtractor.isTargetPackage(packageName)) {
                 lastCheckedSnapshotId = null
                 if (packageName == GOOGLE_PACKAGE) forceGoogleReevaluate = true
             }
-            // For Chrome: when a new page loads (URL changes via window state),
-            // bypass the 500ms poll and evaluate immediately
-            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-                contentExtractor.isChromePackage(packageName) &&
+            // For Chrome: window events fire exactly when a new tab/window opens
+            // (including an incognito session). Inspect the tree immediately AND
+            // schedule a delayed re-scan (~400ms) — Chrome may not have finished
+            // rendering the incognito UI when the event arrives, so the first
+            // scan can run against a still-transitional tree. Only Chrome-owned
+            // events are considered, so chatty system/IME window changes are
+            // ignored here.
+            if (contentExtractor.isChromePackage(packageName) &&
                 currentForegroundPackage == packageName) {
                 serviceScope.launch {
                     evaluateCurrentState(packageName, event)
                 }
+                scheduleChromeDelayedScan(packageName)
+                maybeDumpChromeTree(packageName, event.eventType)
             }
             handlePackageChange(packageName)
         }
@@ -202,10 +251,16 @@ class UrlBlockerService : AccessibilityService() {
                 // ── YOUTUBE APP FOREGROUND ──────────────────────────────
                 lastCheckedSnapshotId = null
                 Log.i(TAG, "YOUTUBE_FOREGROUND_DETECTED")
+                // Restart polling at the fast cadence — an embedded-browser poll
+                // (1500ms) may still be active from the previous app.
+                stopPolling()
                 startPolling(newPackage)
             } else if (contentExtractor.isTargetPackage(newPackage)) {
                 // ── CHROME (or other target) FOREGROUND ──────────────────
                 lastCheckedSnapshotId = null
+                // Restart polling at the fast cadence — an embedded-browser poll
+                // (1500ms) may still be active from the previous app.
+                stopPolling()
                 startPolling(newPackage)
                 // Immediate scan — same as Google, don't wait 500ms for first poll
                 serviceScope.launch {
@@ -218,6 +273,33 @@ class UrlBlockerService : AccessibilityService() {
                 lastCheckedSnapshotId = null
                 blockingState = BlockingState.NORMAL
                 forceGoogleReevaluate = false
+                // Chrome is no longer foreground; a stale delayed re-scan would
+                // be a no-op anyway (it checks currentForegroundPackage), but
+                // reset the flag so a future Chrome session can schedule anew.
+                chromeDelayedScanScheduled = false
+
+                // Embedded-browser coverage: many apps (Twitter, Facebook, news,
+                // in-app browsers) render websites in a WebView while the package
+                // stays the host app. If the foreground app shows a WebView, treat
+                // it as a monitored target so blocked sites opened inside any app
+                // are still caught. ContentExtractor only extracts a URL when a
+                // strong in-app-browser signal exists, so this cannot cause false
+                // blocks on ordinary app UI.
+                val probeRoot = try { rootInActiveWindow } catch (e: Exception) { null }
+                if (probeRoot != null) {
+                    try {
+                        if (contentExtractor.hasWebView(probeRoot)) {
+                            Log.i(TAG, "EMBEDDED_BROWSER_DETECTED in $newPackage — monitoring in-app WebView")
+                            lastCheckedSnapshotId = null
+                            startPolling(newPackage, EMBEDDED_POLLING_INTERVAL_MS)
+                            serviceScope.launch {
+                                evaluateCurrentState(newPackage, null)
+                            }
+                        }
+                    } finally {
+                        try { probeRoot.recycle() } catch (e: Exception) {}
+                    }
+                }
             }
 
             currentForegroundPackage = newPackage
@@ -483,10 +565,10 @@ class UrlBlockerService : AccessibilityService() {
 
     // ── General Polling ────────────────────────────────────────────
 
-    private fun startPolling(packageName: String) {
+    private fun startPolling(packageName: String, intervalMs: Long = POLLING_INTERVAL_MS) {
         if (pollingJob?.isActive == true) return
 
-        Log.d(TAG, "Starting polling for $packageName")
+        Log.d(TAG, "Starting polling for $packageName (interval=${intervalMs}ms)")
         pollingJob = serviceScope.launch {
             while (isActive) {
                 val pkg = currentForegroundPackage ?: packageName
@@ -494,7 +576,7 @@ class UrlBlockerService : AccessibilityService() {
                             blockingState == BlockingState.WAITING_FOR_SAFE_STATE)) {
                     evaluateCurrentState(pkg, null)
                 }
-                delay(POLLING_INTERVAL_MS)
+                delay(intervalMs)
             }
         }
     }
@@ -533,13 +615,25 @@ class UrlBlockerService : AccessibilityService() {
                 null
             }
 
-            val extractedSnapshot = contentExtractor.extract(packageName, rootNode, event, windowTitle)
+            // Incognito detection is a permanent built-in feature: the scan
+            // always runs for Chrome packages.
+            val extractedSnapshot = contentExtractor.extract(
+                packageName, rootNode, event, windowTitle
+            )
             val snapshot = if (packageName == GOOGLE_PACKAGE) {
                 prepareGoogleSnapshot(extractedSnapshot)
             } else {
                 extractedSnapshot
             }
             val snapshotId = snapshot.toIdentityString()
+
+            // Debug: report the incognito verdict on every scan for Chrome so
+            // logcat shows exactly what was detected (or why nothing matched),
+            // including the active window id for multi-window Chrome sessions.
+            if (contentExtractor.isChromePackage(packageName)) {
+                val windowId = try { windows?.firstOrNull { it.isActive }?.id } catch (e: Exception) { null }
+                Log.d(TAG, "CHROME_SCAN pkg=$packageName winId=$windowId incognito=${snapshot.incognito} url=${snapshot.url ?: "null"} title=${snapshot.title ?: "null"} eventType=${event?.let { eventTypeName(it.eventType) } ?: "poll"}")
+            }
 
             // ── Determine if we should evaluate ─────────────────────────
             val shouldEvaluate = when {
@@ -559,10 +653,32 @@ class UrlBlockerService : AccessibilityService() {
             if (shouldEvaluate) {
                 when (blockingState) {
                     BlockingState.NORMAL -> {
-                        if (snapshot.url != null || snapshot.query != null || snapshot.title != null) {
+                        // incognito snapshots may carry no URL/query/title (e.g. the
+                        // incognito new-tab page), so evaluate them too.
+                        if (snapshot.url != null || snapshot.query != null ||
+                            snapshot.title != null || snapshot.incognito
+                        ) {
                             val result = keywordMatcher.check(snapshot, packageName)
 
                             if (result is MatchResult.Blocked) {
+                                // Loop guard: while the incognito cooldown is
+                                // active, ignore incognito blocks (the closing
+                                // sequence is still settling / Chrome may still
+                                // show incognito chrome while returning to a
+                                // normal tab). Normal URL/keyword blocks are NOT
+                                // affected by this guard.
+                                if (result.matchType == MatchType.INCOGNITO &&
+                                    System.currentTimeMillis() < incognitoBlockCooldownUntil
+                                ) {
+                                    Log.d(TAG, "INCOGNITO_BLOCK_SUPPRESSED (cooldown until $incognitoBlockCooldownUntil) — still settling after previous block")
+                                    // Clear the dedup cache so that once the cooldown
+                                    // expires the very next poll re-evaluates and
+                                    // re-blocks if the user is still in incognito
+                                    // (otherwise a static incognito tree would stay
+                                    // cached as "already checked" and never re-fire).
+                                    lastCheckedSnapshotId = null
+                                    return
+                                }
                                 Log.w(TAG, "BLOCK DETECTED in $packageName! Matched: ${result.matchedItem} (${result.matchType})")
                                 repository.addLogEntry("BLOCKED: ${result.matchedItem} in $packageName")
                                 lastBlockedResult = result
@@ -601,6 +717,98 @@ class UrlBlockerService : AccessibilityService() {
         null
     }
 
+    /** Human-readable name for an [AccessibilityEvent] type (for logcat). */
+    private fun eventTypeName(type: Int): String = when (type) {
+        AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "WINDOW_STATE_CHANGED"
+        AccessibilityEvent.TYPE_WINDOWS_CHANGED -> "WINDOWS_CHANGED"
+        AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> "WINDOW_CONTENT_CHANGED"
+        AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> "VIEW_TEXT_CHANGED"
+        AccessibilityEvent.TYPE_VIEW_FOCUSED -> "VIEW_FOCUSED"
+        AccessibilityEvent.TYPE_VIEW_CLICKED -> "VIEW_CLICKED"
+        AccessibilityEvent.TYPE_VIEW_SCROLLED -> "VIEW_SCROLLED"
+        else -> "EVENT_$type"
+    }
+
+    // ── Chrome Incognito: Delayed Re-scan & Diagnostics ─────────────
+
+    /**
+     * One-shot delayed re-scan of Chrome's tree ~400ms after a window event.
+     * Chrome can take a moment to render the incognito UI (new-tab heading,
+     * toolbar badge, incognito view ids), so the immediate scan can run against
+     * a still-transitional tree. This re-scan catches the rendered state and is
+     * the safety net that makes DIRECT incognito opens (three-dot menu, keyboard
+     * shortcut) detectable without relying on the tab switcher.
+     */
+    private fun scheduleChromeDelayedScan(packageName: String) {
+        if (chromeDelayedScanScheduled) return
+        chromeDelayedScanScheduled = true
+        serviceScope.launch {
+            delay(CHROME_DELAYED_SCAN_MS)
+            chromeDelayedScanScheduled = false
+            if (!isActive) return@launch
+            if (currentForegroundPackage == packageName && blockingState == BlockingState.NORMAL) {
+                Log.d(TAG, "CHROME_DELAYED_SCAN after window event for $packageName")
+                lastCheckedSnapshotId = null
+                evaluateCurrentState(packageName, null)
+            }
+        }
+    }
+
+    /**
+     * Throttled diagnostic dump of Chrome's accessibility tree, triggered on
+     * window events. Logs every informative node (text, contentDescription,
+     * view id, class name, visibility) and marks any that mention "incognito",
+     * so detection gaps can be diagnosed directly from logcat.
+     */
+    private fun maybeDumpChromeTree(packageName: String, eventType: Int) {
+        if (!contentExtractor.isChromePackage(packageName)) return
+        val now = System.currentTimeMillis()
+        if (now - lastChromeDiagTime < CHROME_DIAG_INTERVAL_MS) return
+        lastChromeDiagTime = now
+        val rootNode = try { rootInActiveWindow } catch (e: Exception) { null } ?: return
+        try {
+            diagnoseChromeTree(rootNode, eventType)
+        } finally {
+            try { rootNode.recycle() } catch (e: Exception) {}
+        }
+    }
+
+    private fun diagnoseChromeTree(rootNode: AccessibilityNodeInfo, eventType: Int) {
+        val windowId = try { windows?.firstOrNull { it.isActive }?.id } catch (e: Exception) { null }
+        Log.i(TAG, "CHROME_DIAG_START eventType=${eventTypeName(eventType)} winId=$windowId")
+        var nodeCount = 0
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+        var depth = 0
+        while (queue.isNotEmpty() && depth < 60 && nodeCount < 40) {
+            val node = queue.removeFirst()
+            val text = try { node.text?.toString() } catch (e: Exception) { null }
+            val desc = try { node.contentDescription?.toString() } catch (e: Exception) { null }
+            val viewId = try { node.viewIdResourceName } catch (e: Exception) { null }
+            val className = try { node.className?.toString() } catch (e: Exception) { null }
+            val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
+
+            if (text != null || desc != null || viewId != null) {
+                nodeCount++
+                val haystack = ((text ?: "") + " " + (desc ?: "") + " " + (viewId ?: "") + " " + (className ?: ""))
+                    .lowercase(Locale.ROOT)
+                val marker = if (haystack.contains("incognito")) " <<< INC" else ""
+                Log.i(TAG, "DIAG_CHROME_NODE#$nodeCount: cls=$className " +
+                        "text=${if (text != null) "\"$text\"" else "null"} " +
+                        "desc=${if (desc != null) "\"$desc\"" else "null"} " +
+                        "vid=$viewId " +
+                        "visible=$visible$marker")
+            }
+
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null }
+                if (child != null) queue.add(child)
+            }
+            depth++
+        }
+        Log.i(TAG, "CHROME_DIAG_END: scanned depth=$depth, logged=$nodeCount nodes")
+    }
+
     private fun prepareGoogleSnapshot(snapshot: ContentSnapshot): ContentSnapshot {
         val observedQuery = snapshot.query?.trim().orEmpty()
         if (observedQuery.isNotEmpty()) {
@@ -624,18 +832,22 @@ class UrlBlockerService : AccessibilityService() {
         val confirmedSafe = result is MatchResult.Allowed && when {
             contentExtractor.isChromePackage(packageName) -> !snapshot.url.isNullOrBlank()
             contentExtractor.isYouTubePackage(packageName) -> {
-                // YouTube safe state: title must be different from blocked content
-                // or null (navigated away from video). We can't check a URL bar
-                // because YouTube doesn't expose one.
+                // YouTube safe state: both the in-app-browser URL and the video
+                // title must differ from the blocked content (or be null,
+                // meaning the user navigated away from the blocked page/video).
                 val blockedItem = lastBlockedResult?.matchedItem?.lowercase()
                 if (blockedItem == null) {
                     // Defensive: if lastBlockedResult is somehow null, wait for
                     // the timeout fallback rather than prematurely declaring safe.
                     false
                 } else {
-                    snapshot.title?.lowercase()?.let { title ->
+                    val urlSafe = snapshot.url?.lowercase()?.let { url ->
+                        !url.contains(blockedItem)
+                    } ?: true // null url means the in-app browser was closed
+                    val titleSafe = snapshot.title?.lowercase()?.let { title ->
                         !title.contains(blockedItem)
                     } ?: true // null title means navigation away from the video
+                    urlSafe && titleSafe
                 }
             }
             else -> snapshot.url != null || (snapshot.query == null && snapshot.title != null)
@@ -659,6 +871,23 @@ class UrlBlockerService : AccessibilityService() {
     private fun initiateBlockingSequence(rootNode: AccessibilityNodeInfo, packageName: String) {
         Log.i(TAG, "BLOCKING STARTED for Target App: $packageName")
         blockingState = BlockingState.CLEARING_TARGET
+
+        if (lastBlockedResult?.matchType == MatchType.INCOGNITO) {
+            // Arm the cooldown BEFORE the closing sequence starts: the Back
+            // presses continuously change the tree, and without the lock the
+            // next scan (which may still see incognito chrome while Chrome
+            // settles) would re-initiate the block in a loop.
+            incognitoBlockCooldownUntil = System.currentTimeMillis() + INCOGNITO_BLOCK_COOLDOWN_MS
+            Log.i(TAG, "INCOGNITO_BLOCK_ARMED cooldownUntil=$incognitoBlockCooldownUntil")
+
+            // Incognito must be killed, not just navigated away from: press Back
+            // repeatedly to close the incognito tab(s), then go Home + overlay.
+            // We never reopen Chrome with a safe intent (that could restore the
+            // incognito session and loop), so this is a direct fast path.
+            Log.i(TAG, "INCOGNITO_BLOCK: closing incognito tabs and going Home")
+            closeIncognitoTabsAndBlock(packageName)
+            return
+        }
 
         if (packageName == GOOGLE_PACKAGE) {
             Log.i(TAG, "GOOGLE_SAFE_STATE_CLEAR_STARTED")
@@ -853,6 +1082,28 @@ class UrlBlockerService : AccessibilityService() {
     }
 
     /**
+     * Incognito fast path: press Back a few times to close the incognito
+     * tab(s) in Chrome, then transition to the block overlay + Home.
+     * Runs off the main thread so the presses can be spaced out.
+     */
+    private fun closeIncognitoTabsAndBlock(packageName: String) {
+        blockingState = BlockingState.CLEARING_TARGET
+        safeStateTimeoutJob?.cancel()
+        serviceScope.launch {
+            // Each Back in Chrome closes the topmost incognito tab. Repeat a few
+            // times to cover multiple open incognito tabs / pages.
+            repeat(4) {
+                if (!isActive) return@launch
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                delay(300L)
+            }
+            if (!isActive) return@launch
+            // Fall through to the overlay + Home.
+            transitionToHome(packageName)
+        }
+    }
+
+    /**
      * Clear a generic target app (Chrome).
      */
     private fun clearTargetApp(rootNode: AccessibilityNodeInfo, packageName: String) {
@@ -910,6 +1161,14 @@ class UrlBlockerService : AccessibilityService() {
 
     private fun navigateToSafeIntent(packageName: String) {
         try {
+            // Incognito blocks: never reopen Chrome via a safe intent — Chrome may
+            // restore the last session in an incognito tab, re-triggering the block
+            // and causing a loop. Go straight Home instead.
+            if (lastBlockedResult?.matchType == MatchType.INCOGNITO) {
+                Log.i(TAG, "INCOGNITO_SAFE_FALLBACK: going Home (skip safe intent)")
+                goToHome()
+                return
+            }
             if (contentExtractor.isYouTubePackage(packageName)) {
                 // YouTube app cannot open a URL via intent-setPackage (no browser capability).
                 // Navigate to Home instead.

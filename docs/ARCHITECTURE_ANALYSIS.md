@@ -127,3 +127,57 @@ Google-specific limitations are similar. An Accessibility Service can inspect te
 The service already receives `TYPE_WINDOW_CONTENT_CHANGED` and runs a 500 ms Google tree poll. The missed-search symptom came from extraction: after submission, Google can temporarily remove focus and expose the query in a non-editable search chip/container rather than an exact known ID or `EditText`. The extractor now checks semantic search IDs and search-like controls, continues to use window-title query extraction, and retains the last observed query for up to 15 seconds while the same Google foreground session is rebuilding its UI. The focus action remains only as a single last-resort attempt per session.
 
 The continuity cache is not a global blocking cooldown. It only preserves the current search state during a short UI rebuild window; a new Google foreground session clears it and performs a fresh extraction.
+
+## Google app in-app browser investigation
+
+### How websites open from the Google app
+
+When the user taps a Google Search result, the Google app
+(`com.google.android.googlequicksearchbox`) opens the page in its **own in-app
+browser** — a WebView/Chromium surface with a simplified toolbar (X close button,
+domain chip, share/menu). It does NOT hand the URL to Chrome, and the
+accessibility event package name **stays** `com.google.android.googlequicksearchbox`.
+This is why the Chrome URL-bar logic never fires: there is no
+`com.android.chrome:id/url_bar` node, and the `$GOOGLE_PACKAGE:id/url_bar` IDs
+used by some versions of the Google Custom-Tab toolbar are not present either.
+
+### What the AccessibilityService can see in that surface
+
+| Signal | Availability | Use for blocking |
+|--------|--------------|------------------|
+| Full URL in an address-bar `EditText` / `url_bar`-like node | Only when the address bar is expanded (user taps the domain chip) | YES — full URL keyword + domain matching |
+| Close-button `contentDescription` containing the domain (`"Close, youtube.com"`) | Usually present on the in-app browser toolbar, never on the search-results page | YES — reliable domain signal |
+| Bare-domain chip text (`"youtube.com"`) | Present, but the search-results page also renders a bare-domain label under every result | **Diagnostic only** (false-positive risk) |
+| WebView class node | Present when a web page is rendered (and, in some Google app versions, also on the search-results page itself) | Not used directly |
+| Window title | Becomes the page title (e.g. `YouTube`); search results keep `query - Google Search` | Log only (existing 5b title rule for `- YouTube` kept) |
+
+### Design of `GoogleAppUrlExtractor`
+
+- Dedicated extractor (modular; Chrome logic untouched).
+- Priority: (1) full URL from an address/editable control → (2) full-URL text
+  node only when the toolbar close-domain was already seen → (3) domain from the
+  close-button description.
+- **Anti-false-positive rule:** bare-domain text and WebView presence never drive
+  a blocking decision on their own — the search-results page would otherwise
+  false-positive (every result shows `youtube.com`). They are logged as
+  diagnostics (`GOOGLE_APP_DOMAIN_CANDIDATE_BARE`, `GOOGLE_APP_WEBVIEW_NODE`).
+- The extracted domain is converted into a URL (`https://youtube.com/`) and fed
+  through the existing `KeywordMatcher` URL path, so the **existing configurable
+  blocked-domain system** (Websites tab → `BlockRepository`) applies unchanged.
+  Nothing is hardcoded: block `youtube.com` and YouTube opened inside the Google
+  app is blocked; leave it out and YouTube remains allowed.
+- All steps are additive. Explicit Google search (query from search bar / window
+  title) is untouched, and the step-5b `- YouTube` title rule still runs first.
+
+### Honest limitations
+
+- The full URL of a page opened in the Google app's collapsed in-app browser is
+  generally **not** exposed; only the domain is. Keyword filtering on the full
+  URL therefore only works when the address bar is expanded or a `url_bar`-like
+  node is present.
+- In-app website search queries (e.g. a YouTube search) are only filterable when
+  the query is present in an exposed URL, in an accessible search input, or in a
+  `- YouTube`-style window title. The app does not scan arbitrary page text.
+- Whether the close-button description carries the domain varies by Google app
+  version/locale — the `GOOGLE_APP_CLOSE_DOMAIN_DETECTED` Logcat line reports
+  what is actually seen on the device.
