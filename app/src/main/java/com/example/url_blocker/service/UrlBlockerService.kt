@@ -1091,38 +1091,51 @@ class UrlBlockerService : AccessibilityService() {
     }
 
     /**
-     * Incognito fast path: close ALL incognito tabs via an adaptive Back
-     * sequence, then show the blocker overlay and return the user to NORMAL
-     * Chrome automatically.
+     * Incognito fast path: close ALL incognito tabs, then show the blocker
+     * overlay and return the user to NORMAL Chrome automatically.
      *
-     * The sequence re-scans Chrome's accessibility tree after every Back press
-     * and stops as soon as no incognito signals remain. Pressing Back a fixed
-     * number of times blindly is unsafe: the first press closes the incognito
-     * tab, but any extra presses would then close the user's NORMAL tabs (or
-     * exit Chrome entirely), leaving them on the launcher instead of in normal
-     * Chrome. If the sequence does exit Chrome, it is relaunched in normal mode
-     * so the user always lands back in normal Chrome. Runs off the main thread
-     * so the presses can be spaced out.
+     * Two strategies, in order:
+     *   1. Chrome's own "Close all Incognito tabs" affordance — clicked
+     *      directly when visible, or the tab switcher is opened first to reach
+     *      it. This closes every incognito tab at once (faster and more
+     *      reliable than one Back press per tab, since a Back press on a
+     *      webpage first walks back through its history).
+     *   2. An adaptive Back sequence that re-scans Chrome's tree after every
+     *      press and stops as soon as no incognito signals remain. Pressing
+     *      Back a fixed number of times blindly is unsafe: extra presses would
+     *      close the user's NORMAL tabs (or exit Chrome entirely), leaving them
+     *      on the launcher instead of in normal Chrome.
+     *
+     * If the sequence exits Chrome, it is relaunched in normal mode so the user
+     * always lands back in normal Chrome. Runs off the main thread so the
+     * actions can be spaced out.
      */
     private fun closeIncognitoTabsAndBlock(packageName: String) {
         blockingState = BlockingState.CLEARING_TARGET
         safeStateTimeoutJob?.cancel()
         serviceScope.launch {
-            for (i in 1..INCOGNITO_CLOSE_MAX_BACK_PRESSES) {
-                if (!isActive) return@launch
-                // Chrome left the foreground (the last Back closed the final tab
-                // and exited Chrome): the incognito session is gone, stop.
-                if (currentForegroundPackage != packageName) {
-                    Log.i(TAG, "INCOGNITO_CLOSE: Chrome left foreground after ${i - 1} press(es); incognito session gone")
-                    break
+            // Preferred: close ALL incognito tabs at once via Chrome's own UI.
+            val closedViaChromeUi = tryCloseAllIncognitoTabs(packageName)
+            if (closedViaChromeUi) {
+                Log.i(TAG, "INCOGNITO_CLOSE: closed all incognito tabs via Chrome UI")
+            } else {
+                Log.i(TAG, "INCOGNITO_CLOSE: close-all button not reachable — using adaptive Back sequence")
+                for (i in 1..INCOGNITO_CLOSE_MAX_BACK_PRESSES) {
+                    if (!isActive) return@launch
+                    // Chrome left the foreground (the last Back closed the final
+                    // tab and exited Chrome): the incognito session is gone.
+                    if (currentForegroundPackage != packageName) {
+                        Log.i(TAG, "INCOGNITO_CLOSE: Chrome left foreground after ${i - 1} press(es); incognito session gone")
+                        break
+                    }
+                    if (!isChromeStillIncognito(packageName)) {
+                        Log.i(TAG, "INCOGNITO_CLOSE: incognito cleared after ${i - 1} press(es)")
+                        break
+                    }
+                    Log.i(TAG, "INCOGNITO_CLOSE: back press #$i (still incognito)")
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
                 }
-                if (!isChromeStillIncognito(packageName)) {
-                    Log.i(TAG, "INCOGNITO_CLOSE: incognito cleared after ${i - 1} press(es)")
-                    break
-                }
-                Log.i(TAG, "INCOGNITO_CLOSE: back press #$i (still incognito)")
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
             }
             if (!isActive) return@launch
 
@@ -1130,10 +1143,10 @@ class UrlBlockerService : AccessibilityService() {
             // reports true on a null root, so after Chrome already exited this
             // would otherwise log a misleading "still incognito" message.
             if (currentForegroundPackage == packageName && isChromeStillIncognito(packageName)) {
-                Log.w(TAG, "INCOGNITO_CLOSE: still incognito after $INCOGNITO_CLOSE_MAX_BACK_PRESSES presses — falling back to overlay")
+                Log.w(TAG, "INCOGNITO_CLOSE: still incognito after all close attempts — falling back to overlay")
             }
 
-            // If the Back sequence closed Chrome itself, relaunch it in NORMAL
+            // If the close sequence closed Chrome itself, relaunch it in NORMAL
             // mode so it is ready behind the blocker. Incognito tabs are
             // ephemeral — they cannot survive a Chrome exit — so a fresh launch
             // always opens normal tabs. When Chrome is still foreground it
@@ -1147,6 +1160,142 @@ class UrlBlockerService : AccessibilityService() {
             // BlockOverlayActivity) — never back into incognito.
             transitionToHome(packageName)
         }
+    }
+
+    /**
+     * Try to close ALL incognito tabs at once via Chrome's own UI. Attempts:
+     *   1. Click a visible "Close all Incognito tabs" node in the current tree.
+     *   2. Otherwise click the tab-switcher button to open the tab overview and
+     *      look for the close-all button there (one retry).
+     * Returns true when the tree no longer shows incognito afterwards; false
+     * when the affordance couldn't be reached (the caller falls back to the
+     * adaptive Back sequence).
+     */
+    private suspend fun tryCloseAllIncognitoTabs(packageName: String): Boolean {
+        var attempts = 0
+        while (attempts < 2) {
+            attempts++
+            val rootNode = try { rootInActiveWindow } catch (e: Exception) { null } ?: return false
+            try {
+                val closeNode = findIncognitoCloseAllNode(rootNode)
+                if (closeNode != null) {
+                    val clicked = try {
+                        closeNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "INCOGNITO_CLOSE: close-all click failed: ${e.message}")
+                        false
+                    } finally {
+                        try { closeNode.recycle() } catch (e: Exception) {}
+                    }
+                    if (clicked) {
+                        Log.i(TAG, "INCOGNITO_CLOSE: clicked 'Close all Incognito tabs'")
+                        delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
+                        return !isChromeStillIncognito(packageName)
+                    }
+                }
+
+                // Not found / not clickable: open the tab switcher and retry.
+                val tabSwitcher = findTabSwitcherButton(rootNode)
+                if (tabSwitcher != null) {
+                    val clicked = try {
+                        tabSwitcher.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "INCOGNITO_CLOSE: tab-switcher click failed: ${e.message}")
+                        false
+                    } finally {
+                        try { tabSwitcher.recycle() } catch (e: Exception) {}
+                    }
+                    if (clicked) {
+                        Log.i(TAG, "INCOGNITO_CLOSE: opened tab switcher to reach close-all")
+                        delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
+                        continue
+                    }
+                }
+                return false
+            } finally {
+                try { rootNode.recycle() } catch (e: Exception) {}
+            }
+        }
+        return false
+    }
+
+    /**
+     * Find a node that is Chrome's "Close all Incognito tabs" action, matched
+     * by its text / content description or an incognito close-all view id.
+     * Prefers the clickable button over a plain text label (a label's
+     * ACTION_CLICK returns false, which just wastes one attempt).
+     */
+    private fun findIncognitoCloseAllNode(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(AccessibilityNodeInfo.obtain(rootNode))
+        var fallbackLabel: AccessibilityNodeInfo? = null
+        var depth = 0
+        while (queue.isNotEmpty() && depth < 60) {
+            val node = queue.removeFirst()
+            val text = try { node.text?.toString() } catch (e: Exception) { null }
+            val desc = try { node.contentDescription?.toString() } catch (e: Exception) { null }
+            val viewId = try { node.viewIdResourceName } catch (e: Exception) { null } ?: ""
+            val lowerText = ((text ?: "") + " " + (desc ?: "")).lowercase(Locale.ROOT)
+            val lowerId = viewId.lowercase(Locale.ROOT)
+            val isCloseAll = lowerText.contains("close all incognito") ||
+                lowerText.contains("close incognito tabs") ||
+                lowerId.contains("close_all_incognito") ||
+                lowerId.contains("close_incognito_tabs")
+            if (isCloseAll) {
+                val className = try { node.className?.toString() } catch (e: Exception) { null } ?: ""
+                val clickable = (try { node.isClickable } catch (e: Exception) { false }) ||
+                    className.contains("Button", ignoreCase = true)
+                if (clickable) {
+                    if (fallbackLabel != null) {
+                        try { fallbackLabel.recycle() } catch (e: Exception) {}
+                    }
+                    return node
+                }
+                // Remember the first plain label as a last resort.
+                if (fallbackLabel == null) {
+                    fallbackLabel = AccessibilityNodeInfo.obtain(node)
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            node.recycle()
+            depth++
+        }
+        return fallbackLabel
+    }
+
+    /** Find Chrome's visible tab-switcher (tab counter) button. */
+    private fun findTabSwitcherButton(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(AccessibilityNodeInfo.obtain(rootNode))
+        var depth = 0
+        while (queue.isNotEmpty() && depth < 60) {
+            val node = queue.removeFirst()
+            val desc = try { node.contentDescription?.toString() } catch (e: Exception) { null }
+            val viewId = try { node.viewIdResourceName } catch (e: Exception) { null } ?: ""
+            val lowerDesc = desc?.lowercase(Locale.ROOT) ?: ""
+            val lowerId = viewId.lowercase(Locale.ROOT)
+            val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
+            val isTabSwitcher = visible && (
+                lowerDesc.contains("tab switcher") ||
+                lowerDesc.contains("switch tabs") ||
+                Regex("\\d+\\s+tabs?").containsMatchIn(lowerDesc.trim()) ||
+                lowerId.contains("tab_switcher_button") ||
+                lowerId.contains("tab_counter") ||
+                lowerId.contains("tab_switcher_mode_buttons"))
+            if (isTabSwitcher) {
+                return node
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            node.recycle()
+            depth++
+        }
+        return null
     }
 
     /**
