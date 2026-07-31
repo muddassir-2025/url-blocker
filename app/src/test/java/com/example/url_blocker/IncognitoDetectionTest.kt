@@ -30,7 +30,9 @@ class IncognitoDetectionTest {
         assertFalse(ContentExtractor.matchesStrongIncognitoText("About 1,240,000 results"))
         assertFalse(ContentExtractor.matchesStrongIncognitoText("New Tab"))
         assertFalse(ContentExtractor.matchesStrongIncognitoText(""))
-    }    @Test
+    }
+
+    @Test
     fun normalNewTabPageFooterIsNotDetected() {
         // Regression test for a critical false positive: Chrome's normal
         // (non-incognito) new-tab page shows this footer as native, non-WebView
@@ -102,5 +104,36 @@ class IncognitoDetectionTest {
         assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_tab_model_selector", ""))
         assertFalse(ContentExtractor.isIncognitoChromeIdentifier("", "org.chromium.chrome.browser.tab_ui.IncognitoToggleTabLayout"))
         assertFalse(ContentExtractor.isIncognitoChromeIdentifier("", "org.chromium.chrome.browser.tabmodel.IncognitoTabModelSelector"))
+    }
+
+    @Test
+    fun overflowMenuIncognitoItemIsNeverDetected() {
+        // Chrome's ⋮ overflow menu exposes "New Incognito tab"/"New Incognito
+        // window" menu items whose resource ids contain both "incognito" and
+        // "menu". These are OFFERS, not an active session — opening the ⋮ menu
+        // must never trigger a block (the user's reported false positive). The
+        // protection lives in the precise signal rules (the "menu" offer marker
+        // and the startsWith "new incognito" rejection), NOT in a tree-wide
+        // menu state gate — such a gate matched Chrome's always-present
+        // AppMenuButton toolbar class and disabled ALL incognito detection.
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/menu_new_incognito_tab", "android.widget.ListMenuItemView"))
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/menu_new_incognito_window", "android.widget.ListMenuItemView"))
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/new_incognito_tab_menu_button", ""))
+        // And the menu item TEXT is rejected by the active-state discriminator.
+        assertFalse(ContentExtractor.isActiveIncognitoStateText("New Incognito tab"))
+        assertFalse(ContentExtractor.isActiveIncognitoStateText("New Incognito window"))
+        // Defense in depth: menu ids that omit the "menu" token are still offers.
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/new_incognito_tab", ""))
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/new_incognito_window", ""))
+    }
+
+    @Test
+    fun realIncognitoChromeIdsStillDetectedWithMenuMarker() {
+        // Adding the "menu" offer marker must not break detection of genuine
+        // incognito-only UI chrome (which never has "menu" in its id/class).
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_new_tab_page_title", "android.widget.TextView"))
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_tab_switcher", "android.widget.FrameLayout"))
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_close_all_button", ""))
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("", "org.chromium.chrome.browser.incognito.IncognitoNewTabPageView"))
     }
 }

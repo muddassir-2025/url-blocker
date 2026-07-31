@@ -48,6 +48,13 @@ class UrlBlockerService : AccessibilityService() {
         // signals can still be present; without a lock the block would fire in a
         // tight loop and the user could never reach normal Chrome.
         private const val INCOGNITO_BLOCK_COOLDOWN_MS = 4000L
+        // Adaptive Back sequence when closing incognito tabs: maximum number of
+        // Back presses, the pause between a press and the re-scan that checks
+        // whether Chrome is still showing incognito UI, and the pause before the
+        // overlay is shown when Chrome had to be relaunched in normal mode.
+        private const val INCOGNITO_CLOSE_MAX_BACK_PRESSES = 8
+        private const val INCOGNITO_CLOSE_SCAN_DELAY_MS = 400L
+        private const val INCOGNITO_CLOSE_RELAUNCH_SETTLE_MS = 400L
         // Chrome may not have finished rendering the incognito UI when the window
         // event fires, so a one-shot delayed re-scan is scheduled this long after
         // the event to catch the rendered state.
@@ -880,11 +887,13 @@ class UrlBlockerService : AccessibilityService() {
             incognitoBlockCooldownUntil = System.currentTimeMillis() + INCOGNITO_BLOCK_COOLDOWN_MS
             Log.i(TAG, "INCOGNITO_BLOCK_ARMED cooldownUntil=$incognitoBlockCooldownUntil")
 
-            // Incognito must be killed, not just navigated away from: press Back
-            // repeatedly to close the incognito tab(s), then go Home + overlay.
-            // We never reopen Chrome with a safe intent (that could restore the
-            // incognito session and loop), so this is a direct fast path.
-            Log.i(TAG, "INCOGNITO_BLOCK: closing incognito tabs and going Home")
+            // Incognito must be killed, not just navigated away from: the
+            // adaptive Back sequence closes ALL incognito tabs, then the overlay
+            // appears and the user is returned to NORMAL Chrome automatically.
+            // Chrome is only relaunched after incognito is confirmed closed
+            // (Chrome never restores an incognito session across an exit), and
+            // the cooldown suppresses any stray re-block while Chrome settles.
+            Log.i(TAG, "INCOGNITO_BLOCK: closing incognito tabs and returning to normal Chrome")
             closeIncognitoTabsAndBlock(packageName)
             return
         }
@@ -1082,24 +1091,92 @@ class UrlBlockerService : AccessibilityService() {
     }
 
     /**
-     * Incognito fast path: press Back a few times to close the incognito
-     * tab(s) in Chrome, then transition to the block overlay + Home.
-     * Runs off the main thread so the presses can be spaced out.
+     * Incognito fast path: close ALL incognito tabs via an adaptive Back
+     * sequence, then show the blocker overlay and return the user to NORMAL
+     * Chrome automatically.
+     *
+     * The sequence re-scans Chrome's accessibility tree after every Back press
+     * and stops as soon as no incognito signals remain. Pressing Back a fixed
+     * number of times blindly is unsafe: the first press closes the incognito
+     * tab, but any extra presses would then close the user's NORMAL tabs (or
+     * exit Chrome entirely), leaving them on the launcher instead of in normal
+     * Chrome. If the sequence does exit Chrome, it is relaunched in normal mode
+     * so the user always lands back in normal Chrome. Runs off the main thread
+     * so the presses can be spaced out.
      */
     private fun closeIncognitoTabsAndBlock(packageName: String) {
         blockingState = BlockingState.CLEARING_TARGET
         safeStateTimeoutJob?.cancel()
         serviceScope.launch {
-            // Each Back in Chrome closes the topmost incognito tab. Repeat a few
-            // times to cover multiple open incognito tabs / pages.
-            repeat(4) {
+            for (i in 1..INCOGNITO_CLOSE_MAX_BACK_PRESSES) {
                 if (!isActive) return@launch
+                // Chrome left the foreground (the last Back closed the final tab
+                // and exited Chrome): the incognito session is gone, stop.
+                if (currentForegroundPackage != packageName) {
+                    Log.i(TAG, "INCOGNITO_CLOSE: Chrome left foreground after ${i - 1} press(es); incognito session gone")
+                    break
+                }
+                if (!isChromeStillIncognito(packageName)) {
+                    Log.i(TAG, "INCOGNITO_CLOSE: incognito cleared after ${i - 1} press(es)")
+                    break
+                }
+                Log.i(TAG, "INCOGNITO_CLOSE: back press #$i (still incognito)")
                 performGlobalAction(GLOBAL_ACTION_BACK)
-                delay(300L)
+                delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
             }
             if (!isActive) return@launch
-            // Fall through to the overlay + Home.
+
+            // Only warn when Chrome is still foreground: the conservative re-scan
+            // reports true on a null root, so after Chrome already exited this
+            // would otherwise log a misleading "still incognito" message.
+            if (currentForegroundPackage == packageName && isChromeStillIncognito(packageName)) {
+                Log.w(TAG, "INCOGNITO_CLOSE: still incognito after $INCOGNITO_CLOSE_MAX_BACK_PRESSES presses — falling back to overlay")
+            }
+
+            // If the Back sequence closed Chrome itself, relaunch it in NORMAL
+            // mode so it is ready behind the blocker. Incognito tabs are
+            // ephemeral — they cannot survive a Chrome exit — so a fresh launch
+            // always opens normal tabs. When Chrome is still foreground it
+            // already shows normal tabs, so no relaunch is needed.
+            if (currentForegroundPackage != packageName) {
+                launchChromeNormal(packageName)
+                delay(INCOGNITO_CLOSE_RELAUNCH_SETTLE_MS)
+            }
+
+            // Blocker overlay on top. It exits to normal Chrome (see
+            // BlockOverlayActivity) — never back into incognito.
             transitionToHome(packageName)
+        }
+    }
+
+    /**
+     * Re-scan Chrome's tree and report whether it still shows incognito UI.
+     * Used by the adaptive Back sequence to decide when to stop pressing.
+     * Returns true (keep pressing) when the tree can't be read, so a
+     * mid-transition snapshot can't end the sequence prematurely.
+     */
+    private fun isChromeStillIncognito(packageName: String): Boolean {
+        val rootNode = try { rootInActiveWindow } catch (e: Exception) { null } ?: return true
+        return try {
+            val windowTitle = activeWindowTitle()
+            contentExtractor.extract(packageName, rootNode, null, windowTitle).incognito
+        } catch (e: Exception) {
+            Log.e(TAG, "INCOGNITO_CLOSE: re-scan failed: ${e.message}")
+            true
+        } finally {
+            try { rootNode.recycle() } catch (e: Exception) {}
+        }
+    }
+
+    /** Launch Chrome's main activity (normal mode) via its launcher intent. */
+    private fun launchChromeNormal(packageName: String) {
+        try {
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            startActivity(launchIntent)
+            Log.i(TAG, "INCOGNITO_CLOSE: relaunched Chrome in normal mode so the user returns to normal Chrome")
+        } catch (e: Exception) {
+            Log.e(TAG, "INCOGNITO_CLOSE: relaunch failed: ${e.message}")
         }
     }
 

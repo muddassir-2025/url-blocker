@@ -33,10 +33,13 @@ import kotlinx.coroutines.delay
  *   1. Immediately covers the blocked content
  *   2. Shows a blocking message
  *   3. Waits briefly for safe navigation to take effect
- *   4. Exits to Home, closing Chrome/Google in the process
+ *   4. Exits — to Home for content/keyword blocks, or to NORMAL Chrome for
+ *      incognito blocks (the service's adaptive Back sequence has already
+ *      closed every incognito tab, so the user lands back in normal Chrome
+ *      automatically)
  *
  * The user cannot dismiss this overlay to reveal the blocked content
- * underneath. It auto-navigates to Home.
+ * underneath. It auto-navigates to its destination.
  */
 class BlockOverlayActivity : ComponentActivity() {
 
@@ -44,6 +47,12 @@ class BlockOverlayActivity : ComponentActivity() {
         private const val TAG = "BlockOverlayActivity"
         private const val EXIT_DELAY_MS = 1500L
     }
+
+    /** Package to return to when [exitToChrome] is true (the Chrome variant). */
+    private var exitSourcePackage: String = ""
+
+    /** True for INCOGNITO blocks: exit to normal Chrome instead of Home. */
+    private var exitToChrome: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,6 +68,12 @@ class BlockOverlayActivity : ComponentActivity() {
         val blockedType = intent.getStringExtra("blocked_type") ?: "MATCHED"
         val sourcePackage = intent.getStringExtra("source_package") ?: ""
 
+        // Incognito blocks exit to NORMAL Chrome (the service's adaptive Back
+        // sequence has already closed all incognito tabs); every other block
+        // exits to Home as before.
+        exitSourcePackage = sourcePackage
+        exitToChrome = blockedType == "INCOGNITO"
+
         Log.i(TAG, "Block overlay shown: $blockedItem ($blockedType) from $sourcePackage")
 
         setContent {
@@ -66,15 +81,47 @@ class BlockOverlayActivity : ComponentActivity() {
                 BlockOverlayScreen(
                     blockedItem = blockedItem,
                     blockedType = blockedType,
-                    onDismiss = { exitToHome() }
+                    exitLabel = if (exitToChrome) "Return to Chrome" else "Return Home",
+                    statusText = if (exitToChrome) "Returning to Chrome..." else "Returning to Home screen...",
+                    onDismiss = { exitToDestination() }
                 )
             }
         }
 
-        // Auto-exit to Home after a brief delay
+        // Auto-exit to the destination after a brief delay
         Handler(Looper.getMainLooper()).postDelayed({
-            exitToHome()
+            exitToDestination()
         }, EXIT_DELAY_MS)
+    }
+
+    /**
+     * Where the user lands after the overlay: NORMAL Chrome for incognito
+     * blocks (the service has already closed every incognito tab), Home
+     * otherwise. Falls back to Home when Chrome can't be launched.
+     */
+    private fun exitToDestination() {
+        if (exitToChrome) {
+            val launchIntent = try {
+                packageManager.getLaunchIntentForPackage(exitSourcePackage)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to resolve Chrome: ${e.message}")
+                null
+            }
+            if (launchIntent != null) {
+                launchIntent.addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                )
+                try {
+                    startActivity(launchIntent)
+                    Log.i(TAG, "Exiting to normal Chrome ($exitSourcePackage)")
+                    finish()
+                    return
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to open Chrome: ${e.message}")
+                }
+            }
+        }
+        exitToHome()
     }
 
     private fun exitToHome() {
@@ -95,9 +142,9 @@ class BlockOverlayActivity : ComponentActivity() {
 
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
-        // Block back button - user cannot go back to the blocked content
-        // Instead, navigate to Home
-        exitToHome()
+        // Block back button - user cannot go back to the blocked content.
+        // Navigate to the destination (normal Chrome for incognito, Home otherwise).
+        exitToDestination()
     }
 
     @Deprecated("Suppress deprecated flag usage", ReplaceWith(""))
@@ -114,6 +161,8 @@ class BlockOverlayActivity : ComponentActivity() {
 private fun BlockOverlayScreen(
     blockedItem: String,
     blockedType: String,
+    exitLabel: String,
+    statusText: String,
     onDismiss: () -> Unit
 ) {
     var visible by remember { mutableStateOf(false) }
@@ -185,7 +234,7 @@ private fun BlockOverlayScreen(
                 Spacer(modifier = Modifier.height(32.dp))
 
                 Text(
-                    text = "Returning to Home screen...",
+                    text = statusText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -199,7 +248,7 @@ private fun BlockOverlayScreen(
                         containerColor = MaterialTheme.colorScheme.primary
                     )
                 ) {
-                    Text("Return Home")
+                    Text(exitLabel)
                 }
             }
         }

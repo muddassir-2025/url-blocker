@@ -98,8 +98,16 @@ class ContentExtractor {
         // Normal-mode offer markers for isIncognitoChromeIdentifier — matched
         // against both underscore resource ids and CamelCase class names (see
         // the helper). Hoisted so the hot BFS doesn't rebuild the list per node.
+        // "menu" excludes Chrome's overflow-menu items (e.g. "New Incognito tab"
+        // carries an incognito-named menu id) and "new_incognito" covers menu
+        // ids that omit the "menu" token (e.g. com.android.chrome:id/new_incognito_tab)
+        // — both are offers, not an active session. Real incognito-only chrome
+        // (incognito_new_tab_page_title, IncognitoNewTabPageView) never contains
+        // the "new_incognito" substring, so these markers cannot suppress it.
         private val INCOGNITO_OFFER_MARKERS = listOf(
             "toggle",
+            "menu",
+            "new_incognito",
             "model_selector", "mode_selector",
             "modelselector", "modeselector", "tabmodelselector"
         )
@@ -454,6 +462,25 @@ class ContentExtractor {
         }
         if (rootNode == null) return false
 
+        // NOTE: there is deliberately NO tree-wide "overflow menu open" state
+        // gate here. An earlier version scanned the whole tree for menu-like
+        // class names (AppMenu, MenuPopup, ListMenuItemView...) and suppressed
+        // the weak incognito signals while it believed the ⋮ menu was open.
+        // That broke detection completely: Chrome's toolbar overflow BUTTON
+        // class (org.chromium.chrome.browser.appmenu.AppMenuButton) is always
+        // present in the tree — normal AND incognito — so the gate was
+        // effectively always "menu open" and every weak incognito signal got
+        // suppressed. The three-dot-menu false positive is instead prevented
+        // by precise, deterministic rules inside the signals themselves:
+        //   - "New Incognito tab"/"New Incognito window" menu text is rejected
+        //     by isActiveIncognitoStateText (startsWith "new incognito").
+        //   - menu item view ids contain "menu" and are excluded by the
+        //     INCOGNITO_OFFER_MARKERS list in isIncognitoChromeIdentifier.
+        //   - the tab-switcher Incognito toggle / tab-model selector are
+        //     excluded by the toggle / model_selector markers.
+        // None of those rules can fire on a real incognito window, so detection
+        // stays live for shortcut and menu-driven opens alike.
+
         // BFS carrying an "inside WebView" flag so web-page content (which lives
         // under a WebView node) can never be mistaken for Chrome's own incognito
         // UI chrome.
@@ -468,7 +495,8 @@ class ContentExtractor {
             val text = node.text?.toString()
             val desc = node.contentDescription?.toString()
 
-            // 1. Strong NTP phrases match anywhere, including inside the WebView.
+            // 1. Strong NTP phrases match anywhere, including inside the WebView
+            //    (they occur only on the real incognito new-tab page).
             if (!text.isNullOrBlank() && matchesStrongIncognitoText(text)) {
                 Log.i(TAG, "INCOGNITO_DETECTED via strong text: $text")
                 return true
@@ -478,8 +506,9 @@ class ContentExtractor {
                 return true
             }
 
-            // 2. Active-state chrome signals are trusted only outside WebView
-            //    subtrees, and only when the node is actually visible.
+            // 2. Active-state chrome signals and 3. incognito chrome id/class are
+            //    trusted only outside WebView subtrees (webpage content can never
+            //    carry Chrome's own incognito UI identifiers).
             if (!childInsideWebView) {
                 val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
                 if (!text.isNullOrBlank() && visible && isActiveIncognitoStateText(text)) {
@@ -490,10 +519,10 @@ class ContentExtractor {
                     Log.i(TAG, "INCOGNITO_DETECTED via active-state description: $desc")
                     return true
                 }
-                // 3. Chrome's own incognito UI chrome (view id / class name).
-                //    Catches the incognito state even when Chrome doesn't expose
-                //    the NTP heading text to accessibility (the user's reported
-                //    gap: direct open of an incognito tab wasn't detected).
+                // Chrome's own incognito UI chrome (view id / class name).
+                // Catches the incognito state even when Chrome doesn't expose
+                // the NTP heading text to accessibility (the user's reported
+                // gap: direct open of an incognito tab wasn't detected).
                 if (isIncognitoChromeIdentifier(node.viewIdResourceName, className)) {
                     Log.i(TAG, "INCOGNITO_DETECTED via chrome view id/class: viewId=${node.viewIdResourceName} class=$className")
                     return true
