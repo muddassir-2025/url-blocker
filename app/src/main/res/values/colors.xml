@@ -2,4 +2,11 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- Quran Reminder Widget (light) -->
+    <color name="widget_bg">#F7F5F0</color>
+    <color name="widget_stroke">#E3DCCB</color>
+    <color name="widget_title">#4C6B58</color>
+    <color name="widget_verse_text">#2E2A24</color>
+    <color name="widget_ref">#6B6A66</color>
 </resources>

@@ -38,6 +38,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.url_blocker.quran.worker.QuranWorkScheduler
 import com.example.url_blocker.ui.theme.UrlblockerTheme
 import com.example.url_blocker.viewmodel.MainViewModel
 
@@ -45,6 +46,11 @@ open class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Quran Reminder: ensure the initial download + 6-hour refresh work is
+        // scheduled the first time the app opens (idempotent). The widget also
+        // schedules this on add, so the first verse is ready either way.
+        QuranWorkScheduler.ensureScheduled(this)
 
         // Lock the app when it goes to background
         // Use ViewModelProvider (not @Composable viewModel()) since we're in onCreate

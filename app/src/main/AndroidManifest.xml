@@ -7,6 +7,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"
@@ -41,6 +42,25 @@
             android:taskAffinity=""
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:windowSoftInputMode="stateAlwaysHidden" />
+
+        <!-- Quran Reminder: verse details opened from the home-screen widget -->
+        <activity
+            android:name=".quran.ui.QuranVerseActivity"
+            android:exported="false"
+            android:label="@string/widget_quran_reminder_title"
+            android:theme="@style/Theme.Urlblocker" />
+
+        <!-- Quran Reminder home-screen widget -->
+        <receiver
+            android:name=".quran.widget.QuranReminderWidgetProvider"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/quran_reminder_widget_info" />
+        </receiver>
 
         <!-- Accessibility Service -->
         <service

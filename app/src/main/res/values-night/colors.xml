@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Quran Reminder Widget (dark) -->
+    <color name="widget_bg">#1D211E</color>
+    <color name="widget_stroke">#343A35</color>
+    <color name="widget_title">#9DBCA9</color>
+    <color name="widget_verse_text">#E9E6DF</color>
+    <color name="widget_ref">#9AA29C</color>
+</resources>

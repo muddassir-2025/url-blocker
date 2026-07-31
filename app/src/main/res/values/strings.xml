@@ -4,4 +4,17 @@
     <string name="accessibility_service_description">Monitors Chrome and Google app to block adult content, blocked keywords/websites, and incognito browsing. All data stays on your device. No accounts, no cloud sync, no analytics.</string>
     <string name="protection_notification_channel_name">Protection Status</string>
     <string name="protection_notification_channel_desc">Shows whether URL blocking protection is active</string>
+
+    <!-- Quran Reminder Widget -->
+    <string name="widget_quran_reminder_title">Quran Reminder</string>
+    <string name="widget_quran_reminder_description">A daily English Quran verse to encourage reflection</string>
+    <string name="widget_quran_loading">Loading a verse…</string>
+    <string name="widget_quran_tap_to_load">Open the app once to download verses</string>
+    <string name="quran_verse_header">Quran Reminder</string>
+    <string name="quran_verse_loading">Loading verse…</string>
+    <string name="quran_verse_unavailable">Verses are being downloaded. Check back in a moment.</string>
+    <string name="quran_verse_new">New Verse</string>
+    <string name="quran_verse_surah">Surah %1$s</string>
+    <string name="quran_verse_reference">Quran %1$d:%2$d</string>
+    <string name="quran_verse_refresh_note">Refreshes automatically every 6 hours · works offline</string>
 </resources>
