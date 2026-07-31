@@ -54,7 +54,6 @@ class UrlBlockerService : AccessibilityService() {
         // overlay is shown when Chrome had to be relaunched in normal mode.
         private const val INCOGNITO_CLOSE_MAX_BACK_PRESSES = 8
         private const val INCOGNITO_CLOSE_SCAN_DELAY_MS = 400L
-        private const val INCOGNITO_CLOSE_RELAUNCH_SETTLE_MS = 400L
         // Chrome may not have finished rendering the incognito UI when the window
         // event fires, so a one-shot delayed re-scan is scheduled this long after
         // the event to catch the rendered state.
@@ -876,6 +875,15 @@ class UrlBlockerService : AccessibilityService() {
     // ── Blocking Sequence ──────────────────────────────────────────
 
     private fun initiateBlockingSequence(rootNode: AccessibilityNodeInfo, packageName: String) {
+        // Loop guard: only NORMAL may START a blocking sequence. The event
+        // handler, the delayed Chrome re-scan and the poll loop can all call
+        // evaluateCurrentState/forceEvaluateGoogle close together; without this
+        // guard two of them could each initiate a sequence and stack overlays
+        // (the reported "block shows multiple times").
+        if (blockingState != BlockingState.NORMAL) {
+            Log.d(TAG, "BLOCK_INITIATION_SKIPPED state=$blockingState (already blocking)")
+            return
+        }
         Log.i(TAG, "BLOCKING STARTED for Target App: $packageName")
         blockingState = BlockingState.CLEARING_TARGET
 
@@ -1091,8 +1099,11 @@ class UrlBlockerService : AccessibilityService() {
     }
 
     /**
-     * Incognito fast path: close ALL incognito tabs, then show the blocker
-     * overlay and return the user to NORMAL Chrome automatically.
+     * Incognito fast path (simple, clean behavior per user request):
+     * close ALL incognito tabs, then land on HOME. No block screen, no Chrome
+     * relaunch. The accessibility service keeps running, so the next time
+     * Chrome is opened, any still-present incognito session is detected and
+     * blocked again.
      *
      * Two strategies, in order:
      *   1. Chrome's own "Close all Incognito tabs" affordance — clicked
@@ -1103,12 +1114,9 @@ class UrlBlockerService : AccessibilityService() {
      *   2. An adaptive Back sequence that re-scans Chrome's tree after every
      *      press and stops as soon as no incognito signals remain. Pressing
      *      Back a fixed number of times blindly is unsafe: extra presses would
-     *      close the user's NORMAL tabs (or exit Chrome entirely), leaving them
-     *      on the launcher instead of in normal Chrome.
+     *      close the user's NORMAL tabs (or exit Chrome entirely).
      *
-     * If the sequence exits Chrome, it is relaunched in normal mode so the user
-     * always lands back in normal Chrome. Runs off the main thread so the
-     * actions can be spaced out.
+     * Runs off the main thread so the actions can be spaced out.
      */
     private fun closeIncognitoTabsAndBlock(packageName: String) {
         blockingState = BlockingState.CLEARING_TARGET
@@ -1139,26 +1147,32 @@ class UrlBlockerService : AccessibilityService() {
             }
             if (!isActive) return@launch
 
-            // Only warn when Chrome is still foreground: the conservative re-scan
-            // reports true on a null root, so after Chrome already exited this
-            // would otherwise log a misleading "still incognito" message.
+            // Re-arm the cooldown AFTER the closing sequence, not only at block
+            // INITIATION: a settle scan right after the presses can still see
+            // incognito chrome, and without the lock the next poll would
+            // re-block in a loop. Re-arming here covers the whole close +
+            // land-on-Home window.
+            incognitoBlockCooldownUntil = System.currentTimeMillis() + INCOGNITO_BLOCK_COOLDOWN_MS
+            Log.i(TAG, "INCOGNITO_COOLDOWN_REARMED after close until=$incognitoBlockCooldownUntil")
+
             if (currentForegroundPackage == packageName && isChromeStillIncognito(packageName)) {
-                Log.w(TAG, "INCOGNITO_CLOSE: still incognito after all close attempts — falling back to overlay")
+                // Close failed on this Chrome version — the session is still
+                // there in the background. Log it; the user lands on Home and
+                // the next Chrome open will be blocked again.
+                Log.w(TAG, "INCOGNITO_CLOSE: still incognito after all close attempts — next Chrome open will be blocked again")
             }
 
-            // If the close sequence closed Chrome itself, relaunch it in NORMAL
-            // mode so it is ready behind the blocker. Incognito tabs are
-            // ephemeral — they cannot survive a Chrome exit — so a fresh launch
-            // always opens normal tabs. When Chrome is still foreground it
-            // already shows normal tabs, so no relaunch is needed.
-            if (currentForegroundPackage != packageName) {
-                launchChromeNormal(packageName)
-                delay(INCOGNITO_CLOSE_RELAUNCH_SETTLE_MS)
-            }
-
-            // Blocker overlay on top. It exits to normal Chrome (see
-            // BlockOverlayActivity) — never back into incognito.
-            transitionToHome(packageName)
+            // Simple, clean: incognito tab closed → land on HOME. The service
+            // stays alive (accessibility remains enabled), so opening Chrome
+            // again re-enables monitoring. lastBlockedResult is cleared too:
+            // the old overlay round-trip used to clear it via OUR_PACKAGE
+            // handlePackageChange, which no longer runs for incognito — leaving
+            // a stale INCOGNITO result behind.
+            blockingState = BlockingState.NORMAL
+            lastCheckedSnapshotId = null
+            lastBlockedResult = null
+            goToHome()
+            Log.i(TAG, "INCOGNITO_CLOSE: closed incognito tabs — landed on Home")
         }
     }
 
@@ -1314,18 +1328,6 @@ class UrlBlockerService : AccessibilityService() {
             true
         } finally {
             try { rootNode.recycle() } catch (e: Exception) {}
-        }
-    }
-
-    /** Launch Chrome's main activity (normal mode) via its launcher intent. */
-    private fun launchChromeNormal(packageName: String) {
-        try {
-            val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            startActivity(launchIntent)
-            Log.i(TAG, "INCOGNITO_CLOSE: relaunched Chrome in normal mode so the user returns to normal Chrome")
-        } catch (e: Exception) {
-            Log.e(TAG, "INCOGNITO_CLOSE: relaunch failed: ${e.message}")
         }
     }
 

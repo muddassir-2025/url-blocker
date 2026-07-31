@@ -109,7 +109,17 @@ class ContentExtractor {
             "menu",
             "new_incognito",
             "model_selector", "mode_selector",
-            "modelselector", "modeselector", "tabmodelselector"
+            "modelselector", "modeselector", "tabmodelselector",
+            // Normal-Chrome NTP offers: the new-tab page shows an "Incognito"
+            // shortcut tile whose resource id mentions "incognito" but is an
+            // OFFER, not an active session — opening normal Chrome must never
+            // block. None of these appear in the genuine incognito-only ids
+            // (incognito_new_tab_page_title, incognito_tab_switcher,
+            // incognito_close_all_button, IncognitoNewTabPageView).
+            // NOTE: "ntp" is deliberately NOT a marker — a real incognito NTP
+            // id (e.g. com.android.chrome:id/incognito_ntp_*) could contain it
+            // and must keep matching.
+            "shortcut", "tile"
         )
 
         /**
@@ -425,8 +435,13 @@ class ContentExtractor {
      *
      * Multi-signal, WebView-aware:
      *   1. STRONG NTP phrases ("You've gone incognito", "Now you can browse
-     *      privately") — trusted ANYWHERE (text or contentDescription, even
-     *      inside a WebView) because they occur only on the real incognito NTP.
+     *      privately") — trusted only OUTSIDE a WebView subtree. The real
+     *      incognito NTP heading is NATIVE Chrome UI (its container carries the
+     *      incognito_new_tab_page_title view id / IncognitoNewTabPageView
+     *      class), so restricting to native nodes cannot suppress real
+     *      detection — while a NORMAL page that merely QUOTES the phrase
+     *      (e.g. an article explaining incognito mode) is WebView content and
+     *      must never cause a block.
      *   2. ACTIVE-STATE chrome text/contentDescriptions (tab counter "Incognito,
      *      2 tabs", tab-switcher chip "Incognito tabs", "Close Incognito tabs")
      *      — trusted only OUTSIDE a WebView subtree (webpage image alt-text and
@@ -447,19 +462,16 @@ class ContentExtractor {
         windowTitle: String?,
         event: AccessibilityEvent?
     ): Boolean {
-        // Cheap signals first.
-        if (windowTitle != null && matchesStrongIncognitoText(windowTitle)) {
-            Log.i(TAG, "INCOGNITO_DETECTED via window title: $windowTitle")
-            return true
-        }
-        event?.let {
-            extractFromEvent(it)?.let { e ->
-                if (matchesStrongIncognitoText(e)) {
-                    Log.i(TAG, "INCOGNITO_DETECTED via event text: $e")
-                    return true
-                }
-            }
-        }
+        // NOTE: the window title and event text are deliberately NOT trusted for
+        // strong-phrase matching. For NORMAL Chrome the active accessibility
+        // window title IS the page's <title>, and window-state events often carry
+        // it too — so an ordinary page/article whose title merely QUOTES a
+        // strong phrase (e.g. "You've gone incognito: what really happens to
+        // your data") would false-block normal Chrome when that page opens or
+        // is restored. The real incognito NTP never sets its window title to a
+        // strong phrase (it's "New Tab" / "Incognito"), so these checks are
+        // near-pure false-positive risk. Detection relies solely on the
+        // native (non-WebView) tree scan below.
         if (rootNode == null) return false
 
         // NOTE: there is deliberately NO tree-wide "overflow menu open" state
@@ -495,21 +507,26 @@ class ContentExtractor {
             val text = node.text?.toString()
             val desc = node.contentDescription?.toString()
 
-            // 1. Strong NTP phrases match anywhere, including inside the WebView
-            //    (they occur only on the real incognito new-tab page).
-            if (!text.isNullOrBlank() && matchesStrongIncognitoText(text)) {
-                Log.i(TAG, "INCOGNITO_DETECTED via strong text: $text")
-                return true
-            }
-            if (!desc.isNullOrBlank() && matchesStrongIncognitoText(desc)) {
-                Log.i(TAG, "INCOGNITO_DETECTED via strong description: $desc")
-                return true
-            }
-
-            // 2. Active-state chrome signals and 3. incognito chrome id/class are
-            //    trusted only outside WebView subtrees (webpage content can never
-            //    carry Chrome's own incognito UI identifiers).
+            // ALL signals (1. strong NTP phrases, 2. active-state text/desc,
+            // 3. incognito chrome id/class) are trusted ONLY outside WebView
+            // subtrees. Webpage content lives under a WebView node and is never
+            // Chrome's own incognito UI — a normal page that merely QUOTES
+            // "You've gone incognito" (e.g. an article explaining incognito
+            // mode) must never cause a block. The real incognito NTP heading is
+            // NATIVE Chrome UI (incognito_new_tab_page_title view id /
+            // IncognitoNewTabPageView class), so this cannot suppress real
+            // detection.
             if (!childInsideWebView) {
+                // 1. Strong NTP phrases ("You've gone incognito", ...).
+                if (!text.isNullOrBlank() && matchesStrongIncognitoText(text)) {
+                    Log.i(TAG, "INCOGNITO_DETECTED via strong text: $text")
+                    return true
+                }
+                if (!desc.isNullOrBlank() && matchesStrongIncognitoText(desc)) {
+                    Log.i(TAG, "INCOGNITO_DETECTED via strong description: $desc")
+                    return true
+                }
+
                 val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
                 if (!text.isNullOrBlank() && visible && isActiveIncognitoStateText(text)) {
                     Log.i(TAG, "INCOGNITO_DETECTED via active-state text: $text")

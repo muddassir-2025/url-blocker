@@ -107,6 +107,28 @@ class IncognitoDetectionTest {
     }
 
     @Test
+    fun normalNtpIncognitoShortcutTileIsNeverDetected() {
+        // Chrome's NORMAL new-tab page shows an "Incognito" shortcut tile whose
+        // resource id mentions "incognito" but is an OFFER, not an active
+        // session — opening normal Chrome must never block (the reported false
+        // positive when simply opening Chrome).
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_shortcut", ""))
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_tile", ""))
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_shortcut_tile", ""))
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_tile_button", ""))
+    }
+
+    @Test
+    fun realIncognitoIdsStillDetectedWithShortcutTileMarkers() {
+        // The added NTP offer markers (shortcut/tile) must not suppress genuine
+        // incognito-only ids.
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_new_tab_page_title", "android.widget.TextView"))
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_tab_switcher", "android.widget.FrameLayout"))
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_close_all_button", ""))
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("", "org.chromium.chrome.browser.incognito.IncognitoNewTabPageView"))
+    }
+
+    @Test
     fun overflowMenuIncognitoItemIsNeverDetected() {
         // Chrome's ⋮ overflow menu exposes "New Incognito tab"/"New Incognito
         // window" menu items whose resource ids contain both "incognito" and
