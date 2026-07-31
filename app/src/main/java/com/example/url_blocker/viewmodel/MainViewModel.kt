@@ -4,6 +4,7 @@ import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.provider.Settings
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -188,12 +189,58 @@ class MainViewModel : ViewModel() {
         context.startActivity(intent)
     }
 
-    // ── Device Admin (uninstall friction) ──────────────────────────
+    // ── Device Admin (uninstall friction) / Device Owner (true uninstall block) ──
+
+    var isDeviceOwner by mutableStateOf(false)
+        private set
+
+    var isUninstallBlocked by mutableStateOf(false)
+        private set
 
     fun checkDeviceAdminStatus(context: Context) {
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val component = ComponentName(context, com.example.url_blocker.receiver.DeviceAdminReceiver::class.java)
         isDeviceAdminEnabled = dpm.isAdminActive(component)
+        checkDeviceOwnerStatus(context)
+    }
+
+    /**
+     * Check if this app is a Device Owner (set via ADB).
+     * Device Owner status allows us to truly block uninstall.
+     */
+    private fun checkDeviceOwnerStatus(context: Context) {
+        try {
+            val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                isDeviceOwner = dpm.isDeviceOwnerApp(context.packageName)
+                if (isDeviceOwner) {
+                    val component = ComponentName(context, com.example.url_blocker.receiver.DeviceAdminReceiver::class.java)
+                    isUninstallBlocked = try {
+                        // setUninstallBlocked doesn't have a getter, so we infer from admin status + owner
+                        dpm.isAdminActive(component) && isDeviceOwner
+                    } catch (e: Exception) {
+                        false
+                    }
+                } else {
+                    isUninstallBlocked = false
+                }
+            } else {
+                isDeviceOwner = false
+                isUninstallBlocked = false
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainViewModel", "Failed to check Device Owner: ${e.message}")
+            isDeviceOwner = false
+            isUninstallBlocked = false
+        }
+    }
+
+    /**
+     * Show ADB setup instructions for Device Owner.
+     * Returns the ADB command to run.
+     */
+    fun getDeviceOwnerAdbCommand(): String {
+        return "adb shell dpm set-device-owner com.example.url_blocker/.receiver.DeviceAdminReceiver"
     }
 
     /**

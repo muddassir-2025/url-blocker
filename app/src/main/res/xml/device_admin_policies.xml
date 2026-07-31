@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- No policies are requested — this is purely identity-based admin
-         to add friction to uninstallation. The user must deactivate admin
-         before they can uninstall the app. -->
+    <!-- Used by Device Admin to add uninstall friction (must deactivate before uninstall) -->
+    <!-- Used by Device Owner (via ADB setup) to truly block uninstall via setUninstallBlocked() -->
+    <uses-policies>
+        <disable-uninstall />
+    </uses-policies>
 </device-admin>
