@@ -20,6 +20,20 @@ class BlockRepository(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_STRICT_MODE, value).apply()
 
     /**
+     * Whether the tab-restricted gender terms (woman, man, girl, ...) also block
+     * on ALL Google app search tabs (not just Images/Videos).
+     *
+     * The Google app never exposes the active search tab to accessibility (the
+     * tab chips carry no selected state and chip taps produce empty events), so
+     * tab-aware blocking cannot work there. When enabled, these words block on
+     * every Google app search tab. Chrome is unaffected — it keeps its URL-based
+     * tab detection (Images/Videos only).
+     */
+    var blockGenderTermsInGoogleApp: Boolean
+        get() = prefs.getBoolean(KEY_BLOCK_GENDER_GOOGLE_APP, false)
+        set(value) = prefs.edit().putBoolean(KEY_BLOCK_GENDER_GOOGLE_APP, value).apply()
+
+    /**
      * Built-in protected keywords — always active, hidden from the user, not editable.
      * When Strict Mode is enabled, additional broad keywords are included.
      * These cover broad adult-content and explicit-content filtering across 8 categories.
@@ -29,6 +43,9 @@ class BlockRepository(context: Context) {
             val base = ADULT_KEYWORDS_BY_CATEGORY.values.flatten().toMutableSet()
             if (isStrictMode) {
                 base.addAll(STRICT_MODE_KEYWORDS)
+                // Tab-restricted gender terms are part of Strict Mode but only
+                // block inside Google's Images/Videos tabs (see KeywordMatcher).
+                base.addAll(TAB_RESTRICTED_KEYWORDS)
             }
             return base
         }
@@ -158,6 +175,7 @@ class BlockRepository(context: Context) {
         private const val KEY_BLOCKED_DOMAINS = "blocked_domains"
         private const val KEY_APP_PASSWORD = "app_password"
         private const val KEY_STRICT_MODE = "strict_mode"
+        private const val KEY_BLOCK_GENDER_GOOGLE_APP = "block_gender_google_app"
         private const val MAX_LOG_ENTRIES = 100
 
         /**
@@ -2009,24 +2027,9 @@ class BlockRepository(context: Context) {
 
         val STRICT_MODE_KEYWORDS: Set<String> = linkedSetOf(
 
-            // ────────────────────────────────────────────────────────────────────
-            // Broad gender / people terms
-            // ────────────────────────────────────────────────────────────────────
-
-            "woman",
-            "women",
-            "girl",
-            "girls",
-            "female",
-            "females",
-            "lady",
-            "ladies",
-            "man",
-            "men",
-            "boy",
-            "boys",
-            "male",
-            "males",
+            // NOTE: the broad gender / people terms (woman, man, girl, ...) live
+            // in TAB_RESTRICTED_KEYWORDS, not here. They are part of Strict Mode
+            // but only block inside Google's Images/Videos tabs.
 
             // ────────────────────────────────────────────────────────────────────
             // Appearance
@@ -2231,6 +2234,48 @@ class BlockRepository(context: Context) {
             "leaked photos",
             "leaked pictures",
             "leaked videos"
+        )
+
+        /**
+         * Broad gender / people terms from [STRICT_MODE_KEYWORDS] that are
+         * CONTEXT-RESTRICTED.
+         *
+         * KeywordMatcher keeps these active ONLY inside Google's Videos and
+         * Images tabs. They are filtered out everywhere else — Google's All /
+         * News / Shopping tabs, Chrome websites, and embedded in-app browsers —
+         * so ordinary searches and web pages using these everyday words are not
+         * blocked. YouTube keeps blocking them (video titles are matched with
+         * the full strict set).
+         */
+        val TAB_RESTRICTED_KEYWORDS: Set<String> = linkedSetOf(
+
+            "woman",
+
+            "women",
+
+            "girl",
+
+            "girls",
+
+            "female",
+
+            "females",
+
+            "lady",
+
+            "ladies",
+
+            "man",
+
+            "men",
+
+            "boy",
+
+            "boys",
+
+            "male",
+
+            "males"
         )
 
 

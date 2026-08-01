@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- WebView DOM content (e.g. the Google app's All/Images/Videos tab bar) is only
+     exposed to accessibility services that declare touch-exploration capability.
+     The WebView container node appears either way, but without this its HTML
+     children — the tab chips — are invisible to our scan. We only declare the
+     capability; we never call requestTouchExplorationMode(), so no touch-
+     exploration dialog or behavior is triggered for the user. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged|typeViewTextChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged|typeViewTextChanged|typeViewSelected|typeViewClicked"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
     android:canRetrieveWindowContent="true"
-    android:canRequestTouchExplorationMode="false"
+    android:canRequestTouchExplorationMode="true"
     android:canPerformGestures="false"
     android:notificationTimeout="100"
     android:description="@string/accessibility_service_description" />

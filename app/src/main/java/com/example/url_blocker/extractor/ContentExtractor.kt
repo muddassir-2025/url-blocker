@@ -39,6 +39,17 @@ class ContentExtractor {
         private const val MIN_URL_LENGTH = 4
         private const val MIN_QUERY_LENGTH = 2
 
+        // The Google app's results page nests its WebView — and thus the tab
+        // chips — extremely deep in the accessibility tree. On-device evidence:
+        // after enabling touch-exploration capability, the "All" tab chip is
+        // exposed as a WebView HTML element (class=android.view.View) at depth
+        // 99, with the other chips at or just beyond that depth. The shared
+        // MAX_TRAVERSAL_DEPTH=50 silently missed them entirely. The chip scan
+        // therefore gets its own much deeper limit plus a node budget so the
+        // 500ms polling loop stays bounded on large WebView subtrees.
+        private const val CHIP_SCAN_MAX_DEPTH = 150
+        private const val CHIP_SCAN_NODE_BUDGET = 2000
+
         // Known URL bar IDs (Chrome + Google Custom Tabs)
         private val URL_BAR_IDS = setOf(
             "com.android.chrome:id/url_bar",
@@ -58,9 +69,15 @@ class ContentExtractor {
             "$GOOGLE_PACKAGE:id/location_bar"
         )
 
-        // Known Search bar IDs (Google App)
+        // Known Search bar IDs (Google App). "googleapp_srp_*" are the search
+        // results page (srp) search box ids — observed on the user's device as
+        // googleapp_srp_search_box_text carrying the active query "women".
+        // Listing them here extracts the query with HIGH confidence instead of
+        // relying on the broader semantic scan.
         private val SEARCH_BAR_IDS = setOf(
             "$GOOGLE_PACKAGE:id/googleapp_search_box",
+            "$GOOGLE_PACKAGE:id/googleapp_srp_search_box",
+            "$GOOGLE_PACKAGE:id/googleapp_srp_search_box_text",
             "$GOOGLE_PACKAGE:id/search_box",
             "$GOOGLE_PACKAGE:id/omnibox",
             "$GOOGLE_PACKAGE:id/search_src_text",
@@ -119,7 +136,16 @@ class ContentExtractor {
             // NOTE: "ntp" is deliberately NOT a marker — a real incognito NTP
             // id (e.g. com.android.chrome:id/incognito_ntp_*) could contain it
             // and must keep matching.
-            "shortcut", "tile"
+            "shortcut", "tile",
+            // NORMAL Chrome's new-tab page shows a floating action button
+            // (com.android.chrome:id/incognito_button, desc "New Incognito
+            // tab") to OPEN incognito — an OFFER, not an active session
+            // (observed on-device as a false positive: simply opening normal
+            // Chrome blocked). Real incognito-only ids (incognito_new_tab_page_title,
+            // incognito_tab_switcher, incognito_close_all_button,
+            // IncognitoNewTabPageView) never contain this substring, so it
+            // cannot suppress real detection.
+            "incognito_button"
         )
 
         /**
@@ -188,6 +214,106 @@ class ContentExtractor {
             // match against the underscore-stripped form as well.
             val compact = combined.replace("_", "")
             return INCOGNITO_OFFER_MARKERS.none { combined.contains(it) || compact.contains(it) }
+        }
+
+        // udm layout-code parameter matchers. Raw form: &udm=2& / ?udm=2&
+        // Encoded form (Chrome may URL-encode the separator): udm%3D2%26
+        private val UDM_RAW = Regex("""(?:^|[?&])udm=(\d+)(?:&|$)""")
+        private val UDM_ENCODED = Regex("""(?:^|[?&])udm%3D(\d+)(?:&|%26|$)""")
+
+        /**
+         * Map a Google tab chip label (as exposed by the accessibility tree)
+         * to a canonical tab name, or null when the label is not a Google tab.
+         * Handles the tab names used by both the Google app and Chrome.
+         */
+        fun googleTabFromLabel(label: String?): String? {
+            if (label.isNullOrBlank()) return null
+            return when (label.trim().lowercase(Locale.ROOT)) {
+                "all" -> "All"
+                "images" -> "Images"
+                "videos" -> "Videos"
+                "news" -> "News"
+                "shopping" -> "Shopping"
+                "books" -> "Books"
+                "finance" -> "Finance"
+                else -> null
+            }
+        }
+
+        /**
+         * Returns the Google search tab name ("Images", "Videos", "News",
+         * "Shopping") from a search URL, or null when the URL is not a
+         * tabbed Google search.
+         *
+         * Detects both the legacy `tbm` verticals (tbm=isch / tbm=vid / ...)
+         * and Google's newer `udm` layout codes, which Chrome's mobile Google
+         * search uses (e.g. udm=2 = Images, udm=7/39 = Videos).
+         */
+        fun googleTabFromUrl(url: String?): String? {
+            if (url.isNullOrBlank()) return null
+
+            // Legacy tbm verticals first.
+            val tbmTab = when {
+                url.contains("tbm=isch") || url.contains("tbm%3Disch") -> "Images"
+                url.contains("tbm=vid") || url.contains("tbm%3Dvid") -> "Videos"
+                url.contains("tbm=nws") || url.contains("tbm%3Dnws") -> "News"
+                url.contains("tbm=shop") || url.contains("tbm%3Dshop") -> "Shopping"
+                else -> null
+            }
+            if (tbmTab != null) return tbmTab
+
+            // Newer udm layout codes (match the parameter value with proper
+            // boundaries so e.g. udm=28 cannot be mistaken for udm=2).
+            val udm = UDM_RAW.find(url)?.groupValues?.get(1)
+                ?: UDM_ENCODED.find(url)?.groupValues?.get(1)
+            return when (udm) {
+                "2" -> "Images"
+                "7", "39" -> "Videos"
+                "12" -> "News"
+                "28", "37" -> "Shopping"
+                else -> null
+            }
+        }
+
+        /**
+         * True when a URL belongs to any YouTube domain (youtube.com,
+         * m.youtube.com, www.youtube.com, music.youtube.com, ...).
+         */
+        fun isYouTubeDomain(url: String?): Boolean {
+            if (url.isNullOrBlank()) return false
+            val host = GoogleAppUrlExtractor.extractDomainFromUrl(url) ?: return false
+            return host == "youtube.com" || host.endsWith(".youtube.com")
+        }
+
+        /**
+         * Extract the video title from a Chrome window title on a YouTube page.
+         *
+         * Chrome prefixes its accessibility window title with "Chrome: " and
+         * YouTube appends " - YouTube", e.g.
+         *   "Chrome: American Doctor SHOCKED By Foreign Sex Ed Videos - YouTube"
+         * -> "American Doctor SHOCKED By Foreign Sex Ed Videos"
+         *
+         * Returns null when the title is not a video title (YouTube UI screens
+         * like the home feed, Shorts, Subscriptions, ...).
+         */
+        fun youtubeTitleFromChromeWindowTitle(title: String?): String? {
+            if (title.isNullOrBlank()) return null
+            var t = title.trim()
+            if (t.startsWith("Chrome:", ignoreCase = true)) {
+                t = t.substringAfter(":").trim()
+            }
+            if (!t.endsWith(" - YouTube", ignoreCase = true)) return null
+            t = t.substring(0, t.length - " - YouTube".length).trim()
+            if (t.isBlank() || t.length > 200) return null
+            // YouTube UI screens that are not videos.
+            if (t.lowercase(Locale.ROOT) in setOf(
+                    "youtube", "shorts", "home", "subscriptions", "history",
+                    "watch later", "liked videos", "playlists", "library", "settings",
+                    "search"
+                )) {
+                return null
+            }
+            return t
         }
     }
 
@@ -270,8 +396,12 @@ class ContentExtractor {
         }
 
         // 1. Try to extract URL explicitly from known URL bars (Chrome)
+        //    Reject placeholder/hint text (e.g. "Search Google or type URL"):
+        //    a new-tab page's omnibox shows the placeholder, and using it as
+        //    the URL both reports a bogus URL and shadows the real one (the
+        //    in-app extractors below only run when url == null).
         url = findTextByResourceIds(rootNode, URL_BAR_IDS) { text ->
-            if (text.length >= MIN_URL_LENGTH) text else null
+            if (text.length >= MIN_URL_LENGTH && !isGenericSearchHint(text)) text else null
         }
 
         // Some Chrome Custom Tabs and Google embedded browser surfaces use
@@ -426,7 +556,25 @@ class ContentExtractor {
         }
         val incognito = packageName in CHROME_PACKAGES &&
             detectIncognitoMode(rootNode, windowTitle, event)
-        return ContentSnapshot(packageName, url, query, title, queryConfidence, querySource, incognito)
+
+        // Active Google tab. The Google app never exposes the search URL, so the
+        // tree-detected tab chip is the primary signal there; Chrome's URL is
+        // available, so URL parsing is its primary signal. Keep both: the tree
+        // chip is authoritative when present, otherwise parse the URL.
+        val googleTab = if (packageName == GOOGLE_PACKAGE) {
+            // A genuine search-results page (a query is present or the window
+            // title parses as a Google search) enables the relaxed chip
+            // fallback and the GOOGLE_TAB_TEXT_NODE diagnostics — so a website
+            // opened inside the app's in-app browser can never set the tab and
+            // enable gender-word blocking on ordinary content.
+            val resultsPage = query != null ||
+                (windowTitle != null && GoogleSignalParser.queryFromWindowTitle(windowTitle) != null)
+            detectGoogleTabChip(rootNode, resultsPage) ?: googleTabFromUrl(url)
+        } else {
+            googleTabFromUrl(url)
+        }
+
+        return ContentSnapshot(packageName, url, query, title, queryConfidence, querySource, incognito, googleTab)
     }
 
     /**
@@ -804,7 +952,18 @@ class ContentExtractor {
     }
 
     private fun isGoogleSearchId(viewId: String): Boolean {
-        val lower = viewId.lowercase()
+        // Only the resource-name portion (text after the last '/') matters. The
+        // Google package name "com.google.android.googlequicksearchbox" contains
+        // the substring "search", so matching the full view id made EVERY node
+        // in the Google app match — the extractor then grabbed junk labels like
+        // the "Predictions" suggestions container instead of the real query.
+        val resourceName = viewId.substringAfterLast('/', viewId)
+        val lower = resourceName.lowercase()
+        // The search box's CLEAR button (googleapp_search_box_clear_button,
+        // visible label "Clear") matches "search" in its id and would be
+        // extracted as the query, polluting the query cache (observed on-device:
+        // GOOGLE_QUERY_SOURCE=SEMANTIC_SEARCH_ID query=Clear while typing).
+        if (lower.contains("clear")) return false
         return lower.contains("search") ||
                 lower.contains("omnibox") ||
                 lower.contains("query")
@@ -830,7 +989,15 @@ class ContentExtractor {
 
     private fun isGoogleSearchEvent(event: AccessibilityEvent): Boolean {
         val className = event.className?.toString()?.lowercase() ?: ""
-        val viewId = event.source?.viewIdResourceName?.lowercase() ?: ""
+        // Same resource-name scoping as isGoogleSearchId: the package name
+        // "googlequicksearchbox" contains "search" and would otherwise make
+        // every Google-app event look like a search-box event.
+        val rawViewId = event.source?.viewIdResourceName ?: ""
+        val viewId = rawViewId.substringAfterLast('/', rawViewId).lowercase()
+        // Same clear-button guard as isGoogleSearchId: its label is "Clear"
+        // and its id contains "search", so without this a VIEW_TEXT_CHANGED /
+        // VIEW_FOCUSED event from the clear button becomes a junk query.
+        if (viewId.contains("clear")) return false
         return className.contains("edittext") ||
                 className.contains("autocomplete") ||
                 viewId.contains("search") ||
@@ -1025,22 +1192,140 @@ class ContentExtractor {
     }
 
     /**
+     * Detect the active Google search tab by scanning the accessibility tree
+     * for the tab chip (e.g. a node labelled "Images") that is marked
+     * selected/checked. The Google app's search-results page does NOT expose
+     * the search URL, so URL-based tab detection (googleTabFromUrl) cannot see
+     * the tab there — the chip in the tree is the reliable signal.
+     *
+     * Single BFS traversal that tracks two candidate matches and prefers the
+     * strong one:
+     *   1. STRONG (chip-like): a selected/checked node whose label maps to a
+     *      tab AND that looks like a chip/tab/button (class name or view id).
+     *      This avoids matching arbitrary selected webpage text.
+     *   2. FALLBACK (relaxed): any selected/checked node whose label maps to a
+     *      tab. Covers Google app versions that expose the chip with a generic
+     *      class name.
+     *
+     * The whole tree is scanned (including WebView subtrees): the Google app's
+     * tab bar has been observed as BOTH native UI and WebView-rendered content
+     * depending on version, so excluding WebView nodes would risk the chip
+     * never being found — exactly the failure this feature is meant to fix.
+     * False positives are instead prevented by the strong gates: the node must
+     * be selected/checked AND its label must exactly match a known tab name
+     * (single-word, case-insensitive), and the strong match additionally
+     * requires a chip/tab/button class or view id.
+     *
+     * This scan deliberately goes deeper (CHIP_SCAN_MAX_DEPTH + a node budget)
+     * than every other BFS scan: the Google app's results page nests its
+     * WebView — and with it the tab chips — far below MAX_TRAVERSAL_DEPTH, so
+     * a shallower window silently misses them. On-device evidence: the "All"
+     * tab chip was found as a WebView HTML element at depth 99, with the other
+     * chips at or just beyond that depth. Do NOT revert this scan to the
+     * shared depth limit.
+     *
+     * Both isSelected and isChecked are accepted because Google app versions
+     * differ in which state they expose on the active chip.
+     *
+     * RELAXED fallback: some Google app versions render the tab bar without any
+     * selected/checked state at all. When no selected/checked chip exists, a
+     * visible, chip-like node (chip/tab/button class or view id) whose label
+     * exactly matches a tab name is used — but ONLY when [resultsPage] (the
+     * caller enables it on a genuine search-results page, so websites inside
+     * the app's in-app browser can never set the tab). The FIRST candidate in
+     * tree order wins, which biases toward "All" (Google's first tab) when the
+     * active tab is genuinely unknowable — the safe direction, since gender
+     * words are only blocked on Images/Videos.
+     *
+     * When [resultsPage] is true, every node whose label exactly matches a tab
+     * name is also logged (GOOGLE_TAB_TEXT_NODE, capped at 5 per scan) so
+     * logcat shows definitively whether the tab chips exist in the tree on the
+     * current device — and at what depth — when detection fails.
+     */
+    fun detectGoogleTabChip(rootNode: AccessibilityNodeInfo?, resultsPage: Boolean): String? {
+        if (rootNode == null) return null
+
+        var chipLikeMatch: String? = null
+        var anyMatch: String? = null
+        var relaxedMatch: String? = null
+        var loggedTextNodes = 0
+
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+        var depth = 0
+        var visited = 0
+        while (queue.isNotEmpty() && depth < CHIP_SCAN_MAX_DEPTH && visited < CHIP_SCAN_NODE_BUDGET) {
+            val node = queue.removeFirst()
+            visited++
+            val selected = try { node.isSelected } catch (e: Exception) { false }
+            val checked = try { node.isChecked } catch (e: Exception) { false }
+            val label = googleTabFromLabel(extractNodeText(node))
+            if (label != null) {
+                val className = node.className?.toString() ?: ""
+                val viewId = node.viewIdResourceName ?: ""
+                val chipLike = className.contains("Chip", ignoreCase = true) ||
+                    className.contains("Tab", ignoreCase = true) ||
+                    className.contains("Button", ignoreCase = true) ||
+                    viewId.contains("chip", ignoreCase = true) ||
+                    viewId.contains("tab", ignoreCase = true) ||
+                    viewId.contains("filter", ignoreCase = true)
+                if (selected || checked) {
+                    if (chipLike) {
+                        chipLikeMatch = label
+                        break
+                    }
+                    if (anyMatch == null) {
+                        anyMatch = label
+                    }
+                } else if (resultsPage && relaxedMatch == null) {
+                    // Relaxed fallback (no selection state exposed): a visible
+                    // node with an exact tab label on a results page. Chip-like
+                    // native views are preferred, but generic WebView HTML
+                    // elements (class=android.view.View) are accepted too — the
+                    // Google app's tab bar is web-rendered on this device and
+                    // the found "All" chip carries no chip-like class and no
+                    // selected/checked state. resultsPage + exact single-word
+                    // label keep ordinary page content from matching, and the
+                    // tab bar (top of page, shallowest in BFS) is found first.
+                    val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
+                    if (visible && (chipLike || className == "android.view.View")) {
+                        relaxedMatch = label
+                        Log.d(TAG, "GOOGLE_TAB_CHIP_CANDIDATE label=$label class=$className viewId=$viewId (not selected)")
+                    }
+                }
+                // Ground-truth diagnostic on results pages: every node whose
+                // label matches a tab name, so a missing detection is debuggable.
+                if (resultsPage && loggedTextNodes < 5) {
+                    loggedTextNodes++
+                    Log.d(
+                        TAG,
+                        "GOOGLE_TAB_TEXT_NODE label=$label class=$className viewId=$viewId " +
+                            "selected=$selected checked=$checked chipLike=$chipLike depth=$depth"
+                    )
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            depth++
+        }
+
+        val result = chipLikeMatch ?: anyMatch ?: relaxedMatch
+        if (result != null) {
+            Log.i(TAG, "GOOGLE_TAB_CHIP_DETECTED label=$result chipLike=${chipLikeMatch != null}")
+        }
+        return result
+    }
+
+    /**
      * Check if a URL is any Google search URL with a specific tab (Images, Videos, News).
      * Returns the tab name (e.g., "Images", "Videos") or null if not a tab search.
      *
      * This is used to detect when a user is on Google Images/Videos/News tab
      * and ensure blocked queries are caught regardless of which tab they use.
      */
-    fun isGoogleTabSearch(url: String?): String? {
-        if (url.isNullOrBlank()) return null
-        return when {
-            url.contains("tbm=isch") || url.contains("tbm%3Disch") -> "Images"
-            url.contains("tbm=vid") || url.contains("tbm%3Dvid") -> "Videos"
-            url.contains("tbm=nws") || url.contains("tbm%3Dnws") -> "News"
-            url.contains("tbm=shop") || url.contains("tbm%3Dshop") -> "Shopping"
-            else -> null
-        }
-    }
+    fun isGoogleTabSearch(url: String?): String? = googleTabFromUrl(url)
 
     fun isYouTubePackage(packageName: String): Boolean {
         return packageName in YOUTUBE_PACKAGES
@@ -1056,7 +1341,22 @@ class ContentExtractor {
 
     private fun isGenericSearchHint(text: String): Boolean {
         val lower = text.lowercase()
-        return lower in setOf("search", "ask anything", "type here", "search query", "search or type url")
+        // "ask google" is the Google app's search-box placeholder on the user's
+        // device (logs showed it being extracted as a junk query). Treating it
+        // as a hint keeps a placeholder from shadowing the real query via the
+        // HIGH-confidence SEARCH_BAR_IDS path. "search google or type url" is
+        // Chrome's omnibox placeholder on a new-tab page — it was observed being
+        // extracted as the URL (Bug 7), which also shadowed the real URL.
+        return lower in setOf(
+            "search",
+            "ask anything",
+            "ask google",
+            "type here",
+            "search query",
+            "search or type url",
+            "search google or type url",
+            "search or type web address"
+        )
     }
 
     private fun isAppUiText(text: String): Boolean {

@@ -2,6 +2,8 @@ package com.example.url_blocker.matching
 
 import android.net.Uri
 import android.util.Log
+import com.example.url_blocker.extractor.ContentExtractor
+import com.example.url_blocker.extractor.GoogleSignalParser
 import com.example.url_blocker.repository.BlockRepository
 import java.util.Locale
 
@@ -56,11 +58,13 @@ data class ContentSnapshot(
     val title: String?,
     val queryConfidence: QueryConfidence = QueryConfidence.NONE,
     val querySource: QuerySource = QuerySource.NONE,
-    val incognito: Boolean = false
+    val incognito: Boolean = false,
+    /** Active Google search tab ("Images", "Videos", "All", ...), when known. */
+    val googleTab: String? = null
 ) {
     // Generate an identity for deduplication
     fun toIdentityString(): String {
-        return "$packageName|${url ?: ""}|${query ?: ""}|${title ?: ""}|incognito=$incognito"
+        return "$packageName|${url ?: ""}|${query ?: ""}|${title ?: ""}|incognito=$incognito|tab=${googleTab ?: ""}"
     }
 }
 
@@ -130,11 +134,27 @@ class KeywordMatcher(private val repository: BlockRepository) {
     /**
      * Chrome-specific check: URL is the ONLY source of truth.
      * Domain matching is already handled inside checkString(isUrl=true).
+     *
+     * Websites never block the tab-restricted gender terms (woman, man, ...) —
+     * those are reserved for Google's Images/Videos tabs. See
+     * [BlockRepository.TAB_RESTRICTED_KEYWORDS].
+     *
+     * IMPORTANT: Google search is frequently performed inside Chrome, not only
+     * in the Google app. So when the Chrome URL is a Google search on the
+     * Images or Videos tab (tbm=isch / tbm=vid, or the newer udm layout codes
+     * such as udm=2 for Images), the full strict keyword set — including the
+     * tab-restricted gender terms — is used, exactly as in the Google app.
      */
     private fun checkChrome(snapshot: ContentSnapshot): MatchResult {
+        // Detect whether this is a Google Images/Videos search inside Chrome.
+        val tab = snapshot.googleTab ?: ContentExtractor.googleTabFromUrl(snapshot.url)
+        val isImageVideoTab = tab == "Images" || tab == "Videos"
+        val builtInKeywords = tabAwareBuiltInKeywords(tab)
+        Log.d(TAG, "CHROME_GOOGLE_TAB=$tab imageVideoTab=$isImageVideoTab")
+
         // URL is the primary source — domain matching is done inside checkString(isUrl=true)
         if (!snapshot.url.isNullOrBlank()) {
-            val urlRes = checkString(snapshot.url, isUrl = true)
+            val urlRes = checkString(snapshot.url, isUrl = true, builtInKeywords = builtInKeywords)
             if (urlRes is MatchResult.Blocked) {
                 val source = if (urlRes.matchType == MatchType.DOMAIN) MatchSource.DOMAIN else MatchSource.URL
                 val finalRes = urlRes.copy(matchSource = source)
@@ -143,26 +163,113 @@ class KeywordMatcher(private val repository: BlockRepository) {
             }
         }
 
+        // Google Images/Videos search inside Chrome: mobile Chrome's address-bar
+        // URL often OMITS the q= parameter (e.g. Images URL is just
+        // "...&udm=2&fbs=..." with no query text). Recover the query from the
+        // URL's q= param when present, else from the structured Google-search
+        // window title ("... - Google Search") — a Google signal, not arbitrary
+        // page text. This runs ONLY on positively-identified Images/Videos tab
+        // searches, so ordinary websites are unaffected.
+        if (isImageVideoTab) {
+            val chromeQuery = extractGoogleQuery(snapshot)
+                ?: snapshot.title?.let(GoogleSignalParser::queryFromWindowTitle)
+            if (!chromeQuery.isNullOrBlank()) {
+                val queryRes = checkString(chromeQuery, isUrl = false, builtInKeywords = builtInKeywords)
+                if (queryRes is MatchResult.Blocked) {
+                    val finalRes = queryRes.copy(matchSource = MatchSource.QUERY)
+                    Log.i(TAG, buildBlockLog("GOOGLE_TAB_QUERY", chromeQuery, finalRes))
+                    return finalRes
+                }
+            }
+        }
+
+        // ── YOUTUBE VIDEOS WATCHED INSIDE CHROME ─────────────────────
+        // YouTube's mobile site (m.youtube.com) exposes only an opaque watch
+        // URL — no keyword — and often drops the path from the address bar
+        // entirely (url becomes the bare domain or null), so the URL/query
+        // checks above can never block the video itself. That was the user's
+        // observed "reopen bypass": the SEARCH blocks, but once the video is
+        // playing nothing blocks it. The window title carries the video title
+        // ("Chrome: <Title> - YouTube") — the same content identifier the
+        // YouTube app blocks on. When Chrome shows a YouTube page, check the
+        // video title against the full strict set, exactly like the YouTube
+        // app path.
+        val chromeYouTubeTitle = extractChromeYouTubeTitle(snapshot)
+        if (chromeYouTubeTitle != null) {
+            val titleRes = checkString(
+                chromeYouTubeTitle,
+                isUrl = false,
+                builtInKeywords = repository.activeBuiltInKeywords
+            )
+            if (titleRes is MatchResult.Blocked) {
+                val finalRes = titleRes.copy(matchSource = MatchSource.TITLE)
+                Log.i(TAG, buildBlockLog("YOUTUBE_TITLE_IN_CHROME", chromeYouTubeTitle, finalRes))
+                return finalRes
+            }
+        }
+
         // Log page text matches but don't block
         if (!snapshot.title.isNullOrBlank()) {
-            logPageTextMatch(snapshot.title)
+            logPageTextMatch(snapshot.title, builtInKeywords)
         }
         if (!snapshot.query.isNullOrBlank()) {
-            logPageTextMatch(snapshot.query)
+            logPageTextMatch(snapshot.query, builtInKeywords)
         }
 
         return MatchResult.Allowed
     }
 
     /**
+     * Extract the video title when Chrome is showing a YouTube page.
+     *
+     * Requires a YouTube context — the URL is a YouTube domain OR the window
+     * title carries YouTube's " - YouTube" suffix (the parser only returns a
+     * title for that suffix, so a non-YouTube page can never match here). The
+     * URL alone is not sufficient because m.youtube.com frequently exposes
+     * only the bare domain or null in the address bar.
+     */
+    private fun extractChromeYouTubeTitle(snapshot: ContentSnapshot): String? {
+        val title = snapshot.title ?: return null
+        val parsed = ContentExtractor.youtubeTitleFromChromeWindowTitle(title) ?: return null
+        val urlIsYouTube = ContentExtractor.isYouTubeDomain(snapshot.url)
+        val titleIsYouTube = title.lowercase(Locale.ROOT).endsWith(" - youtube")
+        if (urlIsYouTube || titleIsYouTube) {
+            Log.d(TAG, "CHROME_YOUTUBE_TITLE=${parsed} (urlIsYouTube=$urlIsYouTube, titleIsYouTube=$titleIsYouTube)")
+            return parsed
+        }
+        return null
+    }
+
+    /**
      * Google-specific check: URL first, then search query.
+     *
+     * Tab-restricted gender terms (woman, man, ...) are blocked ONLY on the
+     * Videos and Images tabs. On the All tab (and News/Shopping) they are
+     * allowed, because those everyday words are common in ordinary searches.
      */
     private fun checkGoogle(snapshot: ContentSnapshot): MatchResult {
         val googleQuery = extractGoogleQuery(snapshot)
 
+        // Detect which Google tab is active (Images, Videos, News, Shopping, ...).
+        // Prefer the tree-detected tab (the Google app never exposes the search
+        // URL, so URL parsing alone cannot see the tab there); fall back to URL.
+        val tab = snapshot.googleTab ?: ContentExtractor.googleTabFromUrl(snapshot.url)
+        val isImageVideoTab = tab == "Images" || tab == "Videos"
+        // The Google app never exposes the active tab (chips carry no selected
+        // state and chip taps produce empty events), so tab-aware gender blocking
+        // cannot work there. When the user enables the Google-app toggle, the
+        // full strict set — including the tab-restricted gender terms — is used
+        // on ALL Google app tabs. Chrome keeps its URL-based tab-aware behavior.
+        val builtInKeywords = if (repository.blockGenderTermsInGoogleApp) {
+            repository.activeBuiltInKeywords
+        } else {
+            tabAwareBuiltInKeywords(tab)
+        }
+        Log.d(TAG, "GOOGLE_TAB=$tab imageVideoTab=$isImageVideoTab googleAllTabs=${repository.blockGenderTermsInGoogleApp}")
+
         // 1. Check URL if available
         if (!snapshot.url.isNullOrBlank()) {
-            val urlRes = checkString(snapshot.url, isUrl = true)
+            val urlRes = checkString(snapshot.url, isUrl = true, builtInKeywords = builtInKeywords)
             if (urlRes is MatchResult.Blocked) {
                 val finalRes = urlRes.copy(matchSource = MatchSource.URL)
                 Log.i(TAG, buildBlockLog("URL", snapshot.url, finalRes))
@@ -172,7 +279,7 @@ class KeywordMatcher(private val repository: BlockRepository) {
 
         // 2. Check search query
         if (!googleQuery.isNullOrBlank()) {
-            val queryRes = checkString(googleQuery, isUrl = false)
+            val queryRes = checkString(googleQuery, isUrl = false, builtInKeywords = builtInKeywords)
             if (queryRes is MatchResult.Blocked) {
                 val finalRes = queryRes.copy(matchSource = MatchSource.QUERY)
                 Log.i(TAG, buildBlockLog("QUERY", googleQuery, finalRes))
@@ -182,7 +289,7 @@ class KeywordMatcher(private val repository: BlockRepository) {
 
         // Log page text matches but don't block
         if (!snapshot.title.isNullOrBlank()) {
-            logPageTextMatch(snapshot.title)
+            logPageTextMatch(snapshot.title, builtInKeywords)
         }
 
         return MatchResult.Allowed
@@ -242,11 +349,14 @@ class KeywordMatcher(private val repository: BlockRepository) {
 
     /**
      * Generic check for non-target packages (URL first, then query, then title logging).
+     * Tab-restricted gender terms never block embedded websites either.
      */
     private fun checkGeneric(snapshot: ContentSnapshot): MatchResult {
+        val builtInKeywords = websiteBuiltInKeywords()
+
         // 1. Check URL explicitly if available
         if (!snapshot.url.isNullOrBlank()) {
-            val urlRes = checkString(snapshot.url, isUrl = true)
+            val urlRes = checkString(snapshot.url, isUrl = true, builtInKeywords = builtInKeywords)
             if (urlRes is MatchResult.Blocked) {
                 val finalRes = urlRes.copy(matchSource = MatchSource.URL)
                 Log.i(TAG, buildBlockLog("URL", snapshot.url, finalRes))
@@ -256,7 +366,7 @@ class KeywordMatcher(private val repository: BlockRepository) {
 
         // 2. Check Query explicitly if available
         if (!snapshot.query.isNullOrBlank()) {
-            val queryRes = checkString(snapshot.query, isUrl = false)
+            val queryRes = checkString(snapshot.query, isUrl = false, builtInKeywords = builtInKeywords)
             if (queryRes is MatchResult.Blocked) {
                 val finalRes = queryRes.copy(matchSource = MatchSource.QUERY)
                 Log.i(TAG, buildBlockLog("QUERY", snapshot.query, finalRes))
@@ -266,7 +376,7 @@ class KeywordMatcher(private val repository: BlockRepository) {
 
         // 3. Page Text / Title - only log, do NOT block
         if (!snapshot.title.isNullOrBlank()) {
-            logPageTextMatch(snapshot.title)
+            logPageTextMatch(snapshot.title, builtInKeywords)
         }
 
         return MatchResult.Allowed
@@ -284,16 +394,16 @@ class KeywordMatcher(private val repository: BlockRepository) {
         }
 
         // 2. Try to extract from URL params (fallback)
+        //    NOTE: Chrome's address-bar URL has NO scheme ("google.com/search?..."),
+        //    which makes android.net.Uri treat "google.com" as an opaque scheme and
+        //    throw on getQueryParameter(). GoogleSignalParser.queryFromUrl normalizes
+        //    the scheme and guards the whole extraction so this can never crash the
+        //    evaluation (previously it aborted Chrome Images/Videos checks).
         if (!snapshot.url.isNullOrBlank() && snapshot.url.contains("google.com/search")) {
-            val uri = try {
-                Uri.parse(snapshot.url)
-            } catch (e: Exception) { null }
-            if (uri != null) {
-                val qParam = uri.getQueryParameter("q")
-                if (!qParam.isNullOrBlank()) {
-                    Log.d(TAG, "Extracted Google query from URL: $qParam")
-                    return qParam
-                }
+            val qParam = GoogleSignalParser.queryFromUrl(snapshot.url)
+            if (!qParam.isNullOrBlank()) {
+                Log.d(TAG, "Extracted Google query from URL: $qParam")
+                return qParam
             }
         }
 
@@ -301,11 +411,17 @@ class KeywordMatcher(private val repository: BlockRepository) {
     }
 
     /**
-     * Log a page text match found but not blocked.
+     * Log a page text match found but not blocked. Uses the same keyword set
+     * as the active block check, so logcat stays consistent with what would
+     * actually be blocked in this context (e.g. tab-restricted gender words
+     * are not logged as matches on websites).
      */
-    private fun logPageTextMatch(text: String) {
+    private fun logPageTextMatch(
+        text: String,
+        builtInKeywords: Set<String> = repository.activeBuiltInKeywords
+    ) {
         val lower = text.lowercase(Locale.ROOT)
-        val builtIn = checkKeywords(lower, repository.activeBuiltInKeywords, protectShortWords = true)
+        val builtIn = checkKeywords(lower, builtInKeywords, protectShortWords = true)
         if (builtIn != null) {
             Log.d(TAG, """
                 PAGE TEXT MATCH FOUND
@@ -340,9 +456,33 @@ class KeywordMatcher(private val repository: BlockRepository) {
     }
 
     /**
+     * Built-in keyword set for websites / non-tabbed Google surfaces:
+     * the full strict set MINUS the tab-restricted gender terms, which only
+     * block inside Google's Images/Videos tabs.
+     */
+    private fun websiteBuiltInKeywords(): Set<String> =
+        repository.activeBuiltInKeywords - BlockRepository.TAB_RESTRICTED_KEYWORDS
+
+    /**
+     * Tab-aware keyword selection: the full strict set (including the
+     * tab-restricted gender terms) on Google's Images/Videos tabs, otherwise
+     * the website set (gender terms filtered out).
+     */
+    private fun tabAwareBuiltInKeywords(tab: String?): Set<String> =
+        if (tab == "Images" || tab == "Videos") {
+            repository.activeBuiltInKeywords
+        } else {
+            websiteBuiltInKeywords()
+        }
+
+    /**
      * Matches a domain against the blocked domains list.
      */
-    private fun checkString(text: String, isUrl: Boolean): MatchResult {
+    private fun checkString(
+        text: String,
+        isUrl: Boolean,
+        builtInKeywords: Set<String> = repository.activeBuiltInKeywords
+    ): MatchResult {
         val lower = text.lowercase(Locale.ROOT)
 
         // Domain matching for URLs
@@ -353,7 +493,7 @@ class KeywordMatcher(private val repository: BlockRepository) {
             }
         }
 
-        val matchedBuiltIn = checkKeywords(lower, repository.activeBuiltInKeywords, protectShortWords = true)
+        val matchedBuiltIn = checkKeywords(lower, builtInKeywords, protectShortWords = true)
         if (matchedBuiltIn != null) {
             return MatchResult.Blocked(matchedBuiltIn, MatchType.BUILT_IN_KEYWORD, MatchSource.NONE)
         }

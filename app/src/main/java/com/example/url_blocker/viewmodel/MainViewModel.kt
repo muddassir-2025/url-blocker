@@ -49,6 +49,7 @@ class MainViewModel : ViewModel() {
         refreshLog()
         checkHasPassword()
         refreshStrictMode()
+        refreshBlockGenderTermsInGoogleApp()
         ensureLauncherEnabled(context)   // cleanup stale disabled state first
         checkDeviceAdminStatus(context)  // then apply correct hide/show based on admin status
         // Auto-lock if password is set (app was restarted)
@@ -141,6 +142,22 @@ class MainViewModel : ViewModel() {
 
     fun refreshStrictMode() {
         isStrictMode = repository?.isStrictMode ?: false
+    }
+
+    // ── Google App gender terms (all tabs) ────────────────────────
+
+    var blockGenderTermsInGoogleApp by mutableStateOf(false)
+        private set
+
+    fun toggleBlockGenderTermsInGoogleApp() {
+        val newValue = !blockGenderTermsInGoogleApp
+        repository?.blockGenderTermsInGoogleApp = newValue
+        blockGenderTermsInGoogleApp = newValue
+        android.util.Log.i("MainViewModel", "Google App gender terms ${if (newValue) "enabled" else "disabled"}")
+    }
+
+    fun refreshBlockGenderTermsInGoogleApp() {
+        blockGenderTermsInGoogleApp = repository?.blockGenderTermsInGoogleApp ?: false
     }
 
     // ── Private DNS (network-level filtering) ───────────────────────

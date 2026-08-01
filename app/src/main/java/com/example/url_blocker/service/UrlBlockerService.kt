@@ -120,6 +120,13 @@ class UrlBlockerService : AccessibilityService() {
     private var lastGoogleQuery: String? = null
     private var lastGoogleQueryTime = 0L
 
+    // Last tab chip the user tapped in the Google app's WebView tab bar, plus
+    // the query that was active at tap time. The WebView exposes ALL tab chips
+    // with no selected/checked state, so the chip the user actually tapped is
+    // the only reliable active-tab signal (applied in prepareGoogleSnapshot).
+    private var lastGoogleTabTap: String? = null
+    private var lastGoogleTabTapQuery: String? = null
+
     // ── Lifecycle ──────────────────────────────────────────────────
 
     override fun onCreate() {
@@ -200,6 +207,73 @@ class UrlBlockerService : AccessibilityService() {
         if (contentExtractor.isTargetPackage(packageName)) {
             evaluateCurrentState(packageName, event)
         }
+
+        // 4. Google app tab-bar taps: the WebView exposes the tab chips with no
+        //    selected/checked state, so the chip the user tapped is the only
+        //    reliable active-tab signal. Record it (with the query active at tap
+        //    time) so the next scan's block check uses it.
+        if (packageName == GOOGLE_PACKAGE &&
+            (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
+                event.eventType == AccessibilityEvent.TYPE_VIEW_SELECTED)
+        ) {
+            // event.source is owned by the caller and must be recycled.
+            val source = try { event.source } catch (e: Exception) { null }
+            val eventText = event.text.takeIf { it.isNotEmpty() }?.joinToString(" ")
+            var tappedLabel: String? = null
+            var sourceClass: String? = null
+            var sourceViewId: String? = null
+            var sourceText: String? = null
+            var sourceDesc: String? = null
+            try {
+                sourceClass = source?.className?.toString()
+                sourceViewId = source?.viewIdResourceName
+                sourceText = source?.text?.toString()
+                sourceDesc = source?.contentDescription?.toString()
+                tappedLabel = ContentExtractor.googleTabFromLabel(sourceText)
+                    ?: ContentExtractor.googleTabFromLabel(sourceDesc)
+                    ?: ContentExtractor.googleTabFromLabel(eventText)
+                    ?: ContentExtractor.googleTabFromLabel(event.contentDescription?.toString())
+                // The click can land on a container whose child holds the chip
+                // label (WebView HTML chip rows). Scan immediate children.
+                if (tappedLabel == null) {
+                    val childCount = (try { source?.childCount } catch (e: Exception) { 0 }) ?: 0
+                    for (i in 0 until childCount.coerceAtMost(8)) {
+                        val child = try { source?.getChild(i) } catch (e: Exception) { null } ?: continue
+                        try {
+                            tappedLabel = ContentExtractor.googleTabFromLabel(
+                                child.text?.toString() ?: child.contentDescription?.toString()
+                            )
+                            if (tappedLabel != null) break
+                        } finally {
+                            try { child.recycle() } catch (e: Exception) {}
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // ignore — not a tab tap
+            } finally {
+                try { source?.recycle() } catch (e: Exception) {}
+            }
+            // Diagnostic: shows exactly what a Google VIEW_CLICKED/VIEW_SELECTED
+            // event carries (source class / viewId / text / desc / event.text),
+            // so a missing tap record is debuggable from logcat — the chips are
+            // WebView HTML and the event source must expose the chip label for
+            // tap detection.
+            Log.d(
+                TAG,
+                "GOOGLE_CLICK_SOURCE type=${eventTypeName(event.eventType)} class=$sourceClass " +
+                    "viewId=$sourceViewId text=${if (sourceText != null) "\"$sourceText\"" else "null"} " +
+                    "desc=${if (sourceDesc != null) "\"$sourceDesc\"" else "null"} " +
+                    "eventText=${if (eventText != null) "\"$eventText\"" else "null"} tabLabel=$tappedLabel"
+            )
+            // Only meaningful when a search query is active — otherwise the tap
+            // would be cleared moments later by the query-change reset anyway.
+            if (tappedLabel != null && lastGoogleQuery != null) {
+                lastGoogleTabTap = tappedLabel
+                lastGoogleTabTapQuery = lastGoogleQuery
+                Log.i(TAG, "GOOGLE_TAB_TAP label=$tappedLabel query=${lastGoogleQuery}")
+            }
+        }
     }
 
     // ── Package Change Handling ────────────────────────────────────
@@ -223,6 +297,8 @@ class UrlBlockerService : AccessibilityService() {
                 lastBlockedResult = null
                 lastGoogleQuery = null
                 lastGoogleQueryTime = 0L
+                lastGoogleTabTap = null
+                lastGoogleTabTapQuery = null
             }
 
             if (contentExtractor.isGooglePackage(newPackage)) {
@@ -241,6 +317,8 @@ class UrlBlockerService : AccessibilityService() {
                 googleFocusAttempted = false
                 lastGoogleQuery = null
                 lastGoogleQueryTime = 0L
+                lastGoogleTabTap = null
+                lastGoogleTabTapQuery = null
 
                 // Stop any existing Google polling to ensure only ONE polling job
                 stopGooglePolling()
@@ -291,19 +369,29 @@ class UrlBlockerService : AccessibilityService() {
                 // are still caught. ContentExtractor only extracts a URL when a
                 // strong in-app-browser signal exists, so this cannot cause false
                 // blocks on ordinary app UI.
-                val probeRoot = try { rootInActiveWindow } catch (e: Exception) { null }
-                if (probeRoot != null) {
-                    try {
-                        if (contentExtractor.hasWebView(probeRoot)) {
-                            Log.i(TAG, "EMBEDDED_BROWSER_DETECTED in $newPackage — monitoring in-app WebView")
-                            lastCheckedSnapshotId = null
-                            startPolling(newPackage, EMBEDDED_POLLING_INTERVAL_MS)
-                            serviceScope.launch {
-                                evaluateCurrentState(newPackage, null)
+                //
+                // IME/keyboard packages are NOT browsers: Gboard exposes WebView
+                // nodes for its emoji/GIF search, which triggered a false
+                // EMBEDDED_BROWSER_DETECTED (observed on-device) and pointless
+                // polling of the keyboard. Skip any package whose id looks like
+                // an input-method.
+                if (newPackage.contains("inputmethod", ignoreCase = true)) {
+                    Log.d(TAG, "EMBEDDED_PROBE_SKIPPED: IME package $newPackage (not a browser)")
+                } else {
+                    val probeRoot = try { rootInActiveWindow } catch (e: Exception) { null }
+                    if (probeRoot != null) {
+                        try {
+                            if (contentExtractor.hasWebView(probeRoot)) {
+                                Log.i(TAG, "EMBEDDED_BROWSER_DETECTED in $newPackage — monitoring in-app WebView")
+                                lastCheckedSnapshotId = null
+                                startPolling(newPackage, EMBEDDED_POLLING_INTERVAL_MS)
+                                serviceScope.launch {
+                                    evaluateCurrentState(newPackage, null)
+                                }
                             }
+                        } finally {
+                            try { probeRoot.recycle() } catch (e: Exception) {}
                         }
-                    } finally {
-                        try { probeRoot.recycle() } catch (e: Exception) {}
                     }
                 }
             }
@@ -434,9 +522,12 @@ class UrlBlockerService : AccessibilityService() {
             var blocked = false
             if (snapshot.url != null || snapshot.query != null || snapshot.title != null) {
                 // Log which Google tab is being used (Images, Videos, etc.)
-                val googleTab = contentExtractor.isGoogleTabSearch(snapshot.url)
+                // Prefer the tree-detected tab chip; fall back to URL parsing
+                // (the Google app rarely exposes the search URL).
+                val googleTab = snapshot.googleTab
+                    ?: contentExtractor.isGoogleTabSearch(snapshot.url)
                 if (googleTab != null) {
-                    Log.i(TAG, "GOOGLE_${googleTab.uppercase()}_TAB_DETECTED (url=${snapshot.url})")
+                    Log.i(TAG, "GOOGLE_${googleTab.uppercase()}_TAB_DETECTED (tab=${snapshot.googleTab ?: "url"}, url=${snapshot.url})")
                 }
 
                 val result = keywordMatcher.check(snapshot, GOOGLE_PACKAGE)
@@ -731,6 +822,7 @@ class UrlBlockerService : AccessibilityService() {
         AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> "VIEW_TEXT_CHANGED"
         AccessibilityEvent.TYPE_VIEW_FOCUSED -> "VIEW_FOCUSED"
         AccessibilityEvent.TYPE_VIEW_CLICKED -> "VIEW_CLICKED"
+        AccessibilityEvent.TYPE_VIEW_SELECTED -> "VIEW_SELECTED"
         AccessibilityEvent.TYPE_VIEW_SCROLLED -> "VIEW_SCROLLED"
         else -> "EVENT_$type"
     }
@@ -817,20 +909,44 @@ class UrlBlockerService : AccessibilityService() {
 
     private fun prepareGoogleSnapshot(snapshot: ContentSnapshot): ContentSnapshot {
         val observedQuery = snapshot.query?.trim().orEmpty()
+        var result = snapshot
         if (observedQuery.isNotEmpty()) {
+            // A genuinely new search query invalidates any previously tapped tab
+            // (the user is back on the default All tab for the new search).
+            if (lastGoogleQuery != observedQuery) {
+                lastGoogleTabTap = null
+                lastGoogleTabTapQuery = null
+            }
             lastGoogleQuery = observedQuery
             lastGoogleQueryTime = System.currentTimeMillis()
-            return snapshot
+        } else {
+            val cachedQuery = lastGoogleQuery
+            val cacheAge = System.currentTimeMillis() - lastGoogleQueryTime
+            if (!cachedQuery.isNullOrBlank() && cacheAge in 0..GOOGLE_QUERY_CACHE_WINDOW_MS) {
+                Log.d(TAG, "GOOGLE_QUERY_CACHE_REUSED ageMs=$cacheAge")
+                result = result.copy(query = cachedQuery)
+            }
         }
 
-        val cachedQuery = lastGoogleQuery
-        val cacheAge = System.currentTimeMillis() - lastGoogleQueryTime
-        return if (!cachedQuery.isNullOrBlank() && cacheAge in 0..GOOGLE_QUERY_CACHE_WINDOW_MS) {
-            Log.d(TAG, "GOOGLE_QUERY_CACHE_REUSED ageMs=$cacheAge")
-            snapshot.copy(query = cachedQuery)
+        // Active-tab resolution: the Google app's WebView exposes ALL tab chips
+        // (All/Images/Videos/...) with NO selected/checked state, so the tree
+        // cannot say which tab is active. The reliable signal is the chip the
+        // user tapped (TYPE_VIEW_CLICKED/SELECTED from the WebView tab bar).
+        // Apply it only when the current tree still contains tab chips
+        // (result.googleTab != null — i.e. we're still on a results page) and
+        // the query hasn't changed since the tap.
+        val tapHint = if (lastGoogleTabTap != null && lastGoogleTabTapQuery != null &&
+            lastGoogleTabTapQuery == lastGoogleQuery
+        ) {
+            lastGoogleTabTap
         } else {
-            snapshot
+            null
         }
+        if (tapHint != null && result.googleTab != null && tapHint != result.googleTab) {
+            Log.i(TAG, "GOOGLE_TAB_TAP_APPLIED label=$tapHint (chip scan guessed ${result.googleTab})")
+            result = result.copy(googleTab = tapHint)
+        }
+        return result
     }
 
     private fun handleSafeStateCheck(snapshot: ContentSnapshot, packageName: String) {
@@ -909,13 +1025,32 @@ class UrlBlockerService : AccessibilityService() {
         if (packageName == GOOGLE_PACKAGE) {
             Log.i(TAG, "GOOGLE_SAFE_STATE_CLEAR_STARTED")
             clearGoogleApp(rootNode)
+            blockingState = BlockingState.WAITING_FOR_SAFE_STATE
+            armSafeStateTimeout(packageName)
+        } else if (contentExtractor.isChromePackage(packageName)) {
+            // Normal (non-incognito) Chrome block: close ALL of Chrome's tabs so
+            // reopening Chrome doesn't restore the blocked tab (the user's
+            // report: after the block, reopening Chrome brought back the same
+            // tab). NOTE: no clearTargetApp() here — its BACK press can exit
+            // Chrome entirely on a single-tab session (no history to walk
+            // back), and Chrome then restores the tab on the next launch.
+            // Closing the tabs first leaves Chrome on its empty "No tabs"
+            // state, and the block overlay inside closeAllChromeTabsAndBlock()
+            // lands Home.
+            closeAllChromeTabsAndBlock(packageName)
         } else {
             clearTargetApp(rootNode, packageName)
+            blockingState = BlockingState.WAITING_FOR_SAFE_STATE
+            armSafeStateTimeout(packageName)
         }
+    }
 
-        blockingState = BlockingState.WAITING_FOR_SAFE_STATE
-
-        // Failsafe: if we don't detect a safe state within a reasonable time, forcefully transition
+    /**
+     * Arm the failsafe timeout for the standard blocking sequence: if the
+     * target doesn't reach a safe state within [SAFE_STATE_TIMEOUT_MS], force
+     * a transition (safe intent + Home).
+     */
+    private fun armSafeStateTimeout(packageName: String) {
         safeStateTimeoutJob?.cancel()
         safeStateTimeoutJob = serviceScope.launch {
             delay(SAFE_STATE_TIMEOUT_MS)
@@ -1329,6 +1464,378 @@ class UrlBlockerService : AccessibilityService() {
         } finally {
             try { rootNode.recycle() } catch (e: Exception) {}
         }
+    }
+
+    /**
+     * Normal-Chrome block path: close ALL of Chrome's tabs, then land Home via
+     * the block overlay. This fixes the user's report that after a block,
+     * reopening Chrome restored the same blocked tab — with every tab closed,
+     * Chrome starts fresh next time.
+     *
+     * Runs off the main thread so the UI actions can be spaced out. The
+     * overlay (and Home) is reached whether or not closing fully succeeded; a
+     * surviving blocked tab is re-blocked the next time Chrome is opened.
+     */
+    private fun closeAllChromeTabsAndBlock(packageName: String) {
+        blockingState = BlockingState.CLEARING_TARGET
+        safeStateTimeoutJob?.cancel()
+        serviceScope.launch {
+            val closed = tryCloseAllTabs(packageName)
+            Log.i(TAG, "CLOSE_ALL_TABS: closed=$closed")
+            if (!isActive) return@launch
+            transitionToHome(packageName)
+        }
+    }
+
+    /**
+     * Try to close ALL of Chrome's normal tabs via its own UI. Attempts:
+     *   1. Click a visible "Close all tabs" node (text / content description /
+     *      view id) in the current tree.
+     *   2. Otherwise open the tab switcher (tab counter button) and look again.
+     *   3. Otherwise open the tab-switcher overflow menu (⋮) and look again.
+     * Returns true when the tree no longer shows any open tab afterwards;
+     * false when the affordance couldn't be reached.
+     */
+    private suspend fun tryCloseAllTabs(packageName: String): Boolean {
+        var switcherOpened = false
+        var menuOpened = false
+        var attempts = 0
+        while (attempts < 6) {
+            attempts++
+            // Chrome left the foreground (user escaped mid-sequence): stop
+            // driving the UI — scanning the launcher's tree would waste the
+            // remaining attempts and only delay landing Home.
+            if (currentForegroundPackage != packageName) {
+                Log.d(TAG, "CLOSE_ALL_TABS: Chrome left foreground — aborting tab close")
+                return false
+            }
+            val rootNode = try { rootInActiveWindow } catch (e: Exception) { null } ?: return false
+            try {
+                // 1. Direct "Close all tabs" affordance. The matched node is
+                //    often a plain text label (Chrome menu rows expose their
+                //    label on a leaf TextView); clickNodeOrClickableAncestor
+                //    walks up to the clickable row so the click dispatches.
+                val closeNode = findCloseAllTabsNode(rootNode)
+                if (closeNode != null) {
+                    val clicked = try {
+                        clickNodeOrClickableAncestor(closeNode)
+                    } finally {
+                        try { closeNode.recycle() } catch (e: Exception) {}
+                    }
+                    if (clicked) {
+                        Log.i(TAG, "CLOSE_ALL_TABS: clicked 'Close all tabs'")
+                        delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
+                        if (!chromeTabsStillOpen(packageName)) {
+                            Log.i(TAG, "CLOSE_ALL_TABS: verified closed after close-all click")
+                            return true
+                        }
+                        Log.d(TAG, "CLOSE_ALL_TABS: close-all clicked but tabs remain — retrying")
+                        continue
+                    }
+                }
+
+                // 2. Open the tab switcher (once) to reach the close-all action.
+                if (!switcherOpened) {
+                    val tabSwitcher = findTabSwitcherButton(rootNode)
+                    if (tabSwitcher != null) {
+                        val clicked = try {
+                            tabSwitcher.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "CLOSE_ALL_TABS: tab-switcher click failed: ${e.message}")
+                            false
+                        } finally {
+                            try { tabSwitcher.recycle() } catch (e: Exception) {}
+                        }
+                        if (clicked) {
+                            switcherOpened = true
+                            Log.i(TAG, "CLOSE_ALL_TABS: opened tab switcher")
+                            delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
+                            continue
+                        }
+                    }
+                }
+
+                // 3. Open the tab-switcher overflow menu (once) to reveal
+                //    "Close all tabs" (it lives behind the ⋮ button).
+                if (!menuOpened) {
+                    val menuButton = findTabSwitcherMenuButton(rootNode)
+                    if (menuButton != null) {
+                        val clicked = try {
+                            menuButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "CLOSE_ALL_TABS: menu click failed: ${e.message}")
+                            false
+                        } finally {
+                            try { menuButton.recycle() } catch (e: Exception) {}
+                        }
+                        if (clicked) {
+                            menuOpened = true
+                            Log.i(TAG, "CLOSE_ALL_TABS: opened tab-switcher menu")
+                            delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
+                            continue
+                        }
+                    }
+                }
+
+                // 4. Per-tab fallback: close one visible tab at a time via each
+                //    card's "Close tab" X button in the switcher grid.
+                val tabClose = findTabCloseButton(rootNode)
+                if (tabClose != null) {
+                    val clicked = try {
+                        clickNodeOrClickableAncestor(tabClose)
+                    } finally {
+                        try { tabClose.recycle() } catch (e: Exception) {}
+                    }
+                    if (clicked) {
+                        Log.i(TAG, "CLOSE_ALL_TABS: closed one tab via 'Close tab' button")
+                        delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
+                        continue
+                    }
+                }
+
+                // 5. Nothing actionable. If no tab remains (Chrome's empty
+                //    "No tabs" state), the close succeeded after all. Only trust
+                //    this optimistic verdict when the switcher was actually
+                //    opened — otherwise we never saw tab UI and any "no tabs"
+                //    text is almost certainly webpage content.
+                if (switcherOpened && !chromeTabsStillOpen(packageName)) {
+                    Log.i(TAG, "CLOSE_ALL_TABS: no tabs remain")
+                    return true
+                }
+                return false
+            } finally {
+                try { rootNode.recycle() } catch (e: Exception) {}
+            }
+        }
+        return false
+    }
+
+    /**
+     * Find a node that is Chrome's "Close all tabs" action for NORMAL tabs,
+     * matched by text / content description ("Close all tabs") or a close-all
+     * view id. The incognito close-all affordance is deliberately excluded.
+     * Prefers the clickable button over a plain text label.
+     */
+    private fun findCloseAllTabsNode(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(AccessibilityNodeInfo.obtain(rootNode))
+        var fallbackLabel: AccessibilityNodeInfo? = null
+        var depth = 0
+        while (queue.isNotEmpty() && depth < 60) {
+            val node = queue.removeFirst()
+            val text = try { node.text?.toString() } catch (e: Exception) { null }
+            val desc = try { node.contentDescription?.toString() } catch (e: Exception) { null }
+            val viewId = try { node.viewIdResourceName } catch (e: Exception) { null } ?: ""
+            val lowerText = ((text ?: "") + " " + (desc ?: "")).lowercase(Locale.ROOT)
+            val lowerId = viewId.lowercase(Locale.ROOT)
+            val isCloseAll = !lowerText.contains("incognito") && (
+                lowerText.contains("close all tabs") ||
+                    (lowerText.contains("close all") && lowerText.contains("tab")) ||
+                    lowerId.contains("close_all_tabs") ||
+                    (lowerId.contains("close_all") && lowerId.contains("tab") && !lowerId.contains("incognito")))
+            if (isCloseAll) {
+                val className = try { node.className?.toString() } catch (e: Exception) { null } ?: ""
+                val clickable = (try { node.isClickable } catch (e: Exception) { false }) ||
+                    className.contains("Button", ignoreCase = true)
+                if (clickable) {
+                    if (fallbackLabel != null) {
+                        try { fallbackLabel.recycle() } catch (e: Exception) {}
+                    }
+                    return node
+                }
+                // Remember the first plain label as a last resort.
+                if (fallbackLabel == null) {
+                    fallbackLabel = AccessibilityNodeInfo.obtain(node)
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            node.recycle()
+            depth++
+        }
+        return fallbackLabel
+    }
+
+    /**
+     * Find Chrome's tab-switcher overflow menu button (⋮) — the button that
+     * reveals the "Close all tabs" item when the tab switcher is open.
+     */
+    private fun findTabSwitcherMenuButton(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(AccessibilityNodeInfo.obtain(rootNode))
+        var depth = 0
+        while (queue.isNotEmpty() && depth < 60) {
+            val node = queue.removeFirst()
+            val desc = try { node.contentDescription?.toString() } catch (e: Exception) { null }
+            val viewId = try { node.viewIdResourceName } catch (e: Exception) { null } ?: ""
+            val lowerDesc = desc?.lowercase(Locale.ROOT) ?: ""
+            val lowerId = viewId.lowercase(Locale.ROOT)
+            val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
+            val isMenuButton = visible && (
+                lowerId.contains("menu_button") ||
+                    lowerId.contains("tab_switcher_menu") ||
+                    lowerDesc.contains("menu"))
+            if (isMenuButton) {
+                return node
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            node.recycle()
+            depth++
+        }
+        return null
+    }
+
+    /**
+     * Re-scan Chrome's tree and report whether any normal tab is still open.
+     * Used by [tryCloseAllTabs] to confirm the close-all worked. Returns true
+     * (tabs remain) when the tree can't be read, so a mid-transition snapshot
+     * can't end the sequence prematurely.
+     */
+    private fun chromeTabsStillOpen(packageName: String): Boolean {
+        if (currentForegroundPackage != packageName) return false
+        val rootNode = try { rootInActiveWindow } catch (e: Exception) { null } ?: return true
+        return try {
+            // Chrome's empty-tab state shows a short heading literally titled
+            // "No tabs" — a definitive zero-tab signal. Match the heading EXACTLY
+            // (trimmed, case-insensitive), never a substring scan: a webpage
+            // merely containing the phrase "no tabs" must not be read as the
+            // empty state.
+            if (treeHasExactText(rootNode, "no tabs")) {
+                return false
+            }
+            // The tab counter ("See N tabs" / "N tabs"): N >= 1 means open.
+            val switcher = findTabSwitcherButton(rootNode)
+            if (switcher != null) {
+                try {
+                    val desc = switcher.contentDescription?.toString() ?: ""
+                    val m = Regex("(\\d+)\\s+tabs?").find(desc.lowercase(Locale.ROOT))
+                    val count = m?.groupValues?.get(1)?.toIntOrNull()
+                    if (count != null) return count > 0
+                } finally {
+                    try { switcher.recycle() } catch (e: Exception) {}
+                }
+            }
+            // Per-tab close buttons visible → at least one tab open.
+            if (findTabCloseButton(rootNode) != null) return true
+            // A close-all affordance only exists while there is at least one tab.
+            if (findCloseAllTabsNode(rootNode) != null) return true
+            // Cannot tell (e.g. a fresh page view without switcher UI) — assume
+            // closed so the sequence can land Home.
+            false
+        } finally {
+            try { rootNode.recycle() } catch (e: Exception) {}
+        }
+    }
+
+    /**
+     * Find a visible per-tab "Close tab" button (the X on each tab card in the
+     * tab switcher grid). Matches by content description / view id, excluding
+     * incognito-affiliated nodes so the NORMAL-tab flow never closes incognito
+     * tabs.
+     */
+    private fun findTabCloseButton(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(AccessibilityNodeInfo.obtain(rootNode))
+        var depth = 0
+        while (queue.isNotEmpty() && depth < 60) {
+            val node = queue.removeFirst()
+            val desc = try { node.contentDescription?.toString() } catch (e: Exception) { null }
+            val viewId = try { node.viewIdResourceName } catch (e: Exception) { null } ?: ""
+            val lowerDesc = desc?.lowercase(Locale.ROOT) ?: ""
+            val lowerId = viewId.lowercase(Locale.ROOT)
+            val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
+            val isTabClose = visible &&
+                !lowerDesc.contains("incognito") && !lowerId.contains("incognito") && (
+                lowerDesc.contains("close tab") ||        // the X on each card
+                    lowerDesc.contains("close this tab") ||
+                    lowerId.contains("close_tab") ||
+                    lowerId.contains("tab_close") ||
+                    lowerId.contains("tab_switcher_close"))
+            if (isTabClose) {
+                return node
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            node.recycle()
+            depth++
+        }
+        return null
+    }
+
+    /**
+     * Click [node], walking up to its nearest clickable ancestor when the node
+     * itself isn't clickable. Chrome menu rows expose their label on a leaf
+     * TextView whose ACTION_CLICK returns false; the row container above the
+     * label is the real clickable target. Returns true when a click dispatched.
+     * The input node is NOT recycled here — the caller owns it.
+     */
+    private fun clickNodeOrClickableAncestor(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+        var current: AccessibilityNodeInfo? = node
+        var hops = 0
+        var clicked = false
+        while (current != null && hops < 5 && !clicked) {
+            hops++
+            val isClickable = try { current.isClickable } catch (e: Exception) { false }
+            if (isClickable) {
+                clicked = try {
+                    current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                } catch (e: Exception) {
+                    Log.e(TAG, "CLOSE_ALL_TABS: click failed: ${e.message}")
+                    false
+                }
+            }
+            val parent = try { current.parent } catch (e: Exception) { null }
+            if (current !== node) {
+                try { current.recycle() } catch (e: Exception) {}
+            }
+            current = parent
+        }
+        // current is the last fetched-but-unrecycled ancestor (never the input).
+        if (current != null && current !== node) {
+            try { current.recycle() } catch (e: Exception) {}
+        }
+        return clicked
+    }
+
+    /**
+     * Whether any node's text/contentDescription equals the needle exactly
+     * (after trimming, case-insensitive). Used for Chrome's "No tabs" empty
+     * state heading — a substring match would false-positive on webpage text.
+     */
+    private fun treeHasExactText(rootNode: AccessibilityNodeInfo, needle: String): Boolean {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(AccessibilityNodeInfo.obtain(rootNode))
+        var found = false
+        var depth = 0
+        while (queue.isNotEmpty() && depth < 60) {
+            val node = queue.removeFirst()
+            try {
+                if (!found) {
+                    val text = try { node.text?.toString() } catch (e: Exception) { null }
+                    val desc = try { node.contentDescription?.toString() } catch (e: Exception) { null }
+                    val matches = listOfNotNull(text, desc).any {
+                        it.trim().equals(needle, ignoreCase = true)
+                    }
+                    found = matches
+                }
+                for (i in 0 until node.childCount) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    queue.add(child)
+                }
+            } finally {
+                try { node.recycle() } catch (e: Exception) {}
+            }
+            depth++
+        }
+        return found
     }
 
     /**

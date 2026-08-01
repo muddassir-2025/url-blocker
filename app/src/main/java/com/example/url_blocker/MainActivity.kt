@@ -1000,6 +1000,61 @@ private fun KeywordsTab(viewModel: MainViewModel) {
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // Google App gender terms toggle: the Google app never exposes which
+        // search tab is active (chips have no selected state, chip taps carry
+        // no label), so Images/Videos-only blocking of gender terms is not
+        // possible there. This toggle blocks them on ALL Google app tabs.
+        // Chrome keeps its tab-aware behavior (All tab stays free).
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = if (viewModel.blockGenderTermsInGoogleApp)
+                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
+                else
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Outlined.Man,
+                    contentDescription = null,
+                    tint = if (viewModel.blockGenderTermsInGoogleApp)
+                        MaterialTheme.colorScheme.error
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Google App Gender Terms",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Blocks woman, man, girl, etc. on ALL Google app search tabs. " +
+                                "The Google app can't reveal the active tab, so Images/Videos-only " +
+                                "blocking isn't possible there. Chrome keeps tab-aware blocking. " +
+                                "Requires Strict Mode.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Switch(
+                    checked = viewModel.blockGenderTermsInGoogleApp,
+                    onCheckedChange = { viewModel.toggleBlockGenderTermsInGoogleApp() }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         Text(
             text = "Your custom keywords (${viewModel.userKeywords.size})",
             style = MaterialTheme.typography.titleSmall,

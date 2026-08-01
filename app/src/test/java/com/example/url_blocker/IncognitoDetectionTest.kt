@@ -158,4 +158,26 @@ class IncognitoDetectionTest {
         assertTrue(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_close_all_button", ""))
         assertTrue(ContentExtractor.isIncognitoChromeIdentifier("", "org.chromium.chrome.browser.incognito.IncognitoNewTabPageView"))
     }
+
+    @Test
+    fun normalNtpIncognitoFloatingButtonIsNeverDetected() {
+        // NORMAL Chrome's new-tab page shows a floating action button
+        // (com.android.chrome:id/incognito_button, desc "New Incognito tab") to
+        // OPEN incognito — an OFFER, not an active session. Observed on-device
+        // as a critical false positive: opening normal Chrome got blocked.
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_button", ""))
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_button", "android.widget.ImageButton"))
+        assertFalse(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_button_container", ""))
+    }
+
+    @Test
+    fun realIncognitoIdsStillDetectedWithIncognitoButtonMarker() {
+        // Adding the "incognito_button" offer marker must not suppress genuine
+        // incognito-only ids (none contain that substring — the close-all button
+        // is incognito_close_all_button, not incognito_button).
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_new_tab_page_title", "android.widget.TextView"))
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_tab_switcher", "android.widget.FrameLayout"))
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("com.android.chrome:id/incognito_close_all_button", ""))
+        assertTrue(ContentExtractor.isIncognitoChromeIdentifier("", "org.chromium.chrome.browser.incognito.IncognitoNewTabPageView"))
+    }
 }
