@@ -516,8 +516,6 @@ class BlockRepository(context: Context) {
 
                     "buttock",
 
-                    "arse",
-
                     "blowjob",
 
                     "blow job",
