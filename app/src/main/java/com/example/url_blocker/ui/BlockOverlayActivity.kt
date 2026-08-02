@@ -64,6 +64,7 @@ class BlockOverlayActivity : ComponentActivity() {
 
         val blockedItem = intent.getStringExtra("blocked_item") ?: "content"
         val blockedType = intent.getStringExtra("blocked_type") ?: "MATCHED"
+        val channelName = intent.getStringExtra("channel_name")
 
         // NOTE: incognito never reaches this overlay anymore — the service
         // closes the incognito tabs and lands the user on Home directly (simple,
@@ -76,6 +77,7 @@ class BlockOverlayActivity : ComponentActivity() {
                 BlockOverlayScreen(
                     blockedItem = blockedItem,
                     blockedType = blockedType,
+                    channelName = channelName,
                     exitLabel = "Return Home",
                     statusText = "Returning to Home screen...",
                     onDismiss = { exitToDestination() }
@@ -136,6 +138,7 @@ class BlockOverlayActivity : ComponentActivity() {
 private fun BlockOverlayScreen(
     blockedItem: String,
     blockedType: String,
+    channelName: String?,
     exitLabel: String,
     statusText: String,
     onDismiss: () -> Unit
@@ -184,12 +187,24 @@ private fun BlockOverlayScreen(
                     text = when (blockedType) {
                         "DOMAIN" -> "This website has been blocked"
                         "INCOGNITO" -> "Incognito browsing is blocked"
+                        "CHANNEL" -> "This YouTube channel is blocked"
                         else -> "This content contains blocked keywords"
                     },
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
                 )
+
+                if (channelName != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Channel: $channelName",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 

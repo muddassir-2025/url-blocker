@@ -2060,7 +2060,7 @@ class BlockRepository(context: Context) {
             "busty",
             "voluptuous",
             "bust",
-            "cleavage",
+           // "cleavage",
 
             // ────────────────────────────────────────────────────────────────────
             // Clothing
@@ -2122,9 +2122,12 @@ class BlockRepository(context: Context) {
             // Dating / romance
             // ────────────────────────────────────────────────────────────────────
 
+            // NOTE: bare "date"/"dates" were removed (observed on-device: a
+            // clean video titled "First dates" was blocked). containsKeyword
+            // only word-boundary-protects keywords <= 3 chars, so "date" also
+            // matched inside "dates" — both had to go. "dating" stays (the
+            // user's own log shows "Dating Tips" blocking correctly).
             "dating",
-            "date",
-            "dates",
             "dating app",
             "dating apps",
             "match",

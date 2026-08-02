@@ -1,21 +1,29 @@
 package com.example.url_blocker.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.url_blocker.extractor.ContentExtractor
 import java.util.Locale
 import com.example.url_blocker.matching.ContentSnapshot
+import com.example.url_blocker.matching.FeedVideoCard
 import com.example.url_blocker.matching.KeywordMatcher
 import com.example.url_blocker.matching.MatchResult
 import com.example.url_blocker.matching.MatchType
 import com.example.url_blocker.matching.MatchSource
 import com.example.url_blocker.repository.BlockRepository
+import com.example.url_blocker.repository.ChannelBlocklist
+import com.example.url_blocker.ui.FeedBadgeOverlay
+import com.example.url_blocker.vision.ThumbnailSafetyAnalyzer
 import kotlinx.coroutines.*
 
 enum class BlockingState {
@@ -60,11 +68,58 @@ class UrlBlockerService : AccessibilityService() {
         private const val CHROME_DELAYED_SCAN_MS = 400L
         // Throttle Chrome diagnostic tree dumps so they don't spam logcat.
         private const val CHROME_DIAG_INTERVAL_MS = 2000L
+        // Feed-thumbnail image analysis is expensive (a full-display screenshot
+        // + TFLite inference per card) and takeScreenshot is system rate
+        // limited — throttle it to at most once every 5s while a feed is on
+        // screen (time-based, not per-window).
+        private const val THUMBNAIL_ANALYSIS_INTERVAL_MS = 5000L
+        // The SYSTEM rate-limits accessibility screenshots (observed
+        // SCREENSHOT_FAILED code=3 when the analysis path and the blur-fetch
+        // path captured back-to-back). A global minimum interval shared by ALL
+        // screenshot takers (analysis + blur fetch) guarantees we never exceed
+        // ~1 capture/sec regardless of how many paths want one.
+        private const val SCREENSHOT_MIN_INTERVAL_MS = 1000L
+        // When a blur fetch is rate-limited (returns empty), wait this long
+        // (past the throttle window above) and retry once so the scrim still
+        // upgrades to the real blurred thumbnail.
+        private const val BLUR_RETRY_DELAY_MS = 1600L
+        // Watch-page NSFW safety net (the user's "innocent title, explicit
+        // content" gap): when a YouTube watch/shorts page's TITLE passes the
+        // text check, a CONTINUOUS monitor captures the player region on a
+        // cadence WHILE THE SAME VIDEO IS ON SCREEN and blocks the instant ANY
+        // single frame scores >= threshold — a short explicit scene can't hide
+        // behind frame averaging. The system rate-limits accessibility
+        // screenshots (~1/s, enforced by SCREENSHOT_MIN_INTERVAL_MS), so the
+        // cadence respects that gate: 1s between the first few captures
+        // (covers the intro, where the thumbnail/first frame is explicit),
+        // then every 3s INDEFINITELY — the monitor only stops when the user
+        // leaves the video/page, the app changes, or a block fires. The 3s
+        // steady cadence is battery-friendly (each capture is a single ~50ms
+        // inference) and keeps explicit content that appears LATER in a video
+        // in scope, which is the point of continuous playback monitoring.
+        private const val WATCH_MONITOR_INTERVAL_MS = 1000L
+        private const val WATCH_MONITOR_STEADY_INTERVAL_MS = 3000L
+        private const val WATCH_MONITOR_PRIME_CAPTURES = 8
+        // The mobile YouTube watch page puts the video player in the TOP half
+        // of the screen. Crop there so the title/comments below never influence
+        // the NSFW score (and the Chrome URL bar above is neutral). When the
+        // page exposes the <video> element's bounds, watchPlayerRegion narrows
+        // the crop to exactly that rect instead.
+        private const val WATCH_PLAYER_FRACTION = 0.5f
+        // Depth cap for the tree scan that looks for the <video> element's
+        // bounds (Chrome nests WebView content deeply).
+        private const val WATCH_PLAYER_SCAN_MAX_DEPTH = 40
+        // Chrome WebViews storm TYPE_WINDOW_CONTENT_CHANGED (image loads, scroll
+        // ticks, video position updates); a full-tree scan per event janks the
+        // main thread (observed "Skipped 41 frames"). Cap event-driven scans to
+        // one per 250ms — the 500ms poll loop covers the rest.
+        private const val EVENT_SCAN_MIN_INTERVAL_MS = 250L
         private const val OUR_PACKAGE = "com.example.url_blocker"
         private const val GOOGLE_PACKAGE = "com.google.android.googlequicksearchbox"
     }
 
     private lateinit var repository: BlockRepository
+    private lateinit var channelBlocklist: ChannelBlocklist
     private lateinit var keywordMatcher: KeywordMatcher
     private val contentExtractor = ContentExtractor()
 
@@ -74,6 +129,75 @@ class UrlBlockerService : AccessibilityService() {
     private var blockingState = BlockingState.NORMAL
     private var lastBlockedResult: MatchResult.Blocked? = null
     private var safeStateTimeoutJob: Job? = null
+
+    /**
+     * Floating red markers drawn over blocked YouTube feed cards in Chrome
+     * (pre-emptive feed blocking). Created once; needs the "Display over
+     * other apps" permission to actually draw. Null-safe everywhere so a
+     * missing permission degrades to the normal full block.
+     */
+    private var feedBadgeOverlay: FeedBadgeOverlay? = null
+
+    /**
+     * On-device NSFW thumbnail analyzer — the "image later" step of the feed
+     * flow. Loaded from assets (user-dropped nsfw_detector.tflite); when the
+     * model is missing or the device is below Android 11, isAvailable() is
+     * false and only the text signals drive feed blocking.
+     */
+    private var thumbnailAnalyzer: ThumbnailSafetyAnalyzer? = null
+
+    /** Last time the feed-thumbnail screenshot analysis ran (throttle). */
+    private var lastThumbnailAnalysisAt = 0L
+
+    /**
+     * Timestamp of the last display capture across ALL screenshot paths
+     * (analysis + blur fetch). Atomic because captures are requested from
+     * Dispatchers.Default coroutines that can overlap. Enforces
+     * [SCREENSHOT_MIN_INTERVAL_MS] so the system rate limit never fires.
+     */
+    private val lastScreenshotAt = java.util.concurrent.atomic.AtomicLong(0)
+
+    /**
+     * Per-session NSFW score cache keyed by feed-card title. The model is
+     * deterministic, so re-scrolling to the same cards must NOT re-take a
+     * system-rate-limited screenshot and re-run inference. Cleared when the
+     * foreground app changes; capped so a long session can't grow unbounded.
+     */
+    private val nsfwScoreCache = java.util.concurrent.ConcurrentHashMap<String, Float>()
+
+    /**
+     * Blurred thumbnails currently shown on the feed markers. The SERVICE owns
+     * these bitmaps (the overlay only draws them) so re-shows / repositions
+     * never draw recycled pixels; they are recycled when the markers clear.
+     * Only touched on the main thread.
+     */
+    private var badgeBlurMap: Map<String, Bitmap> = emptyMap()
+
+    /**
+     * Card titles of the blocked set currently badged — feed-block dedup.
+     * Written from BOTH the main thread (text path, package-change reset) and
+     * the Dispatchers.Default image pipeline, so it must be volatile for
+     * cross-thread visibility.
+     */
+    @Volatile
+    private var lastBlockedFeedKey: String? = null
+
+    /**
+     * Continuous watch-page NSFW monitor state. watchMonitorVideoId is the
+     * dedup key (video id, or URL when no id is extractable — set
+     * synchronously on the main thread at start time so the 500ms poll can't
+     * start a second monitor for the same video); watchMonitorJob is the
+     * running capture loop (indefinite — it only stops when the user leaves
+     * the video/page, the app changes, or a block fires). Reset on package
+     * change / new video / block. Volatile for cross-thread visibility (the
+     * Default-thread loop's stop path).
+     */
+    @Volatile
+    private var watchMonitorVideoId: String? = null
+    private var watchMonitorJob: Job? = null
+
+    /** Last event-driven full-tree scan (throttle for content-changed storms). */
+    private var lastEventScanAt = 0L
 
     /**
      * Timestamp until which INCOGNITO re-blocks are suppressed (loop guard).
@@ -132,24 +256,64 @@ class UrlBlockerService : AccessibilityService() {
     override fun onCreate() {
         super.onCreate()
         repository = BlockRepository(applicationContext)
-        keywordMatcher = KeywordMatcher(repository)
+        channelBlocklist = ChannelBlocklist(applicationContext)
+        keywordMatcher = KeywordMatcher(repository, channelBlocklist)
+        // Feed block cards are INERT (the user's chosen flow: "clicking does
+        // nothing — keep browsing the feed; exit only if the blocked video
+        // somehow opens, where the watch-page block fires"). The overlay only
+        // draws; no tap wiring is needed.
+        feedBadgeOverlay = FeedBadgeOverlay(applicationContext)
+        thumbnailAnalyzer = ThumbnailSafetyAnalyzer(applicationContext)
         Log.i(TAG, "UrlBlockerService created")
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        // Android 11+: declare the screenshot capability so the feed-thumbnail
+        // NSFW pipeline can capture the display (needs android:canTakeScreenshot
+        // in the config AND this runtime capability request).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // AccessibilityServiceInfo.setCapabilities(int) is @hide in the
+            // public SDK, so Kotlin exposes `capabilities` as read-only. The
+            // standard workaround is reflection — this requests the screenshot
+            // capability so takeScreenshot() works (the system then asks the
+            // user to allow screenshots once).
+            val info = serviceInfo
+            if (info != null) {
+                try {
+                    val setter = AccessibilityServiceInfo::class.java.getMethod(
+                        "setCapabilities", Int::class.javaPrimitiveType
+                    )
+                    setter.invoke(
+                        info,
+                        info.capabilities or AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT
+                    )
+                    serviceInfo = info
+                    Log.i(TAG, "SCREENSHOT_CAPABILITY_REQUESTED")
+                } catch (t: Throwable) {
+                    Log.w(TAG, "SCREENSHOT_CAPABILITY_FAILED: ${t.message}")
+                }
+            }
+        }
         Log.i(TAG, "UrlBlockerService connected and running")
         Log.i(com.example.url_blocker.extractor.GoogleAppUrlExtractor.TAG, "Accessibility Service connected")
     }
 
     override fun onInterrupt() {
         Log.w(TAG, "UrlBlockerService interrupted")
+        feedBadgeOverlay?.clearBadges()
+        releaseBadgeBlur()
         stopPolling()
         stopGooglePolling()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        feedBadgeOverlay?.clearBadges()
+        releaseBadgeBlur()
+        stopWatchMonitor()
+        thumbnailAnalyzer?.close()
+        thumbnailAnalyzer = null
         serviceScope.cancel()
         Log.i(TAG, "UrlBlockerService destroyed")
     }
@@ -204,8 +368,18 @@ class UrlBlockerService : AccessibilityService() {
         //    Events provide the fastest detection (text changes, window changes).
         //    The dedicated Google polling (500ms) serves as a safety net for cases
         //    where no new events fire (e.g., reopening Google with blocked content).
+        //
+        //    Chrome WebViews storm TYPE_WINDOW_CONTENT_CHANGED; a full-tree scan
+        //    per event janks the main thread ("Skipped 41 frames"). Throttle
+        //    those — the 500ms poll loop still covers content changes.
         if (contentExtractor.isTargetPackage(packageName)) {
-            evaluateCurrentState(packageName, event)
+            val now = System.currentTimeMillis()
+            if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+                now - lastEventScanAt >= EVENT_SCAN_MIN_INTERVAL_MS
+            ) {
+                lastEventScanAt = now
+                evaluateCurrentState(packageName, event)
+            }
         }
 
         // 4. Google app tab-bar taps: the WebView exposes the tab chips with no
@@ -281,6 +455,18 @@ class UrlBlockerService : AccessibilityService() {
     private fun handlePackageChange(newPackage: String) {
         if (currentForegroundPackage != newPackage) {
             Log.d(TAG, "Foreground package changed: $currentForegroundPackage -> $newPackage")
+
+            // Feed markers belong to Chrome's screen — remove them as soon as
+            // the foreground changes (the overlay would otherwise linger over
+            // whatever app comes next). The NSFW score cache is session-scoped
+            // too: a new foreground session re-analyzes fresh feed cards.
+            feedBadgeOverlay?.clearBadges()
+            releaseBadgeBlur()
+            lastBlockedFeedKey = null
+            // Stop the watch-page NSFW monitor — its captures belong to the
+            // previous app's screen.
+            stopWatchMonitor()
+            nsfwScoreCache.clear()
 
             if (newPackage == OUR_PACKAGE) {
                 // We reached the block overlay
@@ -374,9 +560,12 @@ class UrlBlockerService : AccessibilityService() {
                 // nodes for its emoji/GIF search, which triggered a false
                 // EMBEDDED_BROWSER_DETECTED (observed on-device) and pointless
                 // polling of the keyboard. Skip any package whose id looks like
-                // an input-method.
-                if (newPackage.contains("inputmethod", ignoreCase = true)) {
-                    Log.d(TAG, "EMBEDDED_PROBE_SKIPPED: IME package $newPackage (not a browser)")
+                // an input-method. Same for launcher/system UI packages
+                // (com.motorola.launcher3, com.android.systemui — observed on
+                // this device): their app-drawer / recents surfaces expose
+                // WebView-like nodes and would otherwise be polled forever.
+                if (isNonBrowserSystemPackage(newPackage)) {
+                    Log.d(TAG, "EMBEDDED_PROBE_SKIPPED: non-browser system package $newPackage")
                 } else {
                     val probeRoot = try { rootInActiveWindow } catch (e: Exception) { null }
                     if (probeRoot != null) {
@@ -398,6 +587,25 @@ class UrlBlockerService : AccessibilityService() {
 
             currentForegroundPackage = newPackage
         }
+    }
+
+    /**
+     * Packages that are never browsers even though they may expose
+     * WebView-like accessibility nodes (launchers, system UI, keyguard,
+     * settings, IMEs). The embedded-browser probe skips them so it doesn't
+     * start pointless polling (observed on-device: com.motorola.launcher3
+     * and com.android.systemui both triggered EMBEDDED_BROWSER_DETECTED).
+     */
+    private fun isNonBrowserSystemPackage(pkg: String): Boolean {
+        val lower = pkg.lowercase(Locale.ROOT)
+        // `launcher` covers the known launcher ids (com.motorola.launcher3,
+        // com.google.android.apps.nexuslauncher, com.android.launcher3, ...).
+        return lower.contains("inputmethod") ||
+            lower.contains("launcher") ||
+            lower.contains("systemui") ||
+            lower.contains("keyguard") ||
+            lower == "android" ||
+            lower == "com.android.settings"
     }
 
     // ── Google-Specific Polling ────────────────────────────────────
@@ -744,12 +952,25 @@ class UrlBlockerService : AccessibilityService() {
                     lastCheckedSnapshotId = snapshotId
                     true
                 }
+                // Feed markers are on screen: evaluate every poll so the
+                // markers re-position as the user scrolls the feed (the dedup
+                // identity hashes card titles only, not their screen bounds).
+                feedBadgeOverlay?.isShowing == true -> true
                 else -> false
             }
 
             if (shouldEvaluate) {
                 when (blockingState) {
                     BlockingState.NORMAL -> {
+                        // ── FEED-THUMBNAIL IMAGE ANALYSIS (throttled) ──
+                        // The user's "revealing thumbnail, safe title" case needs
+                        // the on-device NSFW model, not just text. Runs off the
+                        // text path so it also catches cards whose only signal is
+                        // the image. Skipped when badges are already showing (a
+                        // screenshot would capture our own overlays) and by the
+                        // interval throttle (screenshots are rate limited).
+                        maybeAnalyzeFeedThumbnails(snapshot, packageName)
+
                         // incognito snapshots may carry no URL/query/title (e.g. the
                         // incognito new-tab page), so evaluate them too.
                         if (snapshot.url != null || snapshot.query != null ||
@@ -776,10 +997,118 @@ class UrlBlockerService : AccessibilityService() {
                                     lastCheckedSnapshotId = null
                                     return
                                 }
-                                Log.w(TAG, "BLOCK DETECTED in $packageName! Matched: ${result.matchedItem} (${result.matchType})")
-                                repository.addLogEntry("BLOCKED: ${result.matchedItem} in $packageName")
-                                lastBlockedResult = result
-                                initiateBlockingSequence(rootNode, packageName)
+
+                                // ── PRE-EMPTIVE FEED BLOCK → block cards ──
+                                // A YouTube feed card crossed the weighted risk
+                                // score. The user asked to SEE which videos are
+                                // blocked before opening them: draw an opaque red
+                                // block card (with the matched keyword) over each
+                                // blocked card instead of taking over the screen.
+                                // The cards are INERT — tapping does nothing and
+                                // the video can't be opened; if it opens anyway,
+                                // the watch-page block fires. Falls back to the
+                                // full block when the overlay permission is
+                                // missing, so protection is never silently lost.
+                                if (result.matchSource == MatchSource.FEED &&
+                                    feedBadgeOverlay?.canDrawOverlays() == true
+                                ) {
+                                    val blockedCards = result.feedCards
+                                    val titles = blockedCards.map { it.title }.toSet()
+                                    // Dedup: the poll loop re-evaluates every 500ms
+                                    // while markers are shown (to re-position on
+                                    // scroll). Only log / fetch blur ONCE per
+                                    // blocked card set — otherwise the same cards
+                                    // get "blocked" 15+ times on every
+                                    // WINDOW_CONTENT_CHANGED (observed on-device).
+                                    val feedKey = blockedCards.joinToString("|") { it.title }
+                                    val isRepeatBlock = feedKey == lastBlockedFeedKey
+                                    lastBlockedFeedKey = feedKey
+                                    if (!isRepeatBlock) {
+                                        // The user's flow logs the VIDEO TITLE, not
+                                        // just the keyword ("BLOCKING: My Travel Vlog
+                                        // | Reasons:").
+                                        val firstTitle = blockedCards.firstOrNull()?.title ?: "?"
+                                        Log.w(TAG, "FEED BLOCK MARKED in $packageName! Matched: ${result.matchedItem} (${result.matchType}) video='$firstTitle' cards=${blockedCards.size}")
+                                        repository.addLogEntry("BLOCKED (feed): $firstTitle — ${result.matchedItem} in $packageName")
+                                        // Fetch blurred thumbnails for these cards so
+                                        // the markers show the real (blurred)
+                                        // thumbnail, not just a scrim. The screenshot
+                                        // is system rate-limited and shares the global
+                                        // SCREENSHOT_MIN_INTERVAL_MS gate — when it
+                                        // fails (SCREENSHOT_FAILED code=3, observed
+                                        // on-device) the first fetch returns empty, so
+                                        // retry once after the throttle window: without
+                                        // a retry the scrim would stay forever (the
+                                        // image-analysis path skips while markers are
+                                        // on screen).
+                                        serviceScope.launch(Dispatchers.Default) {
+                                            var blurred = blurredThumbnailsFor(blockedCards)
+                                            if (blurred.isEmpty()) {
+                                                delay(BLUR_RETRY_DELAY_MS)
+                                                blurred = blurredThumbnailsFor(blockedCards)
+                                            }
+                                            if (blurred.isNotEmpty()) {
+                                                withContext(Dispatchers.Main) {
+                                                    // Re-validate before applying: the screenshot fetch
+                                                    // takes ~100ms+ during which the user may have left
+                                                    // Chrome or a newer block superseded this card set.
+                                                    // Without this a stale coroutine re-shows markers
+                                                    // over the wrong screen AND (releaseBadgeBlur below)
+                                                    // recycles a newer badgeBlurMap.
+                                                    if (currentForegroundPackage == packageName &&
+                                                        feedKey == lastBlockedFeedKey
+                                                    ) {
+                                                        releaseBadgeBlur()
+                                                        badgeBlurMap = blurred
+                                                        feedBadgeOverlay?.showBadges(blockedCards, blurred)
+                                                    } else {
+                                                        // Stale — these bitmaps were never shown; free them.
+                                                        blurred.values.forEach { b ->
+                                                            try { b.recycle() } catch (e: Exception) {}
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Show now with whatever blur we already have for
+                                    // these cards (or a scrim if none yet). The
+                                    // overlay's signature guard prevents redraw
+                                    // flicker; the blur upgrade swaps in when ready.
+                                    feedBadgeOverlay?.showBadges(
+                                        blockedCards,
+                                        badgeBlurMap.filterKeys { it in titles }
+                                    )
+                                } else {
+                                    Log.w(TAG, "BLOCK DETECTED in $packageName! Matched: ${result.matchedItem} (${result.matchType})")
+                                    repository.addLogEntry("BLOCKED: ${result.matchedItem} in $packageName")
+                                    lastBlockedResult = result
+                                    // Channel-strike bookkeeping: a keyword-blocked video
+                                    // from an identified YouTube channel records a strike;
+                                    // after ChannelBlocklist.BLOCK_THRESHOLD strikes the
+                                    // channel is permanently blocked.
+                                    recordChannelStrikeIfApplicable(packageName, snapshot, result)
+                                    initiateBlockingSequence(rootNode, packageName)
+                                }
+                            } else {
+                                // Clean evaluation — the TEXT signals all passed.
+                                // Watch-page NSFW safety net: the user's gap — an
+                                // innocent-titled video whose actual content is
+                                // explicit plays freely because the feed image
+                                // pipeline only runs on feed pages. On a YouTube
+                                // watch/shorts page whose title passed, start a
+                                // CONTINUOUS monitor: it captures the player
+                                // region on a cadence and blocks the instant any
+                                // single frame scores >= threshold (independent
+                                // of the title/description). Cheap no-op on
+                                // every other page.
+                                startWatchMonitor(snapshot, packageName)
+                                // If markers were showing for a blocked card that
+                                // has since scrolled away or the page changed,
+                                // remove them.
+                                feedBadgeOverlay?.clearBadges()
+                                releaseBadgeBlur()
+                                lastBlockedFeedKey = null
                             }
                         }
                     }
@@ -812,6 +1141,613 @@ class UrlBlockerService : AccessibilityService() {
         windows?.firstOrNull { it.isActive }?.title?.toString()
     } catch (e: Exception) {
         null
+    }
+
+    // ── Feed-Thumbnail Image Analysis (NSFW model) ──────────────────
+
+    /**
+     * Throttled entry point for the on-device NSFW thumbnail pipeline. Takes a
+     * screenshot of the display, crops each feed card's thumbnail region, runs
+     * the TFLite classifier, and — when an image signal crosses the threshold —
+     * re-evaluates with the enriched cards so their block cards appear.
+     *
+     * No-ops (cheaply) when: below Android 11, no model loaded, no feed cards,
+     * overlay permission missing, badges already on screen, or within the
+     * throttle window.
+     */
+    private fun maybeAnalyzeFeedThumbnails(snapshot: ContentSnapshot, packageName: String) {
+        if (snapshot.feedCards.isEmpty()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val analyzer = thumbnailAnalyzer ?: return
+        if (!analyzer.isAvailable()) return
+        if (feedBadgeOverlay?.canDrawOverlays() != true) return
+        if (feedBadgeOverlay?.isShowing == true) return
+        val now = System.currentTimeMillis()
+        if (now - lastThumbnailAnalysisAt < THUMBNAIL_ANALYSIS_INTERVAL_MS) return
+        // NOTE: the 5s slot is consumed even when the global 1s screenshot
+        // gate later denies the capture (the throttle lives inside the launched
+        // coroutine). Intentional: a throttled analysis simply skips this cycle
+        // and un-cached cards wait up to 5s for re-analysis — the blur-fetch
+        // retry (1.6s) already covers text-blocked cards, so no visual gap.
+        lastThumbnailAnalysisAt = now
+        if (nsfwScoreCache.size > 500) nsfwScoreCache.clear()
+
+        // Dedup: skip cards whose NSFW score is already known for this session —
+        // only analyze ones never seen before (screenshots are system rate
+        // limited and the model is deterministic, so re-analysis is pure waste
+        // and re-blocking the same cards on every content change is the exact
+        // churn the user complained about).
+        val missing = snapshot.feedCards.filter { !nsfwScoreCache.containsKey(it.title) }
+        if (missing.isEmpty()) return
+        Log.d(TAG, "THUMBNAIL_ANALYSIS_START cards=${snapshot.feedCards.size} new=${missing.size} cached=${snapshot.feedCards.size - missing.size}")
+        serviceScope.launch(Dispatchers.Default) {
+            val bitmap = captureScreenshot() ?: return@launch
+            // Diagnostic: confirms the display capture succeeded and at what
+            // resolution before any card is cropped (a missing/black screenshot
+            // explains score=null rows in THUMBNAIL_INFERENCE).
+            Log.d(TAG, "THUMBNAIL_SCREENSHOT_CAPTURED shot=${bitmap.width}x${bitmap.height}")
+            try {
+                val enriched = snapshot.feedCards.mapNotNull { card ->
+                    val cached = nsfwScoreCache[card.title]
+                    if (cached != null) {
+                        card.copy(nsfwScore = cached)
+                    } else {
+                        // Crop the THUMBNAIL IMAGE (the tree-derived 16:9 band),
+                        // never the title row — a too-small region (text strip)
+                        // is skipped here with a THUMBNAIL_REGION_REJECTED log.
+                        val region = thumbnailRegion(card, bitmap) ?: return@mapNotNull null
+                        val cropped = try {
+                            Bitmap.createBitmap(
+                                bitmap, region.left, region.top,
+                                region.width(), region.height()
+                            )
+                        } catch (e: Exception) {
+                            null
+                        } ?: return@mapNotNull null
+                        val score = try {
+                            analyzer.analyze(cropped)
+                        } finally {
+                            try { cropped.recycle() } catch (e: Exception) {}
+                        }
+                        if (score != null) nsfwScoreCache[card.title] = score
+                        // The crop region is logged so the user can verify the
+                        // model is fed the ACTUAL thumbnail image — a text-sized
+                        // region or a full-card crop means the geometry is off.
+                        val cardB = card.bounds
+                        Log.d(TAG, "THUMBNAIL_INFERENCE title=${card.title.take(40)} score=${score?.let { String.format(java.util.Locale.ROOT, "%.2f", it) } ?: "null"} region=[${region.left},${region.top},${region.right},${region.bottom}] thumb=[${card.thumbnailBounds?.left},${card.thumbnailBounds?.top},${card.thumbnailBounds?.right},${card.thumbnailBounds?.bottom}] cardSize=${cardB?.width()}x${cardB?.height()}")
+                        card.copy(nsfwScore = score)
+                    }
+                }
+                if (enriched.isEmpty()) return@launch
+                val enrichedSnapshot = snapshot.copy(feedCards = enriched)
+                val result = keywordMatcher.check(enrichedSnapshot, packageName)
+                if (result is MatchResult.Blocked && result.matchSource == MatchSource.FEED) {
+                    val blockedCards = result.feedCards
+                    val feedKey = blockedCards.joinToString("|") { it.title }
+                    // Per-card verdict log: shows exactly which cards the model
+                    // + matcher decided to blur, their raw NSFW scores, and
+                    // whether usable bounds existed — so a missed thumbnail is
+                    // diagnosable (card picked up? score cleared the bar?
+                    // bounds valid? blur applied?).
+                    blockedCards.forEach { c ->
+                        // Image-driven vs text-driven, so the logs never claim an
+                        // image block for a card the TEXT check blocked (observed:
+                        // nsfwScore=0.00 with ACTION=BLUR was a TITLE block).
+                        val byImage = c.nsfwScore != null &&
+                            c.nsfwScore >= ThumbnailSafetyAnalyzer.NSFW_THRESHOLD
+                        Log.d(TAG, "THUMBNAIL_ACTION=${if (byImage) "BLUR_BY_IMAGE" else "BLOCK_BY_TEXT"} title=${c.title.take(40)} nsfwScore=${c.nsfwScore?.let { String.format(java.util.Locale.ROOT, "%.2f", it) } ?: "null"} keyword=${c.blockedKeyword} thumbBounds=${c.thumbnailBounds != null}")
+                    }
+                    if (feedKey != lastBlockedFeedKey) {
+                        lastBlockedFeedKey = feedKey
+                        val firstTitle = blockedCards.firstOrNull()?.title ?: "?"
+                        Log.w(TAG, "FEED IMAGE BLOCK MARKED in $packageName! Matched: ${result.matchedItem} video='$firstTitle' cards=${blockedCards.size}")
+                        repository.addLogEntry("BLOCKED (feed image): $firstTitle — ${result.matchedItem} in $packageName")
+                    }
+                    // Blur each blocked card's REAL thumbnail (the screenshot is
+                    // already in hand) so the overlay shows the blurred image
+                    // instead of a flat scrim. Cheap downscale→upscale blur.
+                    val blurred = blurredThumbnails(bitmap, blockedCards)
+                    // WindowManager views must be added on the main thread — this
+                    // coroutine runs on Dispatchers.Default for the TFLite work.
+                    withContext(Dispatchers.Main) {
+                        // Re-validate before applying: the screenshot + inference
+                        // took ~1s during which the user may have left Chrome or a
+                        // newer block superseded this set. Consistent with
+                        // lastBlockedFeedKey (volatile — written above on this
+                        // Default thread).
+                        if (currentForegroundPackage == packageName &&
+                            feedKey == lastBlockedFeedKey
+                        ) {
+                            releaseBadgeBlur()
+                            badgeBlurMap = blurred
+                            feedBadgeOverlay?.showBadges(blockedCards, blurred)
+                        } else {
+                            // Stale — free the bitmaps this coroutine created.
+                            blurred.values.forEach { b ->
+                                try { b.recycle() } catch (e: Exception) {}
+                            }
+                        }
+                    }
+                } else {
+                    Log.d(TAG, "THUMBNAIL_ANALYSIS_DONE no image block (cards=${enriched.size})")
+                }
+            } finally {
+                try { bitmap.recycle() } catch (e: Exception) {}
+            }
+        }
+    }
+
+    /**
+     * Continuous watch-page NSFW safety net — the user's "innocent title,
+     * explicit content" gap. When a YouTube watch/shorts page in Chrome has a
+     * title that passed the text check, this starts a monitor that captures
+     * the PLAYER REGION on a cadence, runs the on-device NSFW model on every
+     * frame, and blocks (the standard full block: close tabs + overlay + Home)
+     * the instant ANY single frame crosses the threshold — a short explicit
+     * scene cannot hide behind frame averaging. The image verdict is
+     * completely independent of the title/description (which already passed).
+     *
+     * Safety-first design:
+     *  - Cheap no-op unless the URL is a YouTube watch/shorts page in Chrome
+     *    (feed pages, ordinary websites, and the YouTube app — whose URL is
+     *    never exposed — all skip instantly).
+     *  - Dedup by video id: the 500ms poll can't start a second monitor for
+     *    the same video; the key is cleared on package change / new video /
+     *    block.
+     *  - Every capture is RE-VALIDATED before the next one: still NORMAL state
+     *    (a user-initiated block may have started), still the same foreground
+     *    package, and still the SAME video on screen — so a stale monitor can
+     *    never block the wrong page.
+     *  - Reuses captureScreenshot(), which enforces the global 1/s system
+     *    rate-limit gate, HARDWARE->software conversion, and off-main copy.
+     */
+    private fun startWatchMonitor(snapshot: ContentSnapshot, packageName: String) {
+        val url = snapshot.url ?: return
+        if (packageName !in ContentExtractor.CHROME_PACKAGES) return
+        if (!ContentExtractor.isYouTubeDomain(url)) return
+        val isWatch = url.contains("/watch") || url.contains("/shorts/")
+        if (!isWatch) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val analyzer = thumbnailAnalyzer ?: return
+        if (!analyzer.isAvailable()) return
+        val videoId = watchVideoId(url)
+        // Dedup on the same key used for storage: when the video id can't be
+        // extracted (m.youtube.com during transitions often exposes no [?&]v=),
+        // fall back to the URL — otherwise the read-side check would never fire
+        // and every 500ms poll would start a fresh monitor.
+        val dedupKey = videoId ?: url
+        if (dedupKey == watchMonitorVideoId && watchMonitorJob?.isActive == true) {
+            // Already monitoring this exact video — the 500ms poll re-invokes
+            // this every cycle; nothing to do.
+            return
+        }
+        // New video — cancel the previous monitor now (its re-validation would
+        // stop it anyway; cancel avoids an overlapping capture window).
+        stopWatchMonitor()
+        watchMonitorVideoId = dedupKey
+        Log.i(TAG, "WATCH_MONITOR_START url=$url videoId=${videoId ?: "?"}")
+        watchMonitorJob = serviceScope.launch(Dispatchers.Default) {
+            var captures = 0
+            // Indefinite: the loop only exits via the re-validation (the user
+            // left the video/page, or a block/overlay started) or cancellation
+            // (package change, onDestroy, block fired). The 3s steady cadence
+            // keeps battery impact bounded.
+            while (isActive) {
+                val prime = captures < WATCH_MONITOR_PRIME_CAPTURES
+                delay(if (prime) WATCH_MONITOR_INTERVAL_MS else WATCH_MONITOR_STEADY_INTERVAL_MS)
+                captures++
+                // ── Re-validate before this capture (main thread) ──
+                // -1 = stale (a block/overlay started during the delay) —
+                // abandon silently. 0 = the user left this video/page — stop
+                // with a log line. 1 = continue.
+                val decision: Int = withContext(Dispatchers.Main) {
+                    when {
+                        blockingState != BlockingState.NORMAL ||
+                            currentForegroundPackage != packageName ||
+                            feedBadgeOverlay?.isShowing == true -> -1
+                        !verifyStillOnWatchVideo(packageName, videoId, url) -> 0
+                        else -> 1
+                    }
+                }
+                if (decision <= 0) {
+                    if (decision == 0) {
+                        Log.d(TAG, "WATCH_MONITOR_STOP videoChangedOrLeft videoId=$videoId captures=$captures")
+                    }
+                    return@launch
+                }
+                // ── Capture + analyze (Default thread) ──
+                var shot = captureScreenshot()
+                if (shot == null) {
+                    // Throttled by the global 1s gate (or the system) — skip
+                    // this cycle and try again on the next cadence tick.
+                    Log.d(TAG, "WATCH_MONITOR_CAPTURE_SKIPPED (throttled) videoId=$videoId captures=$captures")
+                    continue
+                }
+                try {
+                    // Player bounds come from a fresh main-thread root (the
+                    // fixed-fraction fallback runs when the tree exposes none).
+                    val root = withContext(Dispatchers.Main) {
+                        try { rootInActiveWindow } catch (e: Exception) { null }
+                    }
+                    val region = try {
+                        watchPlayerRegion(shot, root)
+                    } finally {
+                        try { root?.recycle() } catch (e: Exception) {}
+                    }
+                    val cropped = try {
+                        Bitmap.createBitmap(
+                            shot, region.left, region.top,
+                            region.width(), region.height()
+                        )
+                    } catch (e: Exception) {
+                        null
+                    } ?: continue
+                    val score = try {
+                        analyzer.analyze(cropped)
+                    } finally {
+                        try { cropped.recycle() } catch (e: Exception) {}
+                    }
+                    Log.d(
+                        TAG,
+                        "WATCH_NSFW_INFERENCE url=$url score=${score?.let { String.format(Locale.ROOT, "%.2f", it) } ?: "null"} " +
+                            "region=[${region.left},${region.top},${region.right},${region.bottom}] shot=${shot.width}x${shot.height} capture=$captures"
+                    )
+                    if (score != null && score >= ThumbnailSafetyAnalyzer.NSFW_THRESHOLD) {
+                        withContext(Dispatchers.Main) {
+                            // Re-validate once more right before blocking: the
+                            // capture + inference took ~200ms during which the
+                            // user may have navigated away.
+                            if (blockingState != BlockingState.NORMAL ||
+                                currentForegroundPackage != packageName ||
+                                feedBadgeOverlay?.isShowing == true ||
+                                !verifyStillOnWatchVideo(packageName, videoId, url)
+                            ) {
+                                Log.d(TAG, "WATCH_NSFW_SKIPPED stale (state/video changed during inference)")
+                                return@withContext
+                            }
+                            Log.w(TAG, "WATCH_PAGE_NSFW_BLOCK score=${String.format(Locale.ROOT, "%.2f", score)} url=$url videoId=${videoId ?: "?"} capture=$captures")
+                            repository.addLogEntry(
+                                "BLOCKED (watch image): Explicit content detected (${(score * 100).toInt()}%) in $packageName"
+                            )
+                            lastBlockedResult = MatchResult.Blocked(
+                                "Explicit content detected",
+                                MatchType.BUILT_IN_KEYWORD,
+                                MatchSource.TITLE
+                            )
+                            stopWatchMonitor()
+                            // grab + recycle a fresh root (the snapshot's root
+                            // was already recycled by evaluateCurrentState's
+                            // finally)
+                            val root = try { rootInActiveWindow } catch (e: Exception) { null }
+                            try {
+                                if (root != null) initiateBlockingSequence(root, packageName)
+                            } finally {
+                                try { root?.recycle() } catch (e: Exception) {}
+                            }
+                        }
+                        return@launch
+                    }
+                    Log.d(TAG, "WATCH_MONITOR_FRAME_ALLOW url=$url score=${score?.let { String.format(Locale.ROOT, "%.2f", it) } ?: "null"} capture=$captures")
+                } finally {
+                    try { shot.recycle() } catch (e: Exception) {}
+                }
+            }
+            // Loop exited without a block (user left / state changed) — the
+            // next poll with a different video (or after the state resets)
+            // restarts monitoring fresh.
+            Log.d(TAG, "WATCH_MONITOR_END videoId=$videoId captures=$captures")
+        }
+    }
+
+    /** Cancels the running watch monitor and resets its state (any thread). */
+    private fun stopWatchMonitor() {
+        watchMonitorJob?.cancel()
+        watchMonitorJob = null
+        watchMonitorVideoId = null
+    }
+
+    /** Extract the YouTube video id from a watch/shorts URL, or null. */
+    private fun watchVideoId(url: String): String? {
+        val v = Regex("[?&]v=([A-Za-z0-9_-]{6,})").find(url)
+        if (v != null) return v.groupValues[1]
+        val shorts = Regex("/shorts/([A-Za-z0-9_-]{6,})").find(url)
+        if (shorts != null) return shorts.groupValues[1]
+        return null
+    }
+
+    /**
+     * Confirm the CURRENT screen is still the same watch video before the
+     * monitor's next capture (and before the delayed block fires). Re-extracts
+     * from a fresh root — the cheapest reliable check that the user hasn't
+     * navigated away since the last cycle.
+     *
+     * Accepts the video when EITHER the fresh URL resolves to the same video
+     * (video-id or exact match) OR the URL is not exposed (m.youtube.com often
+     * drops it) but the window title still reads as a YouTube video page — so
+     * a missing URL can never silently skip the check (the exact silent no-op
+     * this feature exists to prevent).
+     */
+    private fun verifyStillOnWatchVideo(
+        packageName: String,
+        videoId: String?,
+        originalUrl: String
+    ): Boolean {
+        val root = try { rootInActiveWindow } catch (e: Exception) { null } ?: return false
+        return try {
+            val fresh = contentExtractor.extract(packageName, root, null, activeWindowTitle())
+            val freshUrl = fresh.url
+            if (freshUrl != null) {
+                if (videoId != null) {
+                    // Prefer the video id (robust to URL formatting differences).
+                    videoId == watchVideoId(freshUrl)
+                } else {
+                    // No id extractable — fall back to exact URL match.
+                    freshUrl == originalUrl
+                }
+            } else {
+                // URL not exposed on this device/page — still accept when the
+                // window title indicates we're on a YouTube video page (the
+                // title parser only returns non-null for a "<title> - YouTube"
+                // window title and rejects YouTube UI screens like Home/Shorts).
+                ContentExtractor.youtubeTitleFromChromeWindowTitle(fresh.title) != null
+            }
+        } finally {
+            try { root.recycle() } catch (e: Exception) {}
+        }
+    }
+
+    /**
+     * Player-area crop for the watch page. Two strategies:
+     *  1. Tree-based: when the page exposes the <video> element's bounds (a
+     *     large node high on the page with a ~16:9 aspect), crop exactly that
+     *     rect — the player's position varies with Chrome's URL bar and the
+     *     mobile header, so a fixed fraction can drift off it.
+     *  2. Fallback: the top [WATCH_PLAYER_FRACTION] of the display, full
+     *     width — the mobile watch page renders the player there.
+     * The chosen region is logged (WATCH_NSFW_INFERENCE) so the user can see
+     * which strategy ran and verify the crop covers the actual player.
+     */
+    private fun watchPlayerRegion(screenshot: Bitmap, root: AccessibilityNodeInfo?): android.graphics.Rect {
+        val fromTree = root?.let { findVideoPlayerBounds(it, screenshot.width, screenshot.height) }
+        if (fromTree != null) {
+            return fromTree
+        }
+        val bottom = (screenshot.height * WATCH_PLAYER_FRACTION).toInt()
+            .coerceIn(1, screenshot.height)
+        return android.graphics.Rect(0, 0, screenshot.width, bottom)
+    }
+
+    /**
+     * Best-effort detection of the <video> element's on-screen bounds from the
+     * page tree. Strict plausibility gate so a suggestion rail or comment card
+     * can never be mistaken for the player: the node must be visible, span at
+     * least 60% of the screen width and 20% of the height, sit in the top half
+     * of the screen, and have an aspect ratio in the 16:9-ish range (1.3..2.4).
+     * Returns the largest plausible rect, or null (the caller then falls back
+     * to the fixed-fraction crop). Every node access is guarded — this runs
+     * inside the monitor loop on possibly-recycled nodes.
+     */
+    private fun findVideoPlayerBounds(root: AccessibilityNodeInfo, screenW: Int, screenH: Int): android.graphics.Rect? {
+        var best: android.graphics.Rect? = null
+        var bestArea = 0
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var depth = 0
+        while (queue.isNotEmpty() && depth < WATCH_PLAYER_SCAN_MAX_DEPTH) {
+            val node = queue.removeFirst()
+            val rect = android.graphics.Rect()
+            val hasBounds = try {
+                node.getBoundsInScreen(rect)
+                !rect.isEmpty
+            } catch (e: Exception) {
+                false
+            }
+            val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
+            if (hasBounds && visible) {
+                val w = rect.width()
+                val h = rect.height()
+                val aspect = if (h > 0) w.toFloat() / h else 0f
+                if (w >= screenW * 0.6f && h >= screenH * 0.2f &&
+                    rect.top <= screenH * 0.5f && aspect in 1.3f..2.4f
+                ) {
+                    val area = w * h
+                    if (area > bestArea) {
+                        bestArea = area
+                        best = android.graphics.Rect(rect)
+                    }
+                }
+            }
+            val childCount = try { node.childCount } catch (e: Exception) { 0 }
+            for (i in 0 until childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            depth++
+        }
+        return best
+    }
+
+    /**
+     * Cheap heavy blur: downscale to ~1/8 then bilinear-upscale back to the
+     * original size. Fast enough to run per blocked card; visually reads as a
+     * properly blurred thumbnail. The returned bitmap is owned by the caller.
+     */
+    private fun blurBitmap(src: Bitmap, width: Int, height: Int): Bitmap {
+        val smallW = maxOf(1, width / 8)
+        val smallH = maxOf(1, height / 8)
+        val small = Bitmap.createScaledBitmap(src, smallW, smallH, true)
+        val blurred = Bitmap.createScaledBitmap(small, width, height, true)
+        try { small.recycle() } catch (e: Exception) {}
+        return blurred
+    }
+
+    /**
+     * Crop + blur the thumbnail of each [cards] entry from [bitmap] (shared by
+     * the image path, which already holds the screenshot, and the text path,
+     * which takes a fresh one via [blurredThumbnailsFor]). Cards without usable
+     * bounds are skipped. The caller owns the returned bitmaps.
+     */
+    private fun blurredThumbnails(bitmap: Bitmap, cards: List<FeedVideoCard>): Map<String, Bitmap> {
+        val result = HashMap<String, Bitmap>()
+        for (card in cards) {
+            val region = thumbnailRegion(card, bitmap) ?: continue
+            val thumb = try {
+                Bitmap.createBitmap(
+                    bitmap, region.left, region.top,
+                    region.width(), region.height()
+                )
+            } catch (e: Exception) {
+                null
+            } ?: continue
+            val blur = blurBitmap(thumb, region.width(), region.height())
+            try { thumb.recycle() } catch (e: Exception) {}
+            result[card.title] = blur
+        }
+        return result
+    }
+
+    /**
+     * Best-effort blurred thumbnails for [cards] from a FRESH screenshot (the
+     * text-block path has no bitmap in hand). Empty map when the screenshot
+     * fails (rate limit, secure window) — the overlay then keeps the scrim.
+     */
+    private suspend fun blurredThumbnailsFor(cards: List<FeedVideoCard>): Map<String, Bitmap> {
+        val shot = captureScreenshot() ?: return emptyMap()
+        try {
+            return blurredThumbnails(shot, cards)
+        } finally {
+            try { shot.recycle() } catch (e: Exception) {}
+        }
+    }
+
+    /** Recycle the blurred thumbnails owned by this service (main thread). */
+    private fun releaseBadgeBlur() {
+        badgeBlurMap.values.forEach { b -> try { b.recycle() } catch (e: Exception) {} }
+        badgeBlurMap = emptyMap()
+    }
+
+    /**
+     * Crop region for the THUMBNAIL IMAGE of a YouTube feed card. Prefers the
+     * tree-derived [FeedVideoCard.thumbnailBounds] (the 16:9 image above the
+     * title row); falls back to a geometric 16:9 band from the card's own
+     * bounds when the extractor couldn't compute one. Returns null — skipping
+     * the card — when the region fails the size sanity gate: anything smaller
+     * is a title/text strip or a channel avatar, and feeding it to the NSFW
+     * model would score text, not the image (observed on-device: an 800x79
+     * title row was "analyzed" as a thumbnail).
+     */
+    private fun thumbnailRegion(card: FeedVideoCard, screenshot: Bitmap): android.graphics.Rect? {
+        // NO fallback to card.bounds here: the extractor computes
+        // thumbnailBounds from the very same bounds, and it is null EXACTLY
+        // when there is no valid image region (title row too near the screen
+        // top to have a thumbnail above it, or the band failed the size
+        // gate). Falling back to card.bounds would feed the TITLE TEXT row to
+        // the model again — the exact bug this crop rework exists to fix.
+        val raw = card.thumbnailBounds ?: run {
+            Log.d(TAG, "THUMBNAIL_REGION_MISSING title=${card.title.take(40)} (no valid thumbnail region — skipping image analysis)")
+            return null
+        }
+        val left = raw.left.coerceIn(0, (screenshot.width - 1).coerceAtLeast(0))
+        val top = raw.top.coerceIn(0, (screenshot.height - 1).coerceAtLeast(0))
+        val right = raw.right.coerceIn(left + 1, screenshot.width.coerceAtLeast(1))
+        val bottom = raw.bottom.coerceIn(top + 1, screenshot.height.coerceAtLeast(1))
+        if (right - left < ContentExtractor.MIN_THUMBNAIL_WIDTH ||
+            bottom - top < ContentExtractor.MIN_THUMBNAIL_HEIGHT
+        ) {
+            Log.d(TAG, "THUMBNAIL_REGION_REJECTED title=${card.title.take(40)} region=[$left,$top,$right,$bottom] size=${right - left}x${bottom - top} (too small to be a thumbnail — text strip or avatar, skipping image analysis)")
+            return null
+        }
+        return android.graphics.Rect(left, top, right, bottom)
+    }
+
+    /**
+     * Capture the current display via the accessibility screenshot API
+     * (Android 11+). Returns null on failure (rate limit, secure window, ...)
+     * so the image pipeline degrades silently to text-only blocking.
+     */
+    private suspend fun captureScreenshot(): Bitmap? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        // Global screenshot throttle shared by the analysis path and the blur
+        // path: the system rate-limits accessibility screenshots (code=3), so
+        // both must cooperate on one minimum interval. CAS both reads and
+        // claims the slot atomically — two overlapping coroutines can't both
+        // pass the gate.
+        val now = System.currentTimeMillis()
+        val prev = lastScreenshotAt.get()
+        // Clamp a negative elapsed (device clock jumped backward) to 0 so a
+        // clock change can't throttle screenshots for the duration of the jump.
+        val elapsed = if (now >= prev) now - prev else 0L
+        if (elapsed < SCREENSHOT_MIN_INTERVAL_MS ||
+            !lastScreenshotAt.compareAndSet(prev, now)
+        ) {
+            Log.d(TAG, "SCREENSHOT_THROTTLED (min interval ${SCREENSHOT_MIN_INTERVAL_MS}ms)")
+            return null
+        }
+        // The HardwareBuffer is kept alive across the suspension (the wrapped
+        // bitmap may reference it) and closed only after the software copy
+        // below finishes — never inside the mainExecutor callback.
+        var bufferToClose: android.hardware.HardwareBuffer? = null
+        val wrapped = suspendCancellableCoroutine<Bitmap?> { cont ->
+            try {
+                takeScreenshot(
+                    Display.DEFAULT_DISPLAY,
+                    mainExecutor,
+                    object : AccessibilityService.TakeScreenshotCallback {
+                        override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
+                            val bitmap = try {
+                                Bitmap.wrapHardwareBuffer(
+                                    screenshot.hardwareBuffer,
+                                    screenshot.colorSpace
+                                )
+                            } catch (e: Exception) {
+                                Log.e(TAG, "SCREENSHOT_WRAP_FAILED: ${e.message}")
+                                null
+                            }
+                            // Keep the buffer (and its pixels) alive until the
+                            // caller copies them out; closed right after.
+                            bufferToClose = screenshot.hardwareBuffer
+                            if (cont.isActive) cont.resume(bitmap, onCancellation = null)
+                        }
+
+                        override fun onFailure(errorCode: Int) {
+                            Log.w(TAG, "SCREENSHOT_FAILED code=$errorCode (rate limit or secure window)")
+                            if (cont.isActive) cont.resume(null, onCancellation = null)
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "SCREENSHOT_ERROR: ${e.message}")
+                if (cont.isActive) cont.resume(null, onCancellation = null)
+            }
+        }
+        val buffer = bufferToClose
+        try {
+            if (wrapped == null) return null
+            // HARDWARE-config pixels can't be CPU-read (createBitmap/getPixels
+            // throw "Config#HARDWARE is not supported" — the INFERENCE_FAILED the
+            // image pipeline hit). Convert to software ARGB_8888 — but NOT on the
+            // mainExecutor callback thread: cont.resume() runs inside onSuccess,
+            // so without this withContext the copy would execute on the main
+            // thread right after the suspension point and jank the UI ("Skipped
+            // 41 frames"). The HardwareBuffer stays open (closed in the finally)
+            // until the copy on the Default thread has finished.
+            return withContext(Dispatchers.Default) {
+                if (wrapped.config == Bitmap.Config.HARDWARE) {
+                    try {
+                        wrapped.copy(Bitmap.Config.ARGB_8888, false)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "SCREENSHOT_CONVERT_FAILED: ${e.message}")
+                        null
+                    } finally {
+                        try { wrapped.recycle() } catch (e: Exception) {}
+                    }
+                } else {
+                    wrapped
+                }
+            }
+        } finally {
+            try { buffer?.close() } catch (e: Exception) {}
+        }
     }
 
     /** Human-readable name for an [AccessibilityEvent] type (for logcat). */
@@ -1000,6 +1936,11 @@ class UrlBlockerService : AccessibilityService() {
             Log.d(TAG, "BLOCK_INITIATION_SKIPPED state=$blockingState (already blocking)")
             return
         }
+        // A real block supersedes any floating feed markers — remove them so
+        // they can't linger over the overlay/home screen.
+        feedBadgeOverlay?.clearBadges()
+        releaseBadgeBlur()
+        lastBlockedFeedKey = null
         Log.i(TAG, "BLOCKING STARTED for Target App: $packageName")
         blockingState = BlockingState.CLEARING_TARGET
 
@@ -1926,6 +2867,74 @@ class UrlBlockerService : AccessibilityService() {
         }
     }
 
+    /**
+     * Channel-strike bookkeeping for YouTube keyword blocks.
+     *
+     * When a video from an identified channel is blocked by a KEYWORD (title,
+     * description or signal — not a domain, incognito or channel match), a
+     * strike is recorded against that channel. After
+     * [ChannelBlocklist.BLOCK_THRESHOLD] strikes the channel is permanently
+     * blocked and every subsequent video from it is blocked immediately via
+     * the matcher's CHANNEL check.
+     *
+     * No-ops when the channel can't be identified (normal on Chrome, where the
+     * window title carries no channel and the tree may not expose the link)
+     * or the match type isn't a keyword block.
+     */
+    private fun recordChannelStrikeIfApplicable(
+        packageName: String,
+        snapshot: com.example.url_blocker.matching.ContentSnapshot,
+        result: MatchResult.Blocked
+    ) {
+        val isKeywordMatch = result.matchType == MatchType.BUILT_IN_KEYWORD ||
+            result.matchType == MatchType.USER_KEYWORD
+        if (!isKeywordMatch) return
+        // Pre-emptive feed blocks: the channel visible on a feed card is not
+        // reliably the blocked video's channel — never record strikes from them.
+        if (result.matchSource == MatchSource.FEED) return
+        val channel = snapshot.channel ?: return
+        if (channel.isBlank()) return
+        val isYouTubeContext = contentExtractor.isYouTubePackage(packageName) ||
+            (contentExtractor.isChromePackage(packageName) &&
+                ContentExtractor.isYouTubeDomain(snapshot.url))
+        if (!isYouTubeContext) return
+        // Chrome: only record strikes when actually ON a watch/shorts page.
+        // Feed/search pages show many cards, so channel ownership is ambiguous
+        // (a strike recorded against the wrong channel would block an innocent
+        // channel after 2 strikes).
+        if (contentExtractor.isChromePackage(packageName)) {
+            val u = snapshot.url ?: return
+            if (!u.contains("/watch") && !u.contains("/shorts/")) return
+        }
+
+        val videoId = snapshot.url?.let { extractYouTubeVideoId(it) }
+        val reason = "Blocked keyword: ${result.matchedItem}"
+        when (channelBlocklist.recordStrike(channel, videoId, snapshot.title, reason)) {
+            ChannelBlocklist.StrikeResult.CHANNEL_BLOCKED -> {
+                Log.w(TAG, "CHANNEL_AUTO_BLOCKED channel=$channel threshold=${ChannelBlocklist.BLOCK_THRESHOLD}")
+                repository.addLogEntry("CHANNEL BLOCKED: $channel (2 strikes)")
+            }
+            ChannelBlocklist.StrikeResult.RECORDED -> {
+                Log.d(TAG, "CHANNEL_STRIKE_RECORDED channel=$channel (1/${ChannelBlocklist.BLOCK_THRESHOLD})")
+            }
+            else -> {
+                // IGNORED / ALREADY_BLOCKED — nothing to do.
+            }
+        }
+    }
+
+    /** Extract a YouTube video id from a watch URL (v=... or youtu.be/...). */
+    private fun extractYouTubeVideoId(url: String): String? {
+        return try {
+            val vMatch = Regex("[?&]v=([A-Za-z0-9_-]{11})").find(url)
+            if (vMatch != null) return vMatch.groupValues[1]
+            val shortMatch = Regex("youtu\\.be/([A-Za-z0-9_-]{11})").find(url)
+            shortMatch?.groupValues?.get(1)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun showBlockOverlay(result: MatchResult.Blocked, sourcePackage: String) {
         try {
             val intent = Intent(this, com.example.url_blocker.ui.BlockOverlayActivity::class.java).apply {
@@ -1937,6 +2946,11 @@ class UrlBlockerService : AccessibilityService() {
                 putExtra("blocked_item", result.matchedItem)
                 putExtra("blocked_type", result.matchType.name)
                 putExtra("source_package", sourcePackage)
+                // For channel blocks the matched item IS the channel name — let
+                // the overlay render it distinctly ("Channel blocked: X").
+                if (result.matchType == MatchType.CHANNEL) {
+                    putExtra("channel_name", result.matchedItem)
+                }
             }
             startActivity(intent)
         } catch (e: Exception) {

@@ -4,9 +4,22 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.url_blocker.matching.ContentSnapshot
+import com.example.url_blocker.matching.FeedVideoCard
 import com.example.url_blocker.matching.QueryConfidence
 import com.example.url_blocker.matching.QuerySource
 import java.util.Locale
+
+/**
+ * Pure thumbnail-region geometry result. A plain data holder (not
+ * android.graphics.Rect) so the computation stays unit-testable — the
+ * mockable android.jar stubs Rect's constructor and methods as no-ops, so
+ * a JVM test can neither construct a Rect with values nor read one back.
+ * The service adapts this to a real Rect when cropping the screenshot.
+ */
+data class ThumbnailRegion(val left: Int, val top: Int, val right: Int, val bottom: Int) {
+    val width: Int get() = right - left
+    val height: Int get() = bottom - top
+}
 
 /**
  * Unified extractor for URLs, queries, and titles from Chrome and Google apps.
@@ -38,6 +51,43 @@ class ContentExtractor {
         private const val MAX_TRAVERSAL_DEPTH = 50
         private const val MIN_URL_LENGTH = 4
         private const val MIN_QUERY_LENGTH = 2
+        // Pre-emptive feed-title scan: cap the number of candidate titles kept
+        // per scan so the identity string stays bounded and a feed with many
+        // cards can't bloat memory/dedup. WebView-rendered YouTube cards sit
+        // DEEP in the tree (on-device evidence: Google-app tab chips at depth
+        // 99+, shared MAX_TRAVERSAL_DEPTH=50 silently missed them), so this scan
+        // gets the same deep bound + node budget as the chip scan — a shallow
+        // window would make the whole feature a silent no-op.
+        private const val MAX_FEED_TITLES = 20
+        private const val FEED_SCAN_MAX_DEPTH = 150
+        private const val FEED_SCAN_NODE_BUDGET = 2000
+        // Feed-card shape guard: YouTube cards span most of the screen width
+        // and are TALL (16:9 thumbnail + title + metadata ≈ 250-400px on a
+        // phone), while Chrome UI tiles are short. On-device evidence: Chrome's
+        // NTP tiles ("Ask AI Mode", "New Incognito tab") measure 490x110 on a
+        // ~2400px-tall screen — they passed the old 90px gate and were
+        // cropped/analyzed as fake thumbnails while the URL bar still read
+        // m.youtube.com (a stale URL during the NTP transition defeats URL-only
+        // gating). The height gate is therefore a RELATIVE fraction of the
+        // screen height (~8% ≈ 190px on that device) so it adapts across
+        // screen sizes: it stays well above UI-tile height (NTP tiles are only
+        // ~4-5% of screen height) while never excluding a real card on a small
+        // or landscape screen. Combined with the YouTube-card metadata check in
+        // extractYouTubeFeedCards this keeps ONLY real video cards (which span
+        // their thumbnail) in the card list.
+        private const val MIN_CARD_WIDTH_FRACTION = 0.45f
+        private const val MIN_CARD_HEIGHT_FRACTION = 0.08f
+        // YouTube card thumbnails are 16:9; the NSFW pipeline crops the actual
+        // image region (never the title text row). These bound the geometry.
+        // THUMBNAIL_HEIGHT_FACTOR converts a thumbnail WIDTH to its HEIGHT
+        // (h = w * 9/16).
+        const val THUMBNAIL_HEIGHT_FACTOR = 9f / 16f
+        // The smallest region the pipeline will treat as a thumbnail. Anything
+        // smaller is a title/text strip or a channel avatar, not a video
+        // thumbnail — analyzing it would feed the model text (observed
+        // on-device: an 800x79 title row was analyzed as a "thumbnail").
+        const val MIN_THUMBNAIL_WIDTH = 200
+        const val MIN_THUMBNAIL_HEIGHT = 100
 
         // The Google app's results page nests its WebView — and thus the tab
         // chips — extremely deep in the accessibility tree. On-device evidence:
@@ -221,6 +271,12 @@ class ContentExtractor {
         private val UDM_RAW = Regex("""(?:^|[?&])udm=(\d+)(?:&|$)""")
         private val UDM_ENCODED = Regex("""(?:^|[?&])udm%3D(\d+)(?:&|%26|$)""")
 
+        // Feed card metadata separator (spaced or unspaced bullets / pipes),
+        // shared by feedTitleSegment and channelFromCardText — both run per
+        // candidate node / per card inside the 500ms polling hot path, so the
+        // regex is compiled once here instead of on every call.
+        private val CARD_SEPARATOR = Regex("\\s*[•·|]\\s*")
+
         /**
          * Map a Google tab chip label (as exposed by the accessibility tree)
          * to a canonical tab name, or null when the label is not a Google tab.
@@ -286,6 +342,19 @@ class ContentExtractor {
         }
 
         /**
+         * YouTube UI screens whose " - YouTube" window titles are NOT videos
+         * (home feed, Shorts, Subscriptions, ...). Shared by
+         * [youtubeTitleFromChromeWindowTitle] and [isYouTubeCardText] so a
+         * " - YouTube"-suffixed UI screen title (e.g. "Home - YouTube" from the
+         * tab strip) can never be mistaken for a video card.
+         */
+        private val YOUTUBE_UI_SCREENS = setOf(
+            "youtube", "shorts", "home", "subscriptions", "history",
+            "watch later", "liked videos", "playlists", "library", "settings",
+            "search"
+        )
+
+        /**
          * Extract the video title from a Chrome window title on a YouTube page.
          *
          * Chrome prefixes its accessibility window title with "Chrome: " and
@@ -306,14 +375,197 @@ class ContentExtractor {
             t = t.substring(0, t.length - " - YouTube".length).trim()
             if (t.isBlank() || t.length > 200) return null
             // YouTube UI screens that are not videos.
-            if (t.lowercase(Locale.ROOT) in setOf(
-                    "youtube", "shorts", "home", "subscriptions", "history",
-                    "watch later", "liked videos", "playlists", "library", "settings",
-                    "search"
-                )) {
+            if (t.lowercase(Locale.ROOT) in YOUTUBE_UI_SCREENS) {
                 return null
             }
             return t
+        }
+
+        /**
+         * Isolate the title segment of a feed card's accessibility string.
+         * Some WebViews expose a feed card as ONE combined string:
+         * "Title by Channel • 1.2M views • 3 days ago". The title is the
+         * segment before the first metadata separator — the rest (views, age,
+         * channel) must not participate in keyword matching or dedup. Regex
+         * (not literal separators) so bullets with or without surrounding
+         * spaces are both split. Pure so unit tests can cover it without a tree.
+         */
+        fun feedTitleSegment(text: String?): String {
+            if (text.isNullOrBlank()) return ""
+            val trimmed = text.trim()
+            val firstSegment = trimmed.split(CARD_SEPARATOR).first().trim()
+            return if (firstSegment.isNotEmpty()) firstSegment else trimmed
+        }
+
+        /**
+         * Extract the channel name from a feed card's combined accessibility
+         * string. YouTube's WebView exposes a card as ONE string in the shape
+         * "Title by Channel • 1.2M views • 3 days ago" — the channel sits
+         * between the " by " separator and the first metadata bullet. Uses the
+         * LAST " by " in the title segment so a title that itself contains
+         * " by " (e.g. "Songs by Adele • 2M views") still yields the trailing
+         * channel.
+         *
+         * Conservative by design: extraction requires metadata bullets (the
+         * channel-by pattern is only trusted when the full card carries the
+         * "views/ago" metadata that real YouTube cards expose). A title that
+         * merely contains " by " with no metadata is ambiguous and ignored —
+         * this prevents a sentence-y title ("Songs by Adele to Cry To") from
+         * producing a junk channel. Also rejects implausibly long channels.
+         *
+         * Pure so unit tests can cover it without a tree.
+         */
+        fun channelFromCardText(text: String?): String? {
+            if (text.isNullOrBlank()) return null
+            val trimmed = text.trim()
+            // No metadata bullets — no trusted channel-by signal.
+            if (!trimmed.contains('•') && !trimmed.contains('·') && !trimmed.contains('|')) {
+                return null
+            }
+            // Reuse feedTitleSegment: the channel lives in the same first
+            // segment (title + " by " + channel) before the metadata bullets.
+            val first = feedTitleSegment(trimmed)
+            val byIdx = first.lastIndexOf(" by ")
+            if (byIdx <= 0) return null
+            // Strip leading non-alphanumerics (@, dashes, bullets, ...) so the
+            // extracted name matches the blocklist's normalized channel names
+            // (e.g. "— HotGirls TV" -> "HotGirls TV").
+            val channel = first.substring(byIdx + " by ".length)
+                .trim()
+                .trimStart { !it.isLetterOrDigit() }
+            if (channel.isEmpty() || channel.length > 40) return null
+            return channel
+        }
+
+        /**
+         * True when [text] carries the combined metadata that ONLY real
+         * YouTube cards expose, in either of the two on-device shapes:
+         *   1. "Title by Channel • 1.2M views • 3 days ago" — a separator
+         *      bullet/pipe paired with view/age/subscriber metadata.
+         *   2. "Video Title - YouTube" — the title node of a video page/card
+         *      carrying the YouTube brand suffix.
+         * Chrome UI tiles ("Ask AI Mode", "New Incognito tab") have neither
+         * and are rejected. Pure so unit tests can cover it without a tree.
+         */
+        fun isYouTubeCardText(text: String?): Boolean {
+            if (text.isNullOrBlank()) return false
+            val lower = text.lowercase(Locale.ROOT)
+            val hasSeparator = text.contains('•') || text.contains('·') || text.contains('|')
+            val hasViewMeta = lower.contains("views") || lower.contains(" ago") ||
+                lower.contains("subscriber")
+            if (hasSeparator && hasViewMeta) return true
+            // "Video Title - YouTube": only trusted when the part before the
+            // suffix is a real video title — a YouTube UI screen ("Home -
+            // YouTube", "Shorts - YouTube") from the tab strip is NOT a card
+            // and must not pass the gate at any height.
+            if (lower.endsWith(" - youtube")) {
+                val base = text.substring(0, text.length - " - YouTube".length).trim()
+                return base.length in 1..200 &&
+                    base.lowercase(Locale.ROOT) !in YOUTUBE_UI_SCREENS
+            }
+            return false
+        }
+
+        /**
+         * Conservative profile for a YouTube feed/search card title, used by
+         * the pre-emptive feed-title scan ([extractYouTubeFeedCards]) to pick
+         * candidate video titles out of the tree without flagging UI labels,
+         * metadata, or URLs.
+         *
+         * Criteria (all must hold):
+         *  - 10..200 chars — video titles are longer than chips/labels but
+         *    shorter than whole pages or descriptions
+         *  - not a URL / web address
+         *  - not a search-box placeholder or app-chrome text
+         *  - no feed metadata markers (view counts, "ago", Subscribe, Shorts)
+         *
+         * Pure so unit tests can cover the filter rules without a tree.
+         */
+        fun isLikelyVideoTitle(text: String?): Boolean {
+            val trimmed = feedTitleSegment(text)
+            if (trimmed.isEmpty()) return false
+            if (trimmed.length !in 10..200) return false
+            val lower = trimmed.lowercase(Locale.ROOT)
+            if (lower.startsWith("http://") || lower.startsWith("https://") ||
+                lower.startsWith("www.")
+            ) return false
+            // url-ish (dots, no spaces, short): e.g. "m.youtube.com"
+            if (lower.contains(".") && !lower.contains(" ") && lower.length > 4) return false
+            if (lower in setOf(
+                    "search", "ask anything", "ask google", "type here", "search query",
+                    "search or type url", "search google or type url", "search or type web address",
+                    "home", "shorts", "subscriptions", "library", "history", "watch later",
+                    "liked videos", "playlists", "settings", "trending", "explore", "music",
+                    // Chrome/YouTube UI chrome observed on-device being picked up
+                    // as fake feed cards (defense in depth — the card-size bounds
+                    // gate in extractYouTubeFeedCards is the primary guard).
+                            "open the home page", "search with your voice",
+                    // Chrome NTP tiles observed on-device as fake cards
+                    // (490x110, no thumbnail): the height + metadata gate is the
+                    // primary guard; these deny the exact observed labels too.
+                    // (Short entries like "share"/"downloads"/"incognito" are
+                    // already excluded by the 10-char minimum and are not listed.)
+                    "ask ai mode", "new incognito tab",
+                    "recent tabs", "add to home screen", "customize chrome",
+                    "all bookmarks", "settings and more",
+                    "find in page", "request desktop site"
+                )) return false
+            if (lower.contains("views") || lower.contains(" ago") ||
+                lower.contains("subscribe") || lower.contains("subscriber")
+            ) return false
+            if (lower.matches(Regex("^[\\d:., ]+$"))) return false
+            if (lower.startsWith("#")) return false
+            return true
+        }
+
+        /**
+         * Compute the THUMBNAIL IMAGE region of a feed card from its title
+         * node's bounds. YouTube cards are thumbnail-on-top, title-below, so:
+         *  - TALL nodes (full card: thumbnail + title + metadata) have their
+         *    top edge at the thumbnail's top → crop the top 16:9 band.
+         *  - SHORT nodes (title/metadata row only — the tree often exposes
+         *    just the text) have the thumbnail directly ABOVE the row → crop
+         *    the 16:9 band ending at the row's top.
+         * The result is clamped to the screen and rejected (null) when it
+         * fails the size sanity gate — a tiny rect is text, not a thumbnail.
+         * Pure so unit tests can cover the geometry without a tree.
+         */
+        fun thumbnailBoundsForCard(
+            left: Int,
+            top: Int,
+            right: Int,
+            bottom: Int,
+            screenW: Int,
+            screenH: Int
+        ): ThumbnailRegion? {
+            // Plain-int geometry (no android.graphics.Rect): the mockable
+            // android.jar stubs Rect's constructor and methods, so the math
+            // must be pure to stay unit-testable without a device.
+            val thumbW = right - left
+            if (thumbW < MIN_THUMBNAIL_WIDTH) return null
+            val thumbH = (thumbW * THUMBNAIL_HEIGHT_FACTOR).toInt()
+            val cardTop = if ((bottom - top) >= thumbW * 0.55f) {
+                // Full-card node: its top edge IS the thumbnail's top.
+                top
+            } else {
+                // Title row only: the thumbnail sits directly above the text —
+                // but ONLY when the full 16:9 band fits on screen. A row too
+                // near the top has no thumbnail above it on screen (clamping
+                // would leave a useless strip, not a thumbnail) → skip. This is
+                // deliberate: on a scrolled feed a partially-visible thumbnail
+                // in that position gets NO image signal (text signals still
+                // apply) rather than a garbage partial crop.
+                if (top - thumbH < 0) return null
+                top - thumbH
+            }
+            val cLeft = left.coerceIn(0, (screenW - 1).coerceAtLeast(0))
+            val cTop = cardTop.coerceIn(0, (screenH - 1).coerceAtLeast(0))
+            val cRight = (left + thumbW).coerceIn(cLeft + 1, screenW.coerceAtLeast(1))
+            val cBottom = (cardTop + thumbH).coerceIn(cTop + 1, screenH.coerceAtLeast(1))
+            if (cRight - cLeft < MIN_THUMBNAIL_WIDTH || cBottom - cTop < MIN_THUMBNAIL_HEIGHT) {
+                return null
+            }
+            return ThumbnailRegion(cLeft, cTop, cRight, cBottom)
         }
     }
 
@@ -385,13 +637,26 @@ class ContentExtractor {
                 Log.i(TAG, "YOUTUBE_INAPP_DOMAIN_DETECTED domain=${ytInApp.domain} -> url=$ytUrl")
             }
 
+            // Channel + description (best-effort): the channel name/handle is
+            // needed for permanent channel blocking; the description is a
+            // secondary keyword signal. Both are read from the native tree
+            // (the YouTube app exposes the channel link and description text
+            // to accessibility).
+            val ytChannel = YouTubeChannelIdentifier.extractFromTree(rootNode)
+            val ytDescription = extractYouTubeDescription(rootNode)
+            if (ytChannel != null) {
+                Log.i(TAG, "YOUTUBE_CHANNEL_EXTRACTED name=$ytChannel")
+            }
+
             return ContentSnapshot(
                 packageName = packageName,
                 url = ytUrl,  // null on normal YouTube screens (no in-app browser)
                 query = queryFromSignals,
                 title = title,
                 queryConfidence = if (queryFromSignals != null) QueryConfidence.MEDIUM else QueryConfidence.NONE,
-                querySource = QuerySource.NONE
+                querySource = QuerySource.NONE,
+                channel = ytChannel,
+                description = ytDescription
             )
         }
 
@@ -554,6 +819,32 @@ class ContentExtractor {
         if (title == null && !windowTitle.isNullOrBlank()) {
             title = windowTitle
         }
+
+        // Chrome YouTube window-title fallback: Chrome's compositor frequently
+        // exposes "Web View" (or nothing) as the active window title instead of
+        // "Chrome: <Video Title> - YouTube", leaving the title check with
+        // nothing to match (the user's observed "no overlay" on m.youtube.com).
+        // When the window title carries no parseable video title but the URL
+        // is a YouTube WATCH page, read the video title from the on-page tree
+        // and synthesize the standard Chrome window-title shape so the
+        // existing matcher path fires unchanged.
+        //
+        // Deliberately restricted to watch/shorts URLs (never the home feed or
+        // search results): the tree scan picks the FIRST visible text block,
+        // which on feed/search pages is a suggestion/result caption — checking
+        // that against the strict keyword set would falsely block a clean page.
+        val titleParses = title?.let(ContentExtractor::youtubeTitleFromChromeWindowTitle) != null
+        val isWatchUrl = url?.let { u ->
+            u.contains("/watch") || u.contains("/shorts/")
+        } == true
+        if (!titleParses && packageName in CHROME_PACKAGES && isWatchUrl) {
+            val treeTitle = extractChromeYouTubeTreeTitle(rootNode)
+            if (treeTitle != null) {
+                Log.i(TAG, "CHROME_YOUTUBE_TITLE_FROM_TREE=$treeTitle")
+                title = "Chrome: $treeTitle - YouTube"
+            }
+        }
+
         val incognito = packageName in CHROME_PACKAGES &&
             detectIncognitoMode(rootNode, windowTitle, event)
 
@@ -574,7 +865,287 @@ class ContentExtractor {
             googleTabFromUrl(url)
         }
 
-        return ContentSnapshot(packageName, url, query, title, queryConfidence, querySource, incognito, googleTab)
+        // Channel identification for YouTube pages opened in Chrome: the mobile
+        // window title carries no channel, so read the on-screen tree. Only runs
+        // on a positive YouTube context (YouTube domain or " - YouTube" window
+        // title) to avoid wasting scans on ordinary pages.
+        val channel = if (packageName in CHROME_PACKAGES &&
+            (ContentExtractor.isYouTubeDomain(url) ||
+                (windowTitle != null && windowTitle.lowercase().endsWith(" - youtube")))
+        ) {
+            YouTubeChannelIdentifier.extractFromTree(rootNode)
+        } else {
+            null
+        }
+        if (channel != null) {
+            Log.i(TAG, "CHROME_YOUTUBE_CHANNEL_EXTRACTED name=$channel")
+        }
+
+        // Pre-emptive feed blocking: on YouTube feed/search pages (NOT watch
+        // pages) the window title is just "Chrome: YouTube", so the watch-title
+        // check can never fire before the user opens a video. Read candidate
+        // cards (title + bounds) from the page tree so a blocked card is caught
+        // and marked BEFORE navigation. Deliberately watch-only-excluded: on
+        // watch pages the related/suggestion rail would otherwise be scanned as
+        // a feed.
+        val feedCards = if (packageName in CHROME_PACKAGES &&
+            ContentExtractor.isYouTubeDomain(url) && !isWatchUrl
+        ) {
+            extractYouTubeFeedCards(rootNode)
+        } else {
+            emptyList()
+        }
+        if (feedCards.isNotEmpty()) {
+            Log.i(TAG, "YOUTUBE_FEED_CARDS count=${feedCards.size}")
+        }
+
+        return ContentSnapshot(
+            packageName = packageName,
+            url = url,
+            query = query,
+            title = title,
+            queryConfidence = queryConfidence,
+            querySource = querySource,
+            incognito = incognito,
+            googleTab = googleTab,
+            channel = channel,
+            feedCards = feedCards
+        )
+    }
+
+    /**
+     * Conservative on-page video-title scan for YouTube pages in Chrome when
+     * the window title is unavailable (Chrome often exposes "Web View" as the
+     * active window title).
+     *
+     * Returns the FIRST visible text node in tree order that fits a
+     * video-title profile (top-of-page = the title area on YouTube watch
+     * pages). Only used when the window title carried no video title, so
+     * ordinary Chrome pages are unaffected. Returns null when the WebView
+     * does not expose page content to accessibility (the fallback then simply
+     * does not fire).
+     */
+    private fun extractChromeYouTubeTreeTitle(rootNode: AccessibilityNodeInfo): String? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+        var depth = 0
+        while (queue.isNotEmpty() && depth < MAX_TRAVERSAL_DEPTH) {
+            val node = queue.removeFirst()
+            val text = try { extractNodeText(node)?.trim() } catch (e: Exception) { null }
+            if (text != null) {
+                val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
+                if (visible && text.length in 8..200 &&
+                    !isGenericSearchHint(text) &&
+                    !isAppUiText(text) &&
+                    !looksLikeUrl(text) &&
+                    !text.contains("Subscribe", ignoreCase = true) &&
+                    !text.contains("subscriber", ignoreCase = true) &&
+                    !text.contains("views", ignoreCase = true) &&
+                    !text.contains("likes", ignoreCase = true) &&
+                    !text.contains("ago", ignoreCase = true) &&
+                    !text.startsWith("#") &&
+                    !text.matches(Regex("^[\\d:.kKMbB ]+$"))
+                ) {
+                    return text
+                }
+            }
+            val childCount = try { node.childCount } catch (e: Exception) { 0 }
+            for (i in 0 until childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            depth++
+        }
+        return null
+    }
+
+    /**
+     * Collect candidate video cards (title + bounds + extra text signals) from
+     * a YouTube feed/search page tree (Chrome). The window title on feed pages
+     * is just "Chrome: YouTube", so titles must be read from the page content
+     * itself for pre-emptive blocking. Conservative: only visible text nodes
+     * that look like video titles are kept (see
+     * [ContentExtractor.isLikelyVideoTitle]), deduplicated and capped at
+     * [MAX_FEED_TITLES]. The screen bounds are used by the service to draw a
+     * floating "blocked" marker over each card; the content description
+     * (often a thumbnail caption) and the channel name (from the combined
+     * "Title by Channel • views • ago" string) are extra signals that catch
+     * deceptive videos with "safe" titles. Every node access is guarded —
+     * this runs inside the 500ms polling loop on possibly-recycled nodes.
+     */
+    private fun extractYouTubeFeedCards(rootNode: AccessibilityNodeInfo): List<FeedVideoCard> {
+        val seen = LinkedHashMap<String, FeedVideoCard>()
+        // Reference width for the card-shape guard: the root node's bounds span
+        // the active window ≈ the screen width (context-free and accurate).
+        val rootRect = android.graphics.Rect()
+        val hasRootBounds = try {
+            rootNode.getBoundsInScreen(rootRect)
+            !rootRect.isEmpty
+        } catch (e: Exception) {
+            false
+        }
+        val screenWidth = if (hasRootBounds) rootRect.width()
+            else android.content.res.Resources.getSystem().displayMetrics.widthPixels
+        val screenHeight = if (hasRootBounds) rootRect.height()
+            else android.content.res.Resources.getSystem().displayMetrics.heightPixels
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+        var depth = 0
+        var visited = 0
+        while (queue.isNotEmpty() && depth < FEED_SCAN_MAX_DEPTH &&
+            visited < FEED_SCAN_NODE_BUDGET && seen.size < MAX_FEED_TITLES
+        ) {
+            visited++
+            val node = queue.removeFirst()
+            val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
+            if (visible) {
+                val text = try { extractNodeText(node)?.trim() } catch (e: Exception) { null }
+                if (text != null && ContentExtractor.isLikelyVideoTitle(text)) {
+                    val title = ContentExtractor.feedTitleSegment(text)
+                    if (title.isNotEmpty() && !seen.containsKey(title)) {
+                        val bounds = android.graphics.Rect()
+                        val hasBounds = try {
+                            node.getBoundsInScreen(bounds)
+                            !bounds.isEmpty
+                        } catch (e: Exception) {
+                            false
+                        }
+                        // Card-shape guard: drop UI chrome that passes the title
+                        // profile but is NOT a video card — it would otherwise be
+                        // cropped as a fake thumbnail and analyzed/badged.
+                        //   - Width: cards span most of the screen.
+                        //   - Height: cards are TALL (thumbnail + title + meta ≈
+                        //     8%+ of screen height). Chrome NTP tiles measured
+                        //     490x110 (~4.5%) on-device and passed the old 90px
+                        //     gate ("Ask AI Mode", "New Incognito tab" were
+                        //     analyzed as fake thumbnails). A node either is
+                        //     full-card tall (>= MIN_CARD_HEIGHT_FRACTION of the
+                        //     screen, RELATIVE so small/landscape screens keep
+                        //     real cards) OR carries the combined "Title by
+                        //     Channel • views • ago" metadata that only real
+                        //     YouTube cards expose — so a compact layout that
+                        //     exposes the title row alone (short node) still
+                        //     qualifies when the metadata is present, while UI
+                        //     tiles (no metadata, short) never do.
+                        val isCardSized = hasBounds &&
+                            bounds.width() >= screenWidth * MIN_CARD_WIDTH_FRACTION &&
+                            (bounds.height() >= screenHeight * MIN_CARD_HEIGHT_FRACTION ||
+                                ContentExtractor.isYouTubeCardText(text))
+                        if (!isCardSized) continue
+                        // Extra text signals: the node's own content description
+                        // (thumbnail caption on many WebView feeds — the user's
+                        // "safe title, revealing thumbnail" case) and the
+                        // channel name from the combined card string. The
+                        // description is skipped when it IS the title text
+                        // (extractNodeText falls back to the description, so
+                        // they'd be identical and re-checking is redundant).
+                        val contentDesc = try {
+                            node.contentDescription?.toString()?.trim()
+                        } catch (e: Exception) {
+                            null
+                        }?.takeIf { it.isNotEmpty() && it != text }
+                        val channel = ContentExtractor.channelFromCardText(text)
+                        // Thumbnail-image region (never the title text row): the
+                        // 16:9 band computed from the card node's shape. The NSFW
+                        // pipeline crops THIS — an 800x79 title strip must never
+                        // be fed to the model as a "thumbnail" (observed).
+                        val thumbBounds = if (hasBounds) {
+                            ContentExtractor.thumbnailBoundsForCard(
+                                bounds.left, bounds.top, bounds.right, bounds.bottom,
+                                screenWidth, screenHeight
+                            )?.let { android.graphics.Rect(it.left, it.top, it.right, it.bottom) }
+                        } else {
+                            null
+                        }
+                        if (thumbBounds != null) {
+                            Log.d(TAG, "THUMBNAIL_BOUNDS=[${thumbBounds.left},${thumbBounds.top},${thumbBounds.right},${thumbBounds.bottom}] THUMBNAIL_SIZE=${thumbBounds.width()}x${thumbBounds.height()} title=${title.take(40)}")
+                        }
+                        seen[title] = FeedVideoCard(
+                            title,
+                            if (hasBounds) bounds else null,
+                            contentDesc,
+                            channel,
+                            thumbnailBounds = thumbBounds
+                        )
+                    }
+                }
+            }
+            val childCount = try { node.childCount } catch (e: Exception) { 0 }
+            for (i in 0 until childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            depth++
+        }
+        return seen.values.toList()
+    }
+
+    /**
+     * Best-effort extraction of the YouTube video description from the app's
+     * accessibility tree. Returns null when no description-like text block is
+     * found (the app only exposes the full description once expanded / for
+     * certain renderers), so this is purely an additional signal, never a
+     * requirement for blocking.
+     *
+     * CONSERVATIVE by design: only text nodes whose class name or view id
+     * explicitly marks them as the description / metadata / about container
+     * are considered. A naive "longest text node" heuristic would pick up
+     * comments or suggested-video captions and, with strict keyword blocking
+     * (no educational exceptions), over-block clean videos. If no such node
+     * exists in the tree, null is returned and description matching simply
+     * doesn't fire.
+     */
+    private fun extractYouTubeDescription(rootNode: AccessibilityNodeInfo): String? {
+        var best: String? = null
+        var bestLen = 0
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+        var depth = 0
+        while (queue.isNotEmpty() && depth < MAX_TRAVERSAL_DEPTH) {
+            val node = queue.removeFirst()
+            val className = try { node.className?.toString() } catch (e: Exception) { null } ?: ""
+            val viewId = try { node.viewIdResourceName } catch (e: Exception) { null } ?: ""
+            val isDescContainer = className.contains("description", ignoreCase = true) ||
+                className.contains("metadata", ignoreCase = true) ||
+                viewId.contains("description", ignoreCase = true) ||
+                viewId.contains("metadata", ignoreCase = true) ||
+                viewId.contains("_about", ignoreCase = true)
+
+            // Only ACCEPT text from description-flagged nodes — but ALWAYS
+            // keep traversing children (a description TextView nests deep under
+            // generic RecyclerView/ViewGroup containers whose class/view ids do
+            // not mention "description"). Gating traversal here would make the
+            // scan unable to ever reach the description.
+            if (isDescContainer) {
+                val text = extractNodeText(node)
+                if (text != null) {
+                    val trimmed = text.trim()
+                    if (trimmed.length > 100 && trimmed.length > bestLen &&
+                        !isGenericSearchHint(trimmed) &&
+                        !isAppUiText(trimmed) &&
+                        !looksLikeUrl(trimmed) &&
+                        !trimmed.contains("Subscribe", ignoreCase = true) &&
+                        !trimmed.contains("views", ignoreCase = true)
+                    ) {
+                        bestLen = trimmed.length
+                        best = trimmed
+                    }
+                }
+            }
+            // Guard every node access: this runs inside the 500ms polling loop
+            // on possibly-recycled nodes; an unguarded childCount/getChild
+            // would crash the whole accessibility service.
+            val childCount = try { node.childCount } catch (e: Exception) { 0 }
+            for (i in 0 until childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            depth++
+        }
+        if (best != null) {
+            Log.d(TAG, "YOUTUBE_DESCRIPTION_FOUND len=$bestLen")
+        }
+        return best
     }
 
     /**

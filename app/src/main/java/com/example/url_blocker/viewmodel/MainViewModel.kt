@@ -12,6 +12,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import com.example.url_blocker.repository.BlockRepository
+import com.example.url_blocker.repository.ChannelBlocklist
 import com.example.url_blocker.service.ProtectionMonitorService
 
 class MainViewModel : ViewModel() {
@@ -19,6 +20,15 @@ class MainViewModel : ViewModel() {
     // ── UI State ───────────────────────────────────────────────────
 
     var isAccessibilityEnabled by mutableStateOf(false)
+        private set
+
+    /**
+     * "Display over other apps" (SYSTEM_ALERT_WINDOW) permission — needed to
+     * draw the floating "Blocked" cards over YouTube feed videos in Chrome.
+     * This is a SPECIAL permission: Android never shows a dialog for it, so
+     * the app must send the user to the Settings screen to grant it.
+     */
+    var isOverlayPermissionEnabled by mutableStateOf(false)
         private set
 
     var isDeviceAdminEnabled by mutableStateOf(false)
@@ -33,19 +43,33 @@ class MainViewModel : ViewModel() {
     var newDomainText by mutableStateOf("")
         private set
 
+    var newChannelText by mutableStateOf("")
+        private set
+
     val userKeywords = mutableStateListOf<String>()
     val blockedDomains = mutableStateListOf<String>()
+    val blockedChannels = mutableStateListOf<String>()
     val logEntries = mutableStateListOf<String>()
 
     // ── Repo ───────────────────────────────────────────────────────
 
     private var repository: BlockRepository? = null
+    private var channelBlocklist: ChannelBlocklist? = null
 
     fun initialize(context: Context) {
         if (repository != null) return
         repository = BlockRepository(context.applicationContext)
+        // The accessibility service holds its own ChannelBlocklist instance —
+        // both share the same SharedPreferences, so a channel added here is
+        // visible to the service immediately (it reads the blocklist on every
+        // match check) and vice-versa. NOTE: each save() writes the whole
+        // blocked-set snapshot (last-writer-wins), so a manual add/remove
+        // racing a service-side strike record could theoretically lose one —
+        // acceptable in practice (UI and service rarely mutate simultaneously).
+        channelBlocklist = ChannelBlocklist(context.applicationContext)
         refreshKeywords()
         refreshDomains()
+        refreshChannels()
         refreshLog()
         checkHasPassword()
         refreshStrictMode()
@@ -208,6 +232,48 @@ class MainViewModel : ViewModel() {
         context.startActivity(intent)
     }
 
+    // ── Display over other apps (feed-block markers) ───────────────
+
+    fun checkOverlayPermissionStatus(context: Context) {
+        isOverlayPermissionEnabled = try {
+            Settings.canDrawOverlays(context)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Open the system screen where the user grants "Display over other apps".
+     * SYSTEM_ALERT_WINDOW is a special permission: it cannot be requested with
+     * a runtime dialog — the user must toggle it in this Settings screen.
+     */
+    fun openOverlayPermissionSettings(context: Context) {
+        try {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                android.net.Uri.parse("package:${context.packageName}")
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            android.util.Log.e("MainViewModel", "Failed to open overlay permission settings: ${e.message}")
+            // Fallback: deep-link to this app's details page — the "Display over
+            // other apps" toggle lives there on every Android version.
+            try {
+                val fallback = Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    android.net.Uri.parse("package:${context.packageName}")
+                ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(fallback)
+            } catch (e2: Exception) {
+                android.util.Log.e("MainViewModel", "Failed to open app details fallback: ${e2.message}")
+            }
+        }
+    }
+
     // ── Device Admin (uninstall friction) / Device Owner (true uninstall block) ──
 
     var isDeviceOwner by mutableStateOf(false)
@@ -347,6 +413,38 @@ class MainViewModel : ViewModel() {
     private fun refreshDomains() {
         blockedDomains.clear()
         blockedDomains.addAll((repository?.getBlockedDomains() ?: emptySet()).sorted())
+    }
+
+    // ── Channels (permanently blocked YouTube channels) ────────────
+    // Channels match case-insensitively and without a leading "@" (the
+    // blocklist normalizes on both write and read), so "CNN", "@cnn" and
+    // " @CNN " all block the same channel.
+
+    fun updateNewChannel(text: String) {
+        newChannelText = text
+    }
+
+    fun addChannel() {
+        val channel = newChannelText.trim()
+        if (channel.isEmpty()) return
+        channelBlocklist?.addChannel(channel, "Added manually")
+        newChannelText = ""
+        refreshChannels()
+    }
+
+    fun removeChannel(channel: String) {
+        channelBlocklist?.removeChannel(channel)
+        refreshChannels()
+    }
+
+    /**
+     * Re-read blocked channels from the blocklist. Public so the UI's periodic
+     * status loop can pick up channels auto-blocked by the service (which holds
+     * its own ChannelBlocklist instance over the same prefs).
+     */
+    fun refreshChannels() {
+        blockedChannels.clear()
+        blockedChannels.addAll((channelBlocklist?.getBlockedChannels() ?: emptySet()).sorted())
     }
 
     // ── Event Log ──────────────────────────────────────────────────

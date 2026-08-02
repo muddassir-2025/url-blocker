@@ -67,6 +67,7 @@ open class MainActivity : ComponentActivity() {
                 // stale "Protection Inactive" until the next poll tick.
                 viewModel.checkAccessibilityStatus(this)
                 viewModel.checkDeviceAdminStatus(this)
+                viewModel.checkOverlayPermissionStatus(this)
             }
         })
 
@@ -97,6 +98,12 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
             try {
                 viewModel.checkAccessibilityStatus(context)
                 viewModel.checkDeviceAdminStatus(context)
+                viewModel.checkOverlayPermissionStatus(context)
+                // Keep the Channels list in sync with the service: channels are
+                // auto-blocked by the 2-strike mechanism inside UrlBlockerService
+                // (a separate ChannelBlocklist instance over the same prefs), and
+                // that never notifies the UI — the periodic refresh picks them up.
+                viewModel.refreshChannels()
             } catch (e: Exception) {
                 android.util.Log.e("MainActivity", "Status refresh failed: ${e.message}")
             }
@@ -184,6 +191,12 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                 NavigationBarItem(
                     selected = selectedTab == 3,
                     onClick = { selectedTab = 3 },
+                    icon = { Icon(Icons.Filled.Group, contentDescription = null) },
+                    label = { Text("Channels") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 4,
+                    onClick = { selectedTab = 4 },
                     icon = { Icon(Icons.Filled.History, contentDescription = null) },
                     label = { Text("Log") }
                 )
@@ -204,7 +217,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                     0 -> DashboardTab(viewModel, deviceAdminLauncher)
                     1 -> KeywordsTab(viewModel)
                     2 -> WebsitesTab(viewModel)
-                    3 -> LogTab(viewModel)
+                    3 -> ChannelsTab(viewModel)
+                    4 -> LogTab(viewModel)
                 }
             }
         }
@@ -424,6 +438,73 @@ private fun DashboardTab(
                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
                         ) {
                             Text("Restore Protection", fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Feed Block Overlay permission card. SYSTEM_ALERT_WINDOW is a SPECIAL
+        // permission: Android never shows a runtime dialog for it, so the app
+        // must send the user to the Settings screen to grant it. Without it the
+        // floating "Blocked" cards cannot be drawn over YouTube feed videos in
+        // Chrome (the service falls back to the full block on the watch page).
+        item {
+            val isGranted = viewModel.isOverlayPermissionEnabled
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isGranted)
+                        MaterialTheme.colorScheme.surfaceVariant
+                    else
+                        MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Outlined.Layers,
+                        contentDescription = null,
+                        tint = if (isGranted)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Feed Block Overlay",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Medium,
+                            color = if (isGranted)
+                                MaterialTheme.colorScheme.onSurface
+                            else
+                                MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = if (isGranted)
+                                "Allowed — blocked videos are marked in the YouTube feed"
+                            else
+                                "Required — lets blocked videos be marked in the YouTube feed",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isGranted)
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            else
+                                MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f)
+                        )
+                    }
+                    if (!isGranted) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Button(
+                            onClick = { viewModel.openOverlayPermissionSettings(context) },
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                        ) {
+                            Text("Grant", fontSize = 13.sp)
                         }
                     }
                 }
@@ -1332,6 +1413,174 @@ private fun DomainItem(domain: String, onDelete: () -> Unit) {
                 Icon(
                     Icons.Filled.Delete,
                     contentDescription = "Delete $domain",
+                    tint = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+    }
+}
+
+// ── Channels Tab ─────────────────────────────────────────────────
+
+@Composable
+private fun ChannelsTab(viewModel: MainViewModel) {
+    var deleteTarget by remember { mutableStateOf<String?>(null) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        // How channel blocking works
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Blocked channels are permanent — every video from them is blocked, " +
+                        "even with a clean title. Channels are added automatically after 2 blocked " +
+                        "videos, or add one manually below. Names match without @ and case-insensitively.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Add channel input
+        OutlinedTextField(
+            value = viewModel.newChannelText,
+            onValueChange = { viewModel.updateNewChannel(it) },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Add a channel to block") },
+            placeholder = { Text("e.g., HotGirlsDaily or @HotGirlsDaily") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Ascii,
+                imeAction = ImeAction.Done
+            ),
+            keyboardActions = KeyboardActions(
+                onDone = { viewModel.addChannel() }
+            ),
+            trailingIcon = {
+                IconButton(onClick = { viewModel.addChannel() }) {
+                    Icon(Icons.Filled.Add, contentDescription = "Add channel")
+                }
+            }
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "Blocked channels (${viewModel.blockedChannels.size})",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Channels list
+        if (viewModel.blockedChannels.isEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "No channels blocked yet.\nAdd channel names above, or watch a few blocked videos " +
+                            "from one channel — it gets blocked automatically after 2.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(viewModel.blockedChannels.toList(), key = { it }) { channel ->
+                    ChannelItem(
+                        channel = channel,
+                        onDelete = { deleteTarget = channel }
+                    )
+                }
+            }
+        }
+
+        deleteTarget?.let { channel ->
+            AlertDialog(
+                onDismissRequest = { deleteTarget = null },
+                title = { Text("Remove channel?") },
+                text = { Text("Remove \"$channel\"? Videos from it will no longer be blocked.\n\nIt can be re-added automatically after 2 blocked videos.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        viewModel.removeChannel(channel)
+                        deleteTarget = null
+                    }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deleteTarget = null }) { Text("Cancel") }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChannelItem(channel: String, onDelete: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Outlined.Person,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = channel,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyLarge
+            )
+            IconButton(onClick = onDelete) {
+                Icon(
+                    Icons.Filled.Delete,
+                    contentDescription = "Delete $channel",
                     tint = MaterialTheme.colorScheme.error
                 )
             }
