@@ -36,6 +36,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.url_blocker.R
+import com.example.url_blocker.media.data.WatchProgressStore
 import com.example.url_blocker.media.model.MediaVideo
 import kotlinx.coroutines.delay
 
@@ -59,6 +60,8 @@ fun VideoPlayerScreen(
     isLandscape: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+
     var playerState by remember { mutableStateOf(YtState.UNSTARTED) }
     var errorCode by remember { mutableStateOf<Int?>(null) }
     var autoplayBlocked by remember { mutableStateOf(false) }
@@ -67,6 +70,12 @@ fun VideoPlayerScreen(
     // The "Open in YouTube app" option appears only after an in-app Retry has
     // already failed (per spec: "if the error persists after retrying once").
     var hasRetried by remember { mutableStateOf(false) }
+
+    // Watch progress: the player reports the real playback position (every
+    // ~5 s while playing + on pause/end); we persist a throttled fraction so
+    // the Media tab can show progress bars and a "Watched" badge.
+    val progressStore = remember { WatchProgressStore(context.applicationContext) }
+    var lastProgressSavedAt by remember { mutableStateOf(0L) }
 
     // Reset retry history when a different video is selected (NOT on retry).
     LaunchedEffect(video.videoId) {
@@ -124,6 +133,23 @@ fun VideoPlayerScreen(
                     // Late connection: playback finally started — drop any timeout card.
                     if (s == YtState.PLAYING || s == YtState.PAUSED) timedOut = false
                     playerState = s
+                    // Video finished: the whole thing counts as watched.
+                    if (s == YtState.ENDED) progressStore.set(video.videoId, 1f)
+                },
+                onProgress = { currentSeconds, durationSeconds ->
+                    // Persist throttled (the JS reports every ~5 s; don't burn
+                    // disk writes faster than the report cadence). Final
+                    // positions on pause/end pass the throttle: fraction 1.0
+                    // and near-completion values are worth saving immediately.
+                    if (durationSeconds > 0) {
+                        val fraction = (currentSeconds / durationSeconds)
+                            .toFloat().coerceIn(0f, 1f)
+                        val now = System.currentTimeMillis()
+                        if (fraction >= 0.98f || now - lastProgressSavedAt >= 5_000L) {
+                            progressStore.set(video.videoId, fraction)
+                            lastProgressSavedAt = now
+                        }
+                    }
                 },
                 onPlayerError = { code ->
                     // Log ONCE per error code (the bridge dedups repeats) with the

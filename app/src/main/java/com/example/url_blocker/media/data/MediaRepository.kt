@@ -52,7 +52,10 @@ class MediaRepository(context: Context) {
 
     /**
      * Resolves [input] (bare id, channel URL or @handle) and saves the channel.
-     * Network resolution of handles runs on a background dispatcher.
+     * Network resolution of handles runs on a background dispatcher. The
+     * avatar is NOT fetched here (it would block the add dialog on a page
+     * fetch) — [fillMissingAvatars] picks it up right after, triggered by the
+     * Media tab's channel-change effect; until then the UI shows initials.
      */
     suspend fun addChannel(input: String): AddChannelResult = withContext(Dispatchers.IO) {
         val trimmed = input.trim()
@@ -101,6 +104,7 @@ class MediaRepository(context: Context) {
                     .put("channelId", c.channelId)
                     .put("displayName", c.displayName)
                     .put("sourceRef", c.sourceRef)
+                    .put("avatarUrl", c.avatarUrl ?: "")
             )
         }
         prefs.edit().putString(KEY_CHANNELS, arr.toString()).apply()
@@ -114,12 +118,38 @@ class MediaRepository(context: Context) {
                 SavedChannel(
                     channelId = o.getString("channelId"),
                     displayName = o.optString("displayName", o.getString("channelId")),
-                    sourceRef = o.optString("sourceRef", o.getString("channelId"))
+                    sourceRef = o.optString("sourceRef", o.getString("channelId")),
+                    avatarUrl = o.optString("avatarUrl", "").ifBlank { null }
                 )
             }
         } catch (e: Exception) {
             emptyList()
         }
+    }
+
+    /**
+     * Fetches missing channel avatars (best-effort) and persists the updated
+     * channel list. Returns the updated list when anything changed, else null.
+     */
+    suspend fun fillMissingAvatars(channels: List<SavedChannel>): List<SavedChannel>? {
+        if (channels.none { it.avatarUrl == null }) return null
+        var changed = false
+        val updated = channels.map { c ->
+            if (c.avatarUrl == null) {
+                val url = ChannelAvatarResolver.fetchAvatar(c.channelId)
+                if (url != null) {
+                    changed = true
+                    c.copy(avatarUrl = url)
+                } else {
+                    c
+                }
+            } else {
+                c
+            }
+        }
+        if (!changed) return null
+        saveChannels(updated)
+        return updated
     }
 
     // ── Latest videos (RSS + cache) ─────────────────────────────────
@@ -160,7 +190,11 @@ class MediaRepository(context: Context) {
             }
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return@withContext null
             val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val videos = YouTubeRssParser.parse(body)
+            // Classify Shorts from the channel's /shorts tab (many Shorts omit
+            // the #shorts hashtag, so title-only detection misses most of them).
+            // Best-effort: an empty set degrades to hashtag detection.
+            val shortsIds = ShortsIdResolver.fetchShortsIds(channelId)
+            val videos = YouTubeRssParser.parse(body, shortsIds)
             // Trace every feed item straight from the parsed RSS so we can
             // confirm the videoId handed to the embedded player belongs to
             // this exact RSS entry (no stale/mixed/hardcoded ids).
@@ -180,6 +214,38 @@ class MediaRepository(context: Context) {
         }
     }
 
+    // ── Aggregate feed (Subscriptions-style: every saved channel) ──
+
+    /**
+     * Merges the cached videos of ALL [channels] (never network), newest
+     * first. Used for the instant first paint of the Media tab.
+     */
+    fun getAllCachedVideos(channels: List<SavedChannel>): List<MediaVideo> =
+        channels
+            .mapNotNull { getCachedVideos(it.channelId)?.first }
+            .flatten()
+            .sortedByDescending { it.publishedAtEpochMillis }
+
+    /**
+     * Refreshes EVERY channel's RSS feed and merges the results, newest
+     * first. Returns null only when every channel failed (the UI falls back to
+     * the cache and shows an error hint); partial failures keep the feeds that
+     * succeeded.
+     */
+    suspend fun refreshAllVideos(channels: List<SavedChannel>): List<MediaVideo>? {
+        var anySucceeded = false
+        val merged = ArrayList<MediaVideo>()
+        for (channel in channels) {
+            val fresh = refreshVideos(channel.channelId)
+            if (fresh != null) {
+                anySucceeded = true
+                merged.addAll(fresh)
+            }
+        }
+        if (!anySucceeded) return null
+        return merged.sortedByDescending { it.publishedAtEpochMillis }
+    }
+
     private fun cacheFile(channelId: String): File =
         File(appContext.filesDir, "media_videos_$channelId.json")
 
@@ -194,6 +260,8 @@ class MediaRepository(context: Context) {
                     .put("channelName", v.channelName)
                     .put("publishedAt", v.publishedAtEpochMillis)
                     .put("thumbnailUrl", v.thumbnailUrl)
+                    .put("viewCount", v.viewCount)
+                    .put("isShort", v.isShort)
             )
         }
         val obj = JSONObject()
@@ -213,7 +281,9 @@ class MediaRepository(context: Context) {
                     channelId = o.optString("channelId", ""),
                     channelName = o.optString("channelName", ""),
                     publishedAtEpochMillis = o.optLong("publishedAt", 0L),
-                    thumbnailUrl = o.optString("thumbnailUrl", "")
+                    thumbnailUrl = o.optString("thumbnailUrl", ""),
+                    viewCount = o.optLong("viewCount", 0L),
+                    isShort = o.optBoolean("isShort", false)
                 )
             } catch (e: Exception) {
                 null

@@ -1,12 +1,15 @@
 package com.example.url_blocker.media.ui
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.graphics.Color
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewParent
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
@@ -18,6 +21,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -82,6 +86,13 @@ fun YoutubePlayer(
     onPlayerError: (Int) -> Unit = {},
     onAutoplayBlocked: () -> Unit = {},
     onReady: () -> Unit = {},
+    /**
+     * Real playback position reports (seconds) for watch-progress tracking:
+     * fired when playback starts, every 5 s while playing, and once on
+     * pause/end. (duration, currentTime) — duration > 0 once the player is
+     * ready.
+     */
+    onProgress: (currentSeconds: Double, durationSeconds: Double) -> Unit = { _, _ -> },
     /** Bump to force the current source to be re-applied (retry after error). */
     retryToken: Int = 0
 ) {
@@ -93,6 +104,7 @@ fun YoutubePlayer(
     val currentOnError by rememberUpdatedState(onPlayerError)
     val currentOnAutoplayBlocked by rememberUpdatedState(onAutoplayBlocked)
     val currentOnReady by rememberUpdatedState(onReady)
+    val currentOnProgress by rememberUpdatedState(onProgress)
 
     // JS bridge → main thread → Compose callbacks. The bridge methods run on
     // the WebView's JS thread; everything is marshalled to the main thread.
@@ -114,7 +126,8 @@ fun YoutubePlayer(
             },
             errorCallback = { c -> mainHandler.post { currentOnError(c) } },
             autoplayBlockedCallback = { mainHandler.post { currentOnAutoplayBlocked() } },
-            readyCallback = { mainHandler.post { currentOnReady() } }
+            readyCallback = { mainHandler.post { currentOnReady() } },
+            progressCallback = { c, d -> mainHandler.post { currentOnProgress(c, d) } }
         )
     }
 
@@ -139,9 +152,17 @@ fun YoutubePlayer(
                         "resumeTimers + setLayerType(HARDWARE) -> " +
                         layerName(it.layerType))
                 }
-                Lifecycle.Event.ON_PAUSE -> controller.webView?.let {
-                    it.onPause()
-                    Log.i(TAG, "LIFECYCLE ON_PAUSE -> webView.onPause")
+                Lifecycle.Event.ON_PAUSE -> {
+                    // Tear down a showing fullscreen custom view so the video
+                    // returns to the iframe before the window fades (a custom
+                    // view left across a pause is a common "blank on return"
+                    // cause). Orientation is left untouched — onResume restores
+                    // it through the hub's immersive logic.
+                    hideFullscreenCustomView(controller, hostActivity, resetOrientation = false)
+                    controller.webView?.let {
+                        it.onPause()
+                        Log.i(TAG, "LIFECYCLE ON_PAUSE -> webView.onPause")
+                    }
                 }
                 else -> Unit
             }
@@ -355,17 +376,41 @@ fun YoutubePlayer(
                         return true
                     }
 
-                    // The player's built-in fullscreen button: rotate the
-                    // device to landscape — the activity's immersive
-                    // fullscreen logic handles the rest (video keeps playing).
+                    // The player's built-in fullscreen button. The WebView
+                    // hands us the ACTUAL fullscreen video surface; if we
+                    // don't host it (old behavior: only rotate), the surface
+                    // is orphaned and the screen goes blank while audio keeps
+                    // playing. Host the view in a fullscreen overlay added to
+                    // the activity's window and rotate to landscape so the
+                    // hub's immersive logic hides the system bars. The overlay
+                    // covers the Compose UI entirely, so nothing else can
+                    // obscure the video.
                     override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
-                        (ctx as? android.app.Activity)?.requestedOrientation =
+                        val activity = ctx as? Activity ?: return
+                        controller.customViewCallback = callback
+                        val container = ensureFullscreenContainer(activity, controller)
+                        container.removeAllViews()
+                        view?.let {
+                            container.addView(
+                                it,
+                                FrameLayout.LayoutParams(
+                                    FrameLayout.LayoutParams.MATCH_PARENT,
+                                    FrameLayout.LayoutParams.MATCH_PARENT
+                                )
+                            )
+                        }
+                        container.visibility = View.VISIBLE
+                        Log.i(
+                            TAG,
+                            "FULLSCREEN_SHOW customView=${view?.javaClass?.simpleName ?: "null"}"
+                        )
+                        activity.requestedOrientation =
                             ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
                     }
 
                     override fun onHideCustomView() {
-                        (ctx as? android.app.Activity)?.requestedOrientation =
-                            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                        Log.i(TAG, "FULLSCREEN_HIDE")
+                        hideFullscreenCustomView(controller, ctx as? Activity, resetOrientation = true)
                     }
                 }
 
@@ -391,6 +436,16 @@ fun YoutubePlayer(
             released = true
             controller.pageReady = false
             controller.webView = null
+            // If a fullscreen custom view was showing, dismiss it, detach the
+            // overlay from the window, and return the activity to its natural
+            // orientation (the user left the player). When no custom view was
+            // showing (e.g. the user auto-rotated to landscape), orientation
+            // is left exactly as it was.
+            hideFullscreenCustomView(controller, hostActivity, resetOrientation = true)
+            controller.fullscreenContainer?.let { container ->
+                (container.parent as? ViewGroup)?.removeView(container)
+            }
+            controller.fullscreenContainer = null
             try {
                 it.removeJavascriptInterface("AndroidBridge")
             } catch (e: Exception) {
@@ -399,6 +454,67 @@ fun YoutubePlayer(
             it.destroy()
         }
     )
+}
+
+/**
+ * Lazily creates (once per player) the fullscreen overlay that hosts the
+ * WebView's custom fullscreen video view, attached to the activity's window
+ * decor so it covers the entire screen including the Compose UI and the
+ * status/navigation bars.
+ */
+private fun ensureFullscreenContainer(
+    activity: Activity,
+    controller: PlayerController
+): FrameLayout {
+    controller.fullscreenContainer?.let { return it }
+    val container = FrameLayout(activity).apply {
+        layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        // Solid black behind the video (and while it buffers).
+        setBackgroundColor(Color.BLACK)
+    }
+    val decor = activity.window.decorView as? ViewGroup
+    if (decor == null) {
+        // Extremely rare (the decor is a ViewGroup on every supported API) —
+        // but if it ever isn't, the custom view would silently render nowhere
+        // and the screen would go blank again; log it so it's diagnosable.
+        Log.w(
+            TAG,
+            "FULLSCREEN_DECOR_UNAVAILABLE ${activity.window.decorView.javaClass.simpleName}"
+        )
+    } else {
+        decor.addView(container)
+    }
+    controller.fullscreenContainer = container
+    return container
+}
+
+/**
+ * Dismisses a showing fullscreen custom view: returns the video surface to the
+ * player (CustomViewCallback.onCustomViewHidden) and hides the overlay. When
+ * [resetOrientation] the activity returns to its natural orientation (user
+ * exited fullscreen); when false (pause/release) orientation is left alone.
+ */
+private fun hideFullscreenCustomView(
+    controller: PlayerController,
+    activity: Activity?,
+    resetOrientation: Boolean
+) {
+    val hadCustomView = controller.customViewCallback != null
+    val callback = controller.customViewCallback
+    controller.customViewCallback = null
+    controller.fullscreenContainer?.let {
+        it.removeAllViews()
+        it.visibility = View.GONE
+    }
+    callback?.onCustomViewHidden()
+    // Only restore the orientation when a fullscreen view was actually
+    // dismissed — never yank the activity out of a user-initiated landscape.
+    if (resetOrientation && hadCustomView) {
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
 }
 
 /**
@@ -433,6 +549,9 @@ private class PlayerController {
     var appliedRetryToken = 0
     /** Last player state reported by the IFrame API (for rotation diagnostics). */
     @Volatile var lastState: Int = YtState.UNSTARTED
+    /** Fullscreen custom-view hosting (the player's built-in fullscreen button). */
+    @Volatile var customViewCallback: WebChromeClient.CustomViewCallback? = null
+    @Volatile var fullscreenContainer: FrameLayout? = null
 }
 
 /**
@@ -509,7 +628,8 @@ private class YtBridge(
     private val stateCallback: (Int) -> Unit,
     private val errorCallback: (Int) -> Unit,
     private val autoplayBlockedCallback: () -> Unit,
-    private val readyCallback: () -> Unit
+    private val readyCallback: () -> Unit,
+    private val progressCallback: (Double, Double) -> Unit
 ) {
     /** Dedup: surface a given error code only once per loaded source. */
     @Volatile
@@ -542,6 +662,18 @@ private class YtBridge(
     fun onAutoplayBlocked() {
         Log.w(TAG, "IFRAME_AUTOPLAY_BLOCKED")
         autoplayBlockedCallback()
+    }
+
+    /**
+     * Real playback position from the JS progress timer (every ~5 s while
+     * playing, plus once on pause/end). The app persists the fraction so the
+     * Media tab can show how much of each video was watched.
+     */
+    @JavascriptInterface
+    fun onProgress(currentSeconds: Double, durationSeconds: Double) {
+        if (durationSeconds <= 0) return
+        Log.d(TAG, "IFRAME_PROGRESS ${Math.round(currentSeconds)}s/${Math.round(durationSeconds)}s")
+        progressCallback(currentSeconds, durationSeconds)
     }
 
     @JavascriptInterface

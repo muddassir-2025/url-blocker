@@ -29,8 +29,12 @@ object YouTubeRssParser {
      * Parses [rssXml] into videos, most-recent first (the feed is already
      * newest-first, but a stable sort guards against feed reordering).
      * Returns an empty list on any parse failure (never throws).
+     *
+     * A video is classified as a Short when its title carries the `#shorts`
+     * hashtag OR its [videoId] is in [shortsIds] (the channel's /shorts tab,
+     * scraped by [ShortsIdResolver]) — the hashtag alone misses most Shorts.
      */
-    fun parse(rssXml: String): List<MediaVideo> {
+    fun parse(rssXml: String, shortsIds: Set<String> = emptySet()): List<MediaVideo> {
         return try {
             val factory = DocumentBuilderFactory.newInstance()
             // Namespace awareness is required for localName-based lookups
@@ -65,7 +69,9 @@ object YouTubeRssParser {
                         channelId = channelId,
                         channelName = channelName,
                         publishedAtEpochMillis = publishedAt,
-                        thumbnailUrl = thumbnail
+                        thumbnailUrl = thumbnail,
+                        viewCount = firstViewCount(entry),
+                        isShort = MediaVideo.isShortsTitle(title) || videoId in shortsIds
                     )
                 )
             }
@@ -98,6 +104,21 @@ object YouTubeRssParser {
             }
         }
         return null
+    }
+
+    /**
+     * View count from the entry's `<media:statistics views="…"/>`, or 0 when
+     * the feed omits it or the value is malformed.
+     */
+    private fun firstViewCount(parent: Element): Long {
+        val all = parent.getElementsByTagName("*")
+        for (i in 0 until all.length) {
+            val node = all.item(i)
+            if (node is Element && node.localName == "statistics") {
+                return node.getAttribute("views").toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+            }
+        }
+        return 0L
     }
 
     /** Parses YouTube's ISO-8601 published stamp (e.g. 2024-01-01T12:00:00+00:00). */

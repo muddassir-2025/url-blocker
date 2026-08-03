@@ -62,6 +62,15 @@
     } catch (e) { console.error('bridge ' + method + ' failed: ' + e.message); }
   }
 
+  // Two-argument bridge call (watch progress: currentTime, duration).
+  function notify2(method, a, b) {
+    try {
+      var bd = window.AndroidBridge;
+      if (!bd || typeof bd[method] !== 'function') return;
+      bd[method](a, b);
+    } catch (e) { console.error('bridge ' + method + ' failed: ' + e.message); }
+  }
+
   // ── Rendering diagnostics (user directive) ─────────────────────
   // Logs the sizes of the #player element and the generated iframe on every
   // key event. HEALTHY output is player=<w>x<h> with h > 0 (e.g. 432x243 for
@@ -212,6 +221,30 @@
     } catch (e) {}
   };
 
+  // ── Watch progress reporting ────────────────────────────────────
+  // The IFrame API exposes the REAL playback position, so the app can
+  // persist how much of each video was watched (progress bar + "Watched"
+  // marker on the Media tab cards). Reported when playback starts, every
+  // 5 s while playing, and once on pause/end.
+  var progressTimer = null;
+  function reportProgress() {
+    try {
+      if (!player || typeof player.getCurrentTime !== 'function') return;
+      var d = (typeof player.getDuration === 'function') ? player.getDuration() : 0;
+      var t = player.getCurrentTime();
+      if (d > 0 && isFinite(d) && isFinite(t)) notify2('onProgress', t, d);
+    } catch (e) {}
+  }
+  function startProgressTimer() {
+    if (progressTimer) { clearInterval(progressTimer); }
+    reportProgress();
+    progressTimer = setInterval(reportProgress, 5000);
+  }
+  function stopProgressTimer(reportFinal) {
+    if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+    if (reportFinal) reportProgress();
+  }
+
   // ── Load the IFrame Player API ──────────────────────────────────
   var tag = document.createElement('script');
   tag.src = "https://www.youtube.com/iframe_api";
@@ -282,8 +315,17 @@
           logSizes('READY');
         },
         onStateChange: function (e) {
-          if (e.data === 1) { lastPlayingAt = Date.now(); }
-          if (e.data === 2) { lastPauseAt = Date.now(); }
+          if (e.data === 1) {
+            lastPlayingAt = Date.now();
+            startProgressTimer();   // playing → track position every 5 s
+          }
+          if (e.data === 2) {
+            lastPauseAt = Date.now();
+            stopProgressTimer(true); // paused → final position
+          }
+          if (e.data === 0) {
+            stopProgressTimer(true); // ended → position == duration (100%)
+          }
           logSizes('STATE=' + e.data);
           notify('onStateChange', e.data);
         },
