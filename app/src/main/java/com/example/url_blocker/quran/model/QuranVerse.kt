@@ -8,11 +8,16 @@ package com.example.url_blocker.quran.model
  * @property surahName    English transliterated surah name, e.g. "At-Talaaq"
  * @property surahTranslation English meaning of the surah name, e.g. "Divorce"
  * @property text         English verse text (Sahih International)
+ * @property arabicText   Arabic verse text (Uthmani script, quran-uthmani).
+ *                        Empty string when the Arabic edition is not cached
+ *                        yet (the widget and detail screen still work — they
+ *                        just show English).
  */
 data class QuranVerse(
     val surahNumber: Int,
     val ayahNumber: Int,
     val surahName: String,
     val surahTranslation: String,
-    val text: String
+    val text: String,
+    val arabicText: String = ""
 )

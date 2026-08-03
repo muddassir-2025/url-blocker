@@ -16,6 +16,7 @@
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="false"
+        android:hardwareAccelerated="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -46,11 +47,15 @@
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:windowSoftInputMode="stateAlwaysHidden" />
 
-        <!-- Quran Reminder: verse details opened from the home-screen widget -->
+        <!-- Quran Reminder hub: verse + Media + Live, opened from the widget.
+             configChanges: rotation must NOT recreate the activity, otherwise
+             the embedded video/live player would restart on every rotation. -->
         <activity
             android:name=".quran.ui.QuranVerseActivity"
             android:exported="false"
+            android:hardwareAccelerated="true"
             android:label="@string/widget_quran_reminder_title"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
             android:theme="@style/Theme.Urlblocker" />
 
         <!-- Quran Reminder home-screen widget -->

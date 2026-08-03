@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<!-- Match YouTube's official Share > Embed snippet:
+     <iframe ... referrerpolicy="strict-origin-when-cross-origin" ...>
+     The API creates the player iframe internally, but this meta tag applies
+     the SAME referrer policy to that iframe's navigation, so the Referer
+     YouTube's embed sees is a clean origin (no path, no query). -->
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<style>
+  /* ROOT-CAUSE FIX (round 2) for the blank screen.
+     SIZES still showed "player=432x0 iframe=432x0" after the first fix
+     (position:absolute + percentage heights). Two compounding facts explain
+     it:
+       1. In loadDataWithBaseURL WebViews the html > body > #player
+          percentage-HEIGHT chain collapses to 0 (only width survives the
+          viewport-meta layout).
+       2. YT.Player REPLACES the #player div with the generated iframe, and
+          the iframe's own height:100% then re-couples to that broken chain.
+     Nothing percentage-based survives, so the player is now sized with
+     VIEWPORT UNITS: 100vw x 100vh resolve against the live viewport and
+     CANNOT be 0, and position:fixed takes it out of every ancestor chain.
+     applySize() then ALSO forces explicit pixels on the iframe and calls
+     player.setSize() (the IFrame API's official resize), and a short
+     watchdog re-applies until the iframe actually reports a non-zero
+     height. */
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: #000; overflow: hidden;
+  }
+  #player {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw;
+    height: 100vh;
+  }
+</style>
+</head>
+<body>
+<div id="player"></div>
+
+<script>
+  // ── JS → Android bridge ─────────────────────────────────────────
+  // Every real player event is forwarded to the WebView's injected
+  // "AndroidBridge" object so the app shows the ACTUAL player state
+  // (never guessed from DOM probing).
+  function notify(method, arg) {
+    try {
+      var b = window.AndroidBridge;
+      if (!b || typeof b[method] !== 'function') return;
+      // Arity matters to WebView's JavaBridge: calling a zero-arg method with
+      // an argument yields "Error invoking ...: Method not found". onReady /
+      // onAutoplayBlocked take no arguments; onStateChange / onError take one.
+      if (arg === undefined) {
+        b[method]();
+      } else {
+        b[method](arg);
+      }
+    } catch (e) { console.error('bridge ' + method + ' failed: ' + e.message); }
+  }
+
+  // ── Rendering diagnostics (user directive) ─────────────────────
+  // Logs the sizes of the #player element and the generated iframe on every
+  // key event. HEALTHY output is player=<w>x<h> with h > 0 (e.g. 432x243 for
+  // the 16:9 player, 432x732 for fullscreen Live). A 0 height = "page shows,
+  // video doesn't": the embed never gets a surface to draw into.
+  function logSizes(label) {
+    try {
+      var p = document.getElementById('player');
+      var pw = (p && p.offsetWidth) ? (p.offsetWidth + 'x' + p.offsetHeight) : 'missing';
+      var iw = 'n/a';
+      if (player && typeof player.getIframe === 'function') {
+        var f = player.getIframe();
+        if (f) {
+          var r = f.getBoundingClientRect();
+          iw = f.offsetWidth + 'x' + f.offsetHeight +
+               ' rect=' + Math.round(r.left) + ',' + Math.round(r.top) +
+               ' ' + Math.round(r.width) + 'x' + Math.round(r.height);
+        }
+      }
+      console.log('SIZES[' + label + '] player=' + pw + ' iframe=' + iw +
+        ' doc=' + document.documentElement.clientWidth + 'x' + document.documentElement.clientHeight +
+        ' dpr=' + window.devicePixelRatio + ' (CSS px; multiply by dpr for device px)');
+    } catch (e) { console.log('SIZES[' + label + '] error=' + e.message); }
+  }
+
+  // ── Player sizing (root-cause fix, round 2) ─────────────────────
+  // Forces EXPLICIT pixel dimensions on the #player element AND the
+  // generated iframe, and — crucially — calls player.setSize() (the IFrame
+  // API's official resize) so YouTube re-lays its internal player into the
+  // real size even if the iframe was first created while the container
+  // measured 0. NEVER set percentages here: the percentage chain collapses
+  // in this WebView and 100% snaps the height straight back to 0.
+  // Size pushed from Android on rotation is GROUND TRUTH: the CSS viewport
+  // can stay frozen at the old size in a configChanges WebView, so
+  // window-based sizing must NEVER override an explicitly pushed size (it
+  // would silently re-collapse the iframe to the stale portrait dimensions
+  // right after rotation). Once set, applySize() honors the pushed size.
+  var pushedW = 0;
+  var pushedH = 0;
+  function applySize() {
+    try {
+      var w = pushedW > 0 ? pushedW : (window.innerWidth || document.documentElement.clientWidth || 0);
+      var h = pushedH > 0 ? pushedH : (window.innerHeight || document.documentElement.clientHeight || 0);
+      if (w <= 0 || h <= 0) return;
+      var el = document.getElementById('player');
+      if (el) { el.style.width = w + 'px'; el.style.height = h + 'px'; }
+      var f = player ? player.getIframe() : null;
+      if (f) {
+        f.style.width = w + 'px';
+        f.style.height = h + 'px';
+        f.setAttribute('width', w);
+        f.setAttribute('height', h);
+        if (typeof player.setSize === 'function') {
+          try { player.setSize(w, h); } catch (e) {}
+        }
+      }
+    } catch (e) { console.log('SIZES[applySize] error=' + e.message); }
+  }
+  // Rotation / fullscreen (called from Android via evaluateJavascript when the
+  // WebView view size changes): in a configChanges WebView the page's CSS
+  // viewport can stay frozen at the old size, so Android passes the EXACT CSS
+  // dimensions. Forces explicit px on the player + iframe and calls
+  // player.setSize() (the IFrame API's official resize). YouTube also PAUSES
+  // playback when its rendering surface is torn down during rotation; if the
+  // video was playing right up to the rotation we resume it.
+  var lastPlayingAt = 0;
+  var lastPauseAt = 0;
+  function resizePlayer(w, h) {
+    try {
+      if (!w || !h || w <= 0 || h <= 0) return;
+      pushedW = w;
+      pushedH = h;
+      var el = document.getElementById('player');
+      if (el) { el.style.width = w + 'px'; el.style.height = h + 'px'; }
+      var f = player ? player.getIframe() : null;
+      if (f) {
+        f.style.width = w + 'px';
+        f.style.height = h + 'px';
+        f.setAttribute('width', w);
+        f.setAttribute('height', h);
+        if (typeof player.setSize === 'function') {
+          try { player.setSize(w, h); } catch (e) {}
+        }
+        // Resume if the video was actively playing when the rotation paused
+        // it (state 2 fired right around the surface teardown). A pause that
+        // happened well before the rotation is a USER pause — leave it.
+        var now = Date.now();
+        var wasActive =
+          lastPlayingAt > lastPauseAt ||           // currently playing
+          (now - lastPlayingAt < 2000) ||          // playing moments ago
+          (now - lastPauseAt < 2000);              // rotation-induced pause
+        if (wasActive) {
+          try { player.playVideo(); } catch (e) {}
+          // The rotation-induced pause can land AFTER this resize (surface
+          // teardown ordering isn't guaranteed across devices): re-issue play
+          // shortly after so a lagging pause is still caught. playVideo() on
+          // an already-playing player is a no-op.
+          setTimeout(function () {
+            try { player.playVideo(); } catch (e) {}
+          }, 400);
+        }
+      }
+      logSizes('RESIZE');
+    } catch (e) { console.log('SIZES[resizePlayer] error=' + e.message); }
+  }
+
+  // Watchdog: re-apply the size every 250 ms until the iframe actually has a
+  // non-zero height (sizing races YT.Player's internal layout on first load
+  // AND on rotation, where the viewport updates asynchronously), then stops.
+  // Hard cap of 40 ticks (~10 s). Re-armed on every viewport resize.
+  var sizeTicks = 0;
+  var sizeWatchdog = null;
+
+  function startSizeWatchdog() {
+    if (sizeWatchdog) { clearInterval(sizeWatchdog); }
+    sizeTicks = 0;
+    sizeWatchdog = setInterval(function () {
+      applySize();
+      var f = player ? player.getIframe() : null;
+      var healthy = !!(f && f.offsetHeight > 0);
+      sizeTicks++;
+      if (healthy || sizeTicks > 40) {
+        clearInterval(sizeWatchdog);
+        sizeWatchdog = null;
+      }
+      console.log('SIZES[TICK] tick=' + sizeTicks + ' healthy=' + healthy);
+    }, 250);
+  }
+
+  function onWindowResize() {
+    applySize();
+    startSizeWatchdog();
+  }
+  window.addEventListener('resize', onWindowResize);
+  startSizeWatchdog();
+
+  // ── Unhandled JS exception capture ─────────────────────────────
+  // Distinct from the player's own onError: if ANY other JS throws, we hear
+  // about it here so a bridge/script bug can never masquerade as a YouTube
+  // playback error (and vice versa).
+  window.onerror = function (msg, url, line, col, error) {
+    try {
+      var b = window.AndroidBridge;
+      if (b && typeof b.onJsError === 'function') {
+        var stack = (error && error.stack) ? error.stack.slice(0, 600) : 'n/a';
+        b.onJsError('JS_EXCEPTION: ' + msg + ' @' + line + ' stack=' + stack);
+      }
+    } catch (e) {}
+  };
+
+  // ── Load the IFrame Player API ──────────────────────────────────
+  var tag = document.createElement('script');
+  tag.src = "https://www.youtube.com/iframe_api";
+  var firstScriptTag = document.getElementsByTagName('script')[0];
+  firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+  var player = null;
+  var apiReady = false;
+  var pending = null; // videoId
+
+  function onYouTubeIframeAPIReady() {
+    apiReady = true;
+    if (pending) createPlayer(pending);
+  }
+
+  function createPlayer(videoId) {
+    var origin = window.location.origin;
+    var vars = {
+      'autoplay': 1,   // start playing immediately
+      'mute': 1,       // required for autoplay (user can unmute from controls)
+      'playsinline': 1,
+      'rel': 0,
+      // The embed must declare a REAL https origin. window.location.origin is
+      // the loadDataWithBaseURL base URL (https://localhost), so YouTube
+      // accepts the embed. Do not touch (confirmed working).
+      'origin': origin,
+      'widget_referrer': origin
+    };
+
+    // Trace the exact config handed to YT.Player (surfaced via the WebView's
+    // onConsoleMessage → CONSOLE[log] logcat line).
+    console.log('PLAYER_VARS ' + JSON.stringify(vars));
+
+    // Size the container BEFORE YT.Player snapshots it (a 0-height container
+    // at creation time is exactly what produced the invisible iframe).
+    applySize();
+    var w = window.innerWidth || 432;
+    var h = window.innerHeight || 243;
+
+    player = new YT.Player('player', {
+      width: w,  // explicit px — never '100%' (re-couples to the broken chain)
+      height: h,
+      videoId: videoId,
+      playerVars: vars,
+      events: {
+        onReady: function (e) {
+          notify('onReady');
+          // Belt-and-braces: ensure muted autoplay even if the playerVars
+          // autoplay was deferred.
+          try { e.target.mute(); e.target.playVideo(); } catch (ex) {}
+          // Apply the attributes from YouTube's official embed snippet to the
+          // generated iframe (title, referrerpolicy, allow + web-share).
+          try {
+            var f = e.target.getIframe();
+            if (f) {
+              f.title = 'YouTube video player';
+              f.referrerPolicy = 'strict-origin-when-cross-origin';
+              f.setAttribute('allow',
+                'accelerometer; autoplay; clipboard-write; encrypted-media; ' +
+                'gyroscope; picture-in-picture; web-share');
+              f.setAttribute('allowfullscreen', 'true');
+            }
+          } catch (ex) {}
+          // Re-size now that the player exists: applySize() forces explicit px
+          // on the iframe and calls player.setSize(), re-laying the player
+          // into the real viewport even if the initial snapshot was 0.
+          applySize();
+          logSizes('READY');
+        },
+        onStateChange: function (e) {
+          if (e.data === 1) { lastPlayingAt = Date.now(); }
+          if (e.data === 2) { lastPauseAt = Date.now(); }
+          logSizes('STATE=' + e.data);
+          notify('onStateChange', e.data);
+        },
+        onError: function (e) {
+          // RAW value BEFORE any mapping/processing — proves on-device where
+          // the code actually comes from (YouTube's own event.data).
+          console.log('YT_ON_ERROR_RAW value=' + e.data + ' typeof=' + (typeof e.data));
+          notify('onError', e.data);
+        },
+        onAutoplayBlocked: function () { notify('onAutoplayBlocked'); }
+      }
+    });
+  }
+
+  // Called from Android via evaluateJavascript.
+  function loadVideo(id) {
+    pending = id;
+    if (!apiReady) return;
+    if (player && typeof player.loadVideoById === 'function') {
+      try { player.loadVideoById(id); player.mute(); } catch (e) { console.error(e); }
+    } else {
+      createPlayer(pending);
+    }
+    applySize();
+    logSizes('LOAD');
+  }
+</script>
+</body>
+</html>

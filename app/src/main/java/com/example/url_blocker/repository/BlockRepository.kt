@@ -2060,7 +2060,7 @@ class BlockRepository(context: Context) {
             "busty",
             "voluptuous",
             "bust",
-           // "cleavage",
+            "cleavage",
 
             // ────────────────────────────────────────────────────────────────────
             // Clothing

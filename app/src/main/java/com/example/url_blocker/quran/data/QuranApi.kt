@@ -17,17 +17,28 @@ object QuranApi {
     /** Full Quran, Sahih International English translation. */
     private const val QURAN_URL = "https://api.alquran.cloud/v1/quran/en.sahih"
 
+    /** Full Quran, Uthmani Arabic script (for the Arabic verse display). */
+    private const val QURAN_AR_URL = "https://api.alquran.cloud/v1/quran/quran-uthmani"
+
     private const val CONNECT_TIMEOUT_MS = 15_000
     private const val READ_TIMEOUT_MS = 60_000
 
     /**
-     * Downloads the raw JSON body of the full translation.
+     * Downloads the raw JSON body of the full English translation.
      * Returns null on any network/HTTP failure so callers can retry via WorkManager.
      */
-    suspend fun download(): String? = withContext(Dispatchers.IO) {
+    suspend fun download(): String? = fetch(QURAN_URL)
+
+    /**
+     * Downloads the raw JSON body of the full Arabic (Uthmani) edition.
+     * Returns null on any network/HTTP failure.
+     */
+    suspend fun downloadArabic(): String? = fetch(QURAN_AR_URL)
+
+    private suspend fun fetch(url: String): String? = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
         try {
-            connection = (URL(QURAN_URL).openConnection() as HttpURLConnection).apply {
+            connection = (URL(url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
                 requestMethod = "GET"

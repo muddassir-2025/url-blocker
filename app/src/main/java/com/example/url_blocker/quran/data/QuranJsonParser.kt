@@ -48,4 +48,30 @@ object QuranJsonParser {
         }
         return verses
     }
+
+    /**
+     * Parses the AlQuran.Cloud `/v1/quran/<arabic-edition>` response body into a
+     * lookup map keyed by (surahNumber, ayahNumber) → Arabic text. The Arabic
+     * edition uses the exact same JSON shape, so it reuses the same traversal.
+     * Pure function (no Android dependencies) for JVM unit testing.
+     *
+     * @throws org.json.JSONException if the payload is malformed.
+     */
+    fun parseArabicTexts(raw: String): Map<Pair<Int, Int>, String> {
+        val root = JSONObject(raw)
+        val data = root.getJSONObject("data")
+        val surahs = data.getJSONArray("surahs")
+
+        val texts = HashMap<Pair<Int, Int>, String>(6236)
+        for (i in 0 until surahs.length()) {
+            val surah = surahs.getJSONObject(i)
+            val surahNumber = surah.getInt("number")
+            val ayahs = surah.getJSONArray("ayahs")
+            for (j in 0 until ayahs.length()) {
+                val ayah = ayahs.getJSONObject(j)
+                texts[Pair(surahNumber, ayah.getInt("numberInSurah"))] = ayah.getString("text")
+            }
+        }
+        return texts
+    }
 }

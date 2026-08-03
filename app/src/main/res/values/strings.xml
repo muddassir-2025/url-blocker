@@ -10,11 +10,52 @@
     <string name="widget_quran_reminder_description">A daily English Quran verse to encourage reflection</string>
     <string name="widget_quran_loading">Loading a verse…</string>
     <string name="widget_quran_tap_to_load">Open the app once to download verses</string>
+    <string name="widget_quran_copy">Copy</string>
+    <string name="widget_quran_refresh">Refresh</string>
+    <string name="widget_quran_copied">Verse copied to clipboard</string>
+    <string name="widget_quran_refreshing">Picking a new verse…</string>
     <string name="quran_verse_header">Quran Reminder</string>
     <string name="quran_verse_loading">Loading verse…</string>
     <string name="quran_verse_unavailable">Verses are being downloaded. Check back in a moment.</string>
+    <string name="quran_tab">Quran</string>
+    <string name="media_tab">Media</string>
+    <string name="live_tab">Live</string>
+    <string name="quran_share">Share verse</string>
+    <string name="quran_share_via">Share verse via</string>
+    <string name="quran_bookmark">Bookmark</string>
+    <string name="quran_bookmarked">Verse bookmarked</string>
+    <string name="quran_bookmark_removed">Bookmark removed</string>
     <string name="quran_verse_new">New Verse</string>
+    <string name="quran_verse_copy">Copy verse</string>
+    <string name="quran_verse_copied">Verse copied to clipboard</string>
+    <string name="quran_verse_refresh_frequency">New verse every</string>
+    <string name="quran_verse_hour_short">%1$d hr</string>
     <string name="quran_verse_surah">Surah %1$s</string>
     <string name="quran_verse_reference">Quran %1$d:%2$d</string>
-    <string name="quran_verse_refresh_note">Refreshes automatically every 6 hours · works offline</string>
+
+    <!-- In-app media player (YouTube IFrame API) -->
+    <string name="media_player_buffering">Loading video…</string>
+    <string name="media_player_tap_to_play">Tap to play</string>
+    <string name="media_player_error_not_found">This video is unavailable or was removed.</string>
+    <string name="media_player_error_embed_restricted">This video can\'t be embedded. The uploader has disabled embedding, so YouTube blocks in-app playback.</string>
+    <string name="media_player_error_playback">This video can\'t be played in the in-app player. Try a different video.</string>
+    <string name="media_player_error_unavailable">Video unavailable
+
+This video cannot be played inside the app.</string>
+    <string name="media_player_timeout">The video player is taking too long to load. Check your connection and try again.</string>
+    <string name="media_player_retry">Retry</string>
+    <string name="media_player_open_youtube">Open in YouTube app</string>
+    <string name="live_tab_connecting">Connecting to live stream…</string>
+    <string name="live_tab_live_label">Live broadcast · in-app player</string>
+    <string name="live_tab_playing">Live · playing inside the app</string>
+    <string name="live_tab_error">Live stream currently unavailable. Please try again later.</string>
+
+    <plurals name="quran_verse_interval_set">
+        <item quantity="one">New verse every %1$d hour</item>
+        <item quantity="other">New verse every %1$d hours</item>
+    </plurals>
+    <plurals name="quran_verse_refresh_note_hours">
+        <item quantity="one">Refreshes automatically every %1$d hour · works offline</item>
+        <item quantity="other">Refreshes automatically every %1$d hours · works offline</item>
+    </plurals>
 </resources>

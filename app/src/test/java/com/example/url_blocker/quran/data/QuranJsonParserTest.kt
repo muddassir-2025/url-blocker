@@ -113,6 +113,34 @@ class QuranJsonParserTest {
     }
 
     @Test
+    fun parsesArabicEditionIntoLookupMap() {
+        // The Arabic edition uses the same JSON shape; parseArabicTexts turns it
+        // into a (surah, ayah) → text lookup.
+        val arabic = """
+            {
+              "data": {
+                "surahs": [
+                  {
+                    "number": 2,
+                    "ayahs": [
+                      { "numberInSurah": 255, "text": "اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ" },
+                      { "numberInSurah": 256, "text": "لَا إِكْرَاهَ فِي الدِّينِ" }
+                    ]
+                  }
+                ]
+              }
+            }
+        """.trimIndent()
+
+        val map = QuranJsonParser.parseArabicTexts(arabic)
+
+        assertEquals(2, map.size)
+        assertEquals("اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ", map[Pair(2, 255)])
+        assertEquals("لَا إِكْرَاهَ فِي الدِّينِ", map[Pair(2, 256)])
+        assertTrue(map[Pair(2, 999)] == null)
+    }
+
+    @Test
     fun ignoresUnknownExtraFields() {
         // Extra/missing metadata fields in the payload must not break parsing;
         // only the fields the reminder uses are read.

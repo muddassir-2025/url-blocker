@@ -824,6 +824,7 @@ private fun DashboardTab(
         item {
             val isOwner = viewModel.isDeviceOwner
             val isAdmin = viewModel.isDeviceAdminEnabled
+            var showRemoveOwnerConfirm by remember { mutableStateOf(false) }
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -866,6 +867,58 @@ private fun DashboardTab(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                    }
+
+                    if (isOwner && isAdmin) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Device Owner is active — the app cannot be uninstalled. " +
+                                "Tap below to lift the lock (needed to update or remove the app). " +
+                                "All your data is kept.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { showRemoveOwnerConfirm = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                Icons.Outlined.LockOpen,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Remove Uninstall Protection", fontSize = 13.sp)
+                        }
+                    }
+
+                    if (showRemoveOwnerConfirm) {
+                        AlertDialog(
+                            onDismissRequest = { showRemoveOwnerConfirm = false },
+                            title = { Text("Remove Uninstall Protection?") },
+                            text = {
+                                Text(
+                                    "The app will stop being Device Owner, so you can update or " +
+                                        "uninstall it normally again. Your blocked lists and settings are kept."
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    showRemoveOwnerConfirm = false
+                                    viewModel.removeUninstallProtection(context)
+                                }) {
+                                    Text("Remove", color = MaterialTheme.colorScheme.error)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showRemoveOwnerConfirm = false }) {
+                                    Text("Cancel")
+                                }
+                            }
+                        )
                     }
 
                     if (!isOwner && isAdmin) {

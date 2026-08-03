@@ -329,6 +329,42 @@ class MainViewModel : ViewModel() {
     }
 
     /**
+     * Lifts the Device Owner lock (set via ADB) so the app can be updated or
+     * uninstalled normally again. Only works while this app IS the device
+     * owner. Order matters: unblock uninstall FIRST (requires owner powers),
+     * then clear the owner flag. All app data is kept — this only drops the
+     * lock. The device-admin status (if any) is left intact and can be turned
+     * off from Settings > Device admin apps if desired.
+     */
+    @Suppress("DEPRECATION")
+    fun removeUninstallProtection(context: Context) {
+        try {
+            val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            if (!dpm.isDeviceOwnerApp(context.packageName)) {
+                android.util.Log.i("MainViewModel", "Not device owner — nothing to remove")
+                return
+            }
+            val component = ComponentName(
+                context,
+                com.example.url_blocker.receiver.DeviceAdminReceiver::class.java
+            )
+            // 1) Lift the hard uninstall block (set by DeviceAdminReceiver) while
+            //    we still hold owner powers.
+            dpm.setUninstallBlocked(component, context.packageName, false)
+            // 2) Clear the Device Owner flag. This API may only be called by the
+            //    device owner app itself.
+            dpm.clearDeviceOwnerApp(context.packageName)
+            isDeviceOwner = false
+            isUninstallBlocked = false
+            checkDeviceAdminStatus(context)
+            android.util.Log.i("MainViewModel", "Device Owner removed — uninstall/updates allowed again")
+        } catch (e: Exception) {
+            android.util.Log.e("MainViewModel", "Failed to remove device owner: ${e.message}")
+            checkDeviceAdminStatus(context)
+        }
+    }
+
+    /**
      * Safety net: re-enable LauncherActivity if it was disabled by a
      * previous version's icon-hiding code. Called once on initialize().
      */

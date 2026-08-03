@@ -9,4 +9,5 @@
     <color name="widget_title">#4C6B58</color>
     <color name="widget_verse_text">#2E2A24</color>
     <color name="widget_ref">#6B6A66</color>
+    <color name="widget_button_bg">#E8EFE9</color>
 </resources>

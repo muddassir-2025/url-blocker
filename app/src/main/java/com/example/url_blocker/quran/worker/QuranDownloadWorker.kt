@@ -30,7 +30,10 @@ class QuranDownloadWorker(
         val mode = inputData.getInt(KEY_MODE, MODE_REFRESH)
 
         return try {
-            val downloaded = repository.downloadIfNeeded()
+            // English is required; Arabic (for the verse screen) is best-effort
+            // inside ensureEnglishAndArabic — a missing Arabic cache never fails
+            // the worker, the reminder stays fully functional in English.
+            val downloaded = repository.ensureEnglishAndArabic()
             if (!downloaded) {
                 Log.w(TAG, "Quran download failed (offline?) — will retry")
                 return Result.retry()
