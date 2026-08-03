@@ -1,8 +1,10 @@
 package com.example.url_blocker.media.ui
 
+import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.text.format.DateUtils
 import android.util.Log
@@ -15,8 +17,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -29,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -58,9 +67,12 @@ import kotlinx.coroutines.delay
 fun VideoPlayerScreen(
     video: MediaVideo,
     isLandscape: Boolean,
+    fullscreenVertical: Boolean = false,
+    onToggleFullscreen: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val activity = context as? Activity
 
     var playerState by remember { mutableStateOf(YtState.UNSTARTED) }
     var errorCode by remember { mutableStateOf<Int?>(null) }
@@ -118,11 +130,12 @@ fun VideoPlayerScreen(
     ) {
         // ── Video area: player + its overlays, nothing else in this box ──
         // Exactly matches the WebView's bounds so no sibling can cover it.
+        // Vertical fullscreen (Shorts style) fills the whole portrait screen;
+        // landscape is naturally full screen; otherwise a 16:9 box at the top.
         Box(
-            modifier = if (isLandscape) {
-                Modifier.fillMaxSize()
-            } else {
-                Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+            modifier = when {
+                isLandscape || fullscreenVertical -> Modifier.fillMaxSize()
+                else -> Modifier.fillMaxWidth().aspectRatio(16f / 9f)
             }
         ) {
             YoutubePlayer(
@@ -172,6 +185,51 @@ fun VideoPlayerScreen(
                         text = stringResource(R.string.media_player_buffering),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // Fullscreen toggle (top-right, over the video): in portrait it
+            // switches to a YouTube Shorts-style vertical fullscreen (video
+            // fills the whole screen, bars hide); tapping again (or back)
+            // returns to the normal 16:9 layout. In landscape the video is
+            // already fullscreen, so the button rotates back to portrait.
+            // Rotation never restarts playback — the activities declare
+            // configChanges, so the WebView survives it.
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp),
+                shape = RoundedCornerShape(10.dp),
+                color = Color.Black.copy(alpha = 0.4f)
+            ) {
+                IconButton(
+                    onClick = {
+                        if (isLandscape) {
+                            // Leaving landscape fullscreen returns to the
+                            // normal portrait layout: also clear any vertical
+                            // fullscreen that was active before the rotation,
+                            // otherwise the video stays fullscreen after
+                            // rotating back.
+                            if (fullscreenVertical) onToggleFullscreen()
+                            activity?.requestedOrientation =
+                                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                        } else {
+                            onToggleFullscreen()
+                        }
+                    }
+                ) {
+                    Icon(
+                        imageVector = if (isLandscape || fullscreenVertical)
+                            Icons.Filled.FullscreenExit
+                        else
+                            Icons.Filled.Fullscreen,
+                        contentDescription = if (isLandscape || fullscreenVertical)
+                            "Exit fullscreen"
+                        else
+                            "Fullscreen",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
@@ -250,8 +308,9 @@ fun VideoPlayerScreen(
         }
 
         // ── Details panel: BELOW the video area in portrait — it can never
-        // cover the player. Hidden in landscape (video fills the screen).
-        if (!isLandscape) {
+        // cover the player. Hidden in landscape and in vertical fullscreen
+        // (the video fills the screen).
+        if (!isLandscape && !fullscreenVertical) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()

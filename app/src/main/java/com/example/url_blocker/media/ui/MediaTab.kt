@@ -589,7 +589,24 @@ private fun LongVideoCard(
                         }
                     }
                 } else if (fraction != null && fraction > 0.02f) {
-                    // In-progress: YouTube-style thin progress bar.
+                    // In-progress: YouTube-style thin progress bar + a small
+                    // "NN%" pill (top-right) so the watched amount is visible
+                    // at a glance.
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(6.dp),
+                        shape = RoundedCornerShape(5.dp),
+                        color = Color.Black.copy(alpha = 0.6f)
+                    ) {
+                        Text(
+                            text = "${(fraction.coerceIn(0f, 1f) * 100).toInt()}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                        )
+                    }
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomStart)

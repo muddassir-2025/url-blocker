@@ -147,25 +147,6 @@ class BlockRepository(context: Context) {
         prefs.edit().remove(KEY_APP_PASSWORD).apply()
     }
 
-    // ── Event log (in-memory, session only) ────────────────────────
-
-    private val eventLog = mutableListOf<String>()
-
-    fun addLogEntry(entry: String) {
-        synchronized(eventLog) {
-            eventLog.add(entry)
-            if (eventLog.size > MAX_LOG_ENTRIES) {
-                eventLog.removeAt(0)
-            }
-        }
-    }
-
-    fun getLogEntries(): List<String> = synchronized(eventLog) { eventLog.toList() }
-
-    fun clearLog() {
-        synchronized(eventLog) { eventLog.clear() }
-    }
-
     // ── SharedPreferences keys ─────────────────────────────────────
 
     companion object {
@@ -176,7 +157,6 @@ class BlockRepository(context: Context) {
         private const val KEY_APP_PASSWORD = "app_password"
         private const val KEY_STRICT_MODE = "strict_mode"
         private const val KEY_BLOCK_GENDER_GOOGLE_APP = "block_gender_google_app"
-        private const val MAX_LOG_ENTRIES = 100
 
         /**
          * Normalize a user-entered domain into a hostname.
@@ -2130,7 +2110,6 @@ class BlockRepository(context: Context) {
             "dating",
             "dating app",
             "dating apps",
-            "match",
             "matches",
             "flirt",
             "flirting",
@@ -2164,7 +2143,6 @@ class BlockRepository(context: Context) {
             "belly",
             "bellybutton",
             "navel",
-            "stomach",
             "abs",
             "chest",
             "back",
@@ -2180,13 +2158,11 @@ class BlockRepository(context: Context) {
             "pajama",
             "pajamas",
             "pyjamas",
-            "nightwear",
             "loungewear",
             "teddy",
             "costume",
             "schoolgirl",
             "schoolboy",
-            "uniform",
 
             // ────────────────────────────────────────────────────────────────────
             // Generic adult terms

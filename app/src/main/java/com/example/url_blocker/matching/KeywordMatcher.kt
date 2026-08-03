@@ -18,8 +18,8 @@ sealed class MatchResult {
         val matchSource: MatchSource,
         /**
          * For pre-emptive feed blocks (matchSource == FEED): the cards whose
-         * titles matched, with their on-screen bounds, so the service can draw
-         * a floating marker over each one. Empty for all other sources.
+         * titles matched. Empty for all other sources. Feed blocks now trigger
+         * the full block overlay like every other match.
          */
         val feedCards: List<FeedVideoCard> = emptyList()
     ) : MatchResult()
@@ -33,8 +33,7 @@ sealed class MatchResult {
  *  - [contentDesc]: the node's content description (often a thumbnail caption
  *    like "Woman in bikini on beach"), checked against the keyword set.
  *  - [channel]: the channel name from the combined card string
- *    ("Title by Channel • views • ago"), checked against the permanent
- *    channel blocklist.
+ *    ("Title by Channel • views • ago"), used as a soft risk signal.
  */
 data class FeedVideoCard(
     val title: String,
@@ -71,9 +70,7 @@ enum class MatchType {
     DOMAIN,
     BUILT_IN_KEYWORD,
     USER_KEYWORD,
-    INCOGNITO,
-    /** A permanently blocked YouTube channel. */
-    CHANNEL
+    INCOGNITO
 }
 
 enum class MatchSource {
@@ -114,8 +111,6 @@ data class ContentSnapshot(
     val incognito: Boolean = false,
     /** Active Google search tab ("Images", "Videos", "All", ...), when known. */
     val googleTab: String? = null,
-    /** YouTube channel name/handle currently on screen (watch page), when known. */
-    val channel: String? = null,
     /** YouTube video description text (best-effort from the app tree), when known. */
     val description: String? = null,
     /**
@@ -133,7 +128,7 @@ data class ContentSnapshot(
     // are included as a hash digest so a feed that loads new cards (new
     // titles) re-triggers evaluation.
     fun toIdentityString(): String {
-        return "$packageName|${url ?: ""}|${query ?: ""}|${title ?: ""}|incognito=$incognito|tab=${googleTab ?: ""}|channel=${channel ?: ""}|desc=${description?.length ?: 0}|feed=${feedCards.joinToString("|") { "${it.title.hashCode()}:${it.contentDesc?.hashCode()}:${it.channel?.hashCode()}" }.take(240)}"
+        return "$packageName|${url ?: ""}|${query ?: ""}|${title ?: ""}|incognito=$incognito|tab=${googleTab ?: ""}|desc=${description?.length ?: 0}|feed=${feedCards.joinToString("|") { "${it.title.hashCode()}:${it.contentDesc?.hashCode()}:${it.channel?.hashCode()}" }.take(240)}"
     }
 }
 
@@ -148,8 +143,7 @@ data class ContentSnapshot(
  *   the extracted search query contains a blocked keyword.
  */
 class KeywordMatcher(
-    private val repository: BlockRepository,
-    private val channelBlocklist: com.example.url_blocker.repository.ChannelBlocklist
+    private val repository: BlockRepository
 ) {
 
     companion object {
@@ -263,6 +257,25 @@ class KeywordMatcher(
                 Log.i(TAG, buildBlockLog("URL", url, res))
                 return res
             }
+
+            // Check the USER'S YOUTUBE SEARCH QUERY from the URL.
+            // The YouTube search results page (m.youtube.com/results?search_query=X)
+            // carries the user's search query in the URL. Even though the user
+            // searched for a keyword (not a video title), the app blocks the
+            // search itself — consistent with how Google Search blocking works.
+            // Uses the website keyword set (no tab-restricted gender terms) so
+            // innocent searches like "women's health" are not blocked on the
+            // All tab.
+            val searchQuery = extractYouTubeSearchQuery(url)
+            if (!searchQuery.isNullOrBlank()) {
+                val queryRes = checkString(searchQuery, isUrl = false, builtInKeywords = websiteBuiltInKeywords())
+                if (queryRes is MatchResult.Blocked) {
+                    val finalRes = queryRes.copy(matchSource = MatchSource.QUERY)
+                    Log.i(TAG, buildBlockLog("YOUTUBE_SEARCH_QUERY", searchQuery, finalRes))
+                    return finalRes
+                }
+            }
+
             checkYouTubeFeedCards(snapshot)?.let { return it }
             return MatchResult.Allowed
         }
@@ -311,17 +324,6 @@ class KeywordMatcher(
         // app path.
         val chromeYouTubeTitle = extractChromeYouTubeTitle(snapshot)
         if (chromeYouTubeTitle != null) {
-            // A permanently blocked channel blocks every video from it.
-            val channel = snapshot.channel
-            if (channel != null && channel.isNotBlank() && channelBlocklist.isBlocked(channel)) {
-                val channelRes = MatchResult.Blocked(
-                    channel,
-                    MatchType.CHANNEL,
-                    MatchSource.TITLE
-                )
-                Log.i(TAG, buildBlockLog("YOUTUBE_CHANNEL_IN_CHROME", channel, channelRes))
-                return channelRes
-            }
             val titleRes = checkString(
                 chromeYouTubeTitle,
                 isUrl = false,
@@ -360,12 +362,10 @@ class KeywordMatcher(
      * for the trustworthy signals.
      *
      * Hard blocks (any single one blocks, regardless of score):
-     *   1. A permanently blocked channel (the user explicitly blocked it —
-     *      every video from it is blocked even with a clean title/thumbnail).
-     *   2. An explicit keyword in the TITLE. Titles directly describe the
-     *      content, so a title match is a trustworthy signal — weakening it to
-     *      a low score weight would let explicit videos through unmarked on
-     *      the feed (the latency the user originally complained about).
+     *   An explicit keyword in the TITLE. Titles directly describe the
+     *   content, so a title match is a trustworthy signal — weakening it to
+     *   a low score weight would let explicit videos through unmarked on
+     *   the feed (the latency the user originally complained about).
      *
      * Weighted risk score (block when the sum crosses [FEED_BLOCK_THRESHOLD]):
      *   - Thumbnail content description +0.4 (revealing caption alone crosses)
@@ -380,14 +380,8 @@ class KeywordMatcher(
      */
     private fun checkFeedCardSignals(card: FeedVideoCard): MatchResult.Blocked? {
         val channel = card.channel?.trim().orEmpty()
-        // Hard block 1: permanent channel blocklist.
-        if (channel.isNotEmpty() && channelBlocklist.isBlocked(channel)) {
-            val res = MatchResult.Blocked(channel, MatchType.CHANNEL, MatchSource.FEED)
-            Log.i(TAG, buildBlockLog("YOUTUBE_FEED_CHANNEL", channel, res))
-            return res
-        }
 
-        // Hard block 2: explicit keyword in the title.
+        // Hard block: explicit keyword in the title.
         val titleRes = checkString(card.title, isUrl = false, builtInKeywords = repository.activeBuiltInKeywords)
         if (titleRes is MatchResult.Blocked) {
             Log.i(TAG, buildBlockLog("YOUTUBE_FEED_TITLE", card.title, titleRes))
@@ -446,6 +440,30 @@ class KeywordMatcher(
     }
 
     /**
+     * Extract the YouTube search query from a YouTube search/results URL.
+     * Handles both `search_query=X` and `?q=X` parameter names.
+     */
+    private fun extractYouTubeSearchQuery(url: String): String? {
+        try {
+            val queryStart = url.indexOf('?')
+            if (queryStart < 0) return null
+            val query = url.substring(queryStart + 1)
+            for (param in query.split('&')) {
+                val eq = param.indexOf('=')
+                if (eq <= 0) continue
+                val name = param.substring(0, eq).lowercase(Locale.ROOT)
+                if (name != "search_query" && name != "q") continue
+                val value = param.substring(eq + 1)
+                if (value.isBlank()) return null
+                return java.net.URLDecoder.decode(value, "UTF-8").takeIf { it.isNotBlank() }
+            }
+            return null
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    /**
      * Extract the video title when Chrome is showing a YouTube page.
      *
      * Requires a YouTube context — the URL is a YouTube domain OR the window
@@ -476,10 +494,10 @@ class KeywordMatcher(
 
     /**
      * Pre-emptive feed-card check: find EVERY card whose signals block
-     * (explicit keyword title, permanently blocked channel, or the weighted
-     * thumbnail/channel risk score) and return them all on the Blocked result
-     * so the service can draw a block card over each one BEFORE the user opens
-     * any of them. Null when no card is blocked.
+     * (explicit keyword title, or the weighted thumbnail/channel risk score)
+     * and return them all on the Blocked result — the service then triggers
+     * the full block overlay, catching the video BEFORE the user opens it.
+     * Null when no card is blocked.
      */
     private fun checkYouTubeFeedCards(snapshot: ContentSnapshot): MatchResult.Blocked? {
         if (snapshot.feedCards.isEmpty()) return null
@@ -586,16 +604,6 @@ class KeywordMatcher(
                 Log.i(TAG, buildBlockLog("YOUTUBE_INAPP_URL", snapshot.url, finalRes))
                 return finalRes
             }
-        }
-
-        // 0.5 Permanently blocked channel: every video from it is blocked,
-        //     regardless of title — checked BEFORE the title so a clean-titled
-        //     video from a blocked channel is still caught.
-        val blockedChannel = snapshot.channel?.takeIf { it.isNotBlank() && channelBlocklist.isBlocked(it) }
-        if (blockedChannel != null) {
-            val channelRes = MatchResult.Blocked(blockedChannel, MatchType.CHANNEL, MatchSource.TITLE)
-            Log.i(TAG, buildBlockLog("YOUTUBE_CHANNEL", blockedChannel, channelRes))
-            return channelRes
         }
 
         // 1. Check video title (primary signal)

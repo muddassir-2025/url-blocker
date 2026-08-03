@@ -2,6 +2,7 @@ package com.example.url_blocker.media.data
 
 import android.content.Context
 import android.util.Log
+import com.example.url_blocker.media.model.MediaChannelUpdate
 import com.example.url_blocker.media.model.MediaVideo
 import com.example.url_blocker.media.model.SavedChannel
 import kotlinx.coroutines.Dispatchers
@@ -214,6 +215,50 @@ class MediaRepository(context: Context) {
         }
     }
 
+    // ── Media notifications (channel updates) ───────────────────────
+
+    /**
+     * Whether the app posts a notification when a saved channel uploads a new
+     * video. Default ON; the toggle lives on the home (Quran) tab.
+     */
+    fun isMediaNotificationsEnabled(): Boolean =
+        prefs.getBoolean(KEY_MEDIA_NOTIFICATIONS_ENABLED, DEFAULT_MEDIA_NOTIFICATIONS_ENABLED)
+
+    /** Persists the media-notifications toggle state. */
+    fun setMediaNotificationsEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_MEDIA_NOTIFICATIONS_ENABLED, enabled).apply()
+    }
+
+    /** Video ids already notified about (dedup — never re-notify the same video). */
+    fun getNotifiedVideoIds(): Set<String> =
+        prefs.getStringSet(KEY_NOTIFIED_VIDEOS, emptySet()) ?: emptySet()
+
+    /** Persists the notified-video id set (capped so it can't grow unbounded). */
+    fun markVideosNotified(ids: Set<String>) {
+        val capped = ids.toList().takeLast(MAX_NOTIFIED_VIDEOS).toSet()
+        prefs.edit().putStringSet(KEY_NOTIFIED_VIDEOS, capped).apply()
+    }
+
+    /**
+     * Builds the home-page "Latest Updates" feed: the newest video per saved
+     * channel (from cached feeds — never network), newest first. Empty when
+     * nothing is cached yet.
+     */
+    fun buildChannelUpdates(videos: List<MediaVideo>): List<MediaChannelUpdate> =
+        videos
+            .groupBy { it.channelId }
+            .map { (channelId, vs) ->
+                val newest = vs.maxByOrNull { it.publishedAtEpochMillis }!!
+                MediaChannelUpdate(
+                    channelId = channelId,
+                    channelName = newest.channelName.ifBlank { channelId },
+                    latestVideoId = newest.videoId,
+                    latestVideoTitle = newest.title,
+                    publishedAtEpochMillis = newest.publishedAtEpochMillis
+                )
+            }
+            .sortedByDescending { it.publishedAtEpochMillis }
+
     // ── Aggregate feed (Subscriptions-style: every saved channel) ──
 
     /**
@@ -296,6 +341,10 @@ class MediaRepository(context: Context) {
         const val PREFS_NAME = "media_prefs"
         const val KEY_CHANNELS = "saved_channels"
         const val KEY_SELECTED_CHANNEL = "selected_channel"
+        const val KEY_MEDIA_NOTIFICATIONS_ENABLED = "media_notifications_enabled"
+        const val KEY_NOTIFIED_VIDEOS = "notified_video_ids"
+        const val MAX_NOTIFIED_VIDEOS = 200
+        const val DEFAULT_MEDIA_NOTIFICATIONS_ENABLED = true
 
         val DEFAULT_CHANNEL = SavedChannel(
             channelId = "UC2cX3SmsdWsrRS8t_5zvzEw", // Safina Society (@SafinaSociety)

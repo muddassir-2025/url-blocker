@@ -3,8 +3,6 @@ package com.example.url_blocker.ui
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -13,18 +11,19 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.url_blocker.ui.theme.UrlblockerTheme
-import kotlinx.coroutines.delay
 
 /**
  * Full-screen blocking overlay that shows when blocked content is detected.
@@ -32,24 +31,22 @@ import kotlinx.coroutines.delay
  * This activity:
  *   1. Immediately covers the blocked content
  *   2. Shows a blocking message
- *   3. Waits briefly for safe navigation to take effect
- *   4. Exits — to Home for content/keyword blocks, or to NORMAL Chrome for
- *      incognito blocks (the service's adaptive Back sequence has already
- *      closed every incognito tab, so the user lands back in normal Chrome
- *      automatically)
+ *   3. STAYS on screen until the user dismisses it manually — the ✕ button
+ *      (top-right) or the "Return Home" button both navigate to Home. There
+ *      is NO auto-exit: the overlay must not flash and vanish on its own,
+ *      and the user decides when to leave.
  *
  * The user cannot dismiss this overlay to reveal the blocked content
- * underneath. It auto-navigates to its destination.
+ * underneath — dismissal always goes Home.
  */
 class BlockOverlayActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "BlockOverlayActivity"
-        private const val EXIT_DELAY_MS = 1500L
     }
 
-    /** True once the destination navigation has run (auto-exit timer, button
-     *  and onBackPressed can all fire; only the first may navigate). */
+    /** True once the destination navigation has run (button, ✕ and
+     *  onBackPressed can all fire; only the first may navigate). */
     private var exited = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -64,7 +61,6 @@ class BlockOverlayActivity : ComponentActivity() {
 
         val blockedItem = intent.getStringExtra("blocked_item") ?: "content"
         val blockedType = intent.getStringExtra("blocked_type") ?: "MATCHED"
-        val channelName = intent.getStringExtra("channel_name")
 
         // NOTE: incognito never reaches this overlay anymore — the service
         // closes the incognito tabs and lands the user on Home directly (simple,
@@ -77,23 +73,15 @@ class BlockOverlayActivity : ComponentActivity() {
                 BlockOverlayScreen(
                     blockedItem = blockedItem,
                     blockedType = blockedType,
-                    channelName = channelName,
-                    exitLabel = "Return Home",
-                    statusText = "Returning to Home screen...",
                     onDismiss = { exitToDestination() }
                 )
             }
         }
-
-        // Auto-exit to the destination after a brief delay
-        Handler(Looper.getMainLooper()).postDelayed({
-            exitToDestination()
-        }, EXIT_DELAY_MS)
     }
 
     /**
-     * Always exits to Home. Idempotent: the auto-exit timer, the button and
-     * onBackPressed can all call this; only the first call may navigate.
+     * Always exits to Home. Idempotent: the button, the ✕ and onBackPressed
+     * can all call this; only the first call may navigate.
      */
     private fun exitToDestination() {
         if (exited) return
@@ -120,7 +108,7 @@ class BlockOverlayActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
         // Block back button - user cannot go back to the blocked content.
-        // Navigate to the destination (normal Chrome for incognito, Home otherwise).
+        // Navigate to the destination (Home).
         exitToDestination()
     }
 
@@ -138,9 +126,6 @@ class BlockOverlayActivity : ComponentActivity() {
 private fun BlockOverlayScreen(
     blockedItem: String,
     blockedType: String,
-    channelName: String?,
-    exitLabel: String,
-    statusText: String,
     onDismiss: () -> Unit
 ) {
     var visible by remember { mutableStateOf(false) }
@@ -158,8 +143,30 @@ private fun BlockOverlayScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background),
+            // Center the message block vertically; the ✕ overrides its own
+            // alignment below.
             contentAlignment = Alignment.Center
         ) {
+            // ✕ close button — top-right, always visible. The overlay stays on
+            // screen until the user taps it (or "Return Home").
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                    .clickable { onDismiss() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "✕",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
             Column(
                 modifier = Modifier
                     .padding(32.dp)
@@ -187,24 +194,12 @@ private fun BlockOverlayScreen(
                     text = when (blockedType) {
                         "DOMAIN" -> "This website has been blocked"
                         "INCOGNITO" -> "Incognito browsing is blocked"
-                        "CHANNEL" -> "This YouTube channel is blocked"
                         else -> "This content contains blocked keywords"
                     },
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
                 )
-
-                if (channelName != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Channel: $channelName",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
-                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -224,7 +219,7 @@ private fun BlockOverlayScreen(
                 Spacer(modifier = Modifier.height(32.dp))
 
                 Text(
-                    text = statusText,
+                    text = "Tap ✕ to dismiss when ready",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -238,7 +233,7 @@ private fun BlockOverlayScreen(
                         containerColor = MaterialTheme.colorScheme.primary
                     )
                 ) {
-                    Text(exitLabel)
+                    Text("Return Home")
                 }
             }
         }

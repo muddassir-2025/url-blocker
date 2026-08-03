@@ -52,6 +52,19 @@ class QuranStore(context: Context) {
     }
 
     /**
+     * A stamp identifying the CURRENT English cache file contents (size and
+     * mtime combined). Callers use it to know when a previously parsed list is
+     * stale (e.g. the file was (re)downloaded) without re-reading the file.
+     */
+    fun cacheStamp(): Long {
+        return try {
+            cacheFile.length() * 100_003L + cacheFile.lastModified()
+        } catch (e: Exception) {
+            -1L
+        }
+    }
+
+    /**
      * A stamp identifying the CURRENT Arabic cache file contents (size and
      * mtime combined). Callers use it to know when a previously parsed map is
      * stale (e.g. the file was (re)downloaded) without re-reading the file.

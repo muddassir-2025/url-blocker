@@ -637,16 +637,10 @@ class ContentExtractor {
                 Log.i(TAG, "YOUTUBE_INAPP_DOMAIN_DETECTED domain=${ytInApp.domain} -> url=$ytUrl")
             }
 
-            // Channel + description (best-effort): the channel name/handle is
-            // needed for permanent channel blocking; the description is a
-            // secondary keyword signal. Both are read from the native tree
-            // (the YouTube app exposes the channel link and description text
-            // to accessibility).
-            val ytChannel = YouTubeChannelIdentifier.extractFromTree(rootNode)
+            // Description (best-effort): a secondary keyword signal, read from
+            // the native tree (the YouTube app exposes the description text to
+            // accessibility).
             val ytDescription = extractYouTubeDescription(rootNode)
-            if (ytChannel != null) {
-                Log.i(TAG, "YOUTUBE_CHANNEL_EXTRACTED name=$ytChannel")
-            }
 
             return ContentSnapshot(
                 packageName = packageName,
@@ -655,7 +649,6 @@ class ContentExtractor {
                 title = title,
                 queryConfidence = if (queryFromSignals != null) QueryConfidence.MEDIUM else QueryConfidence.NONE,
                 querySource = QuerySource.NONE,
-                channel = ytChannel,
                 description = ytDescription
             )
         }
@@ -838,7 +831,7 @@ class ContentExtractor {
             u.contains("/watch") || u.contains("/shorts/")
         } == true
         if (!titleParses && packageName in CHROME_PACKAGES && isWatchUrl) {
-            val treeTitle = extractChromeYouTubeTreeTitle(rootNode)
+            val treeTitle = extractChromeYouTubeTreeTitle(rootNode, true)
             if (treeTitle != null) {
                 Log.i(TAG, "CHROME_YOUTUBE_TITLE_FROM_TREE=$treeTitle")
                 title = "Chrome: $treeTitle - YouTube"
@@ -863,22 +856,6 @@ class ContentExtractor {
             detectGoogleTabChip(rootNode, resultsPage) ?: googleTabFromUrl(url)
         } else {
             googleTabFromUrl(url)
-        }
-
-        // Channel identification for YouTube pages opened in Chrome: the mobile
-        // window title carries no channel, so read the on-screen tree. Only runs
-        // on a positive YouTube context (YouTube domain or " - YouTube" window
-        // title) to avoid wasting scans on ordinary pages.
-        val channel = if (packageName in CHROME_PACKAGES &&
-            (ContentExtractor.isYouTubeDomain(url) ||
-                (windowTitle != null && windowTitle.lowercase().endsWith(" - youtube")))
-        ) {
-            YouTubeChannelIdentifier.extractFromTree(rootNode)
-        } else {
-            null
-        }
-        if (channel != null) {
-            Log.i(TAG, "CHROME_YOUTUBE_CHANNEL_EXTRACTED name=$channel")
         }
 
         // Pre-emptive feed blocking: on YouTube feed/search pages (NOT watch
@@ -908,7 +885,6 @@ class ContentExtractor {
             querySource = querySource,
             incognito = incognito,
             googleTab = googleTab,
-            channel = channel,
             feedCards = feedCards
         )
     }
@@ -925,11 +901,20 @@ class ContentExtractor {
      * does not expose page content to accessibility (the fallback then simply
      * does not fire).
      */
-    private fun extractChromeYouTubeTreeTitle(rootNode: AccessibilityNodeInfo): String? {
+    private fun extractChromeYouTubeTreeTitle(rootNode: AccessibilityNodeInfo, useDeepScan: Boolean = false): String? {
+        // YouTube's mobile WebView nests its content deeply (observed at depth
+        // 99+ for tab chips). The deep scan path uses a much higher limit so
+        // the video title is reachable even on heavily-nested pages.
+        val maxDepth = if (useDeepScan) 150 else MAX_TRAVERSAL_DEPTH
+        val nodeBudget = if (useDeepScan) 2000 else 0  // unlimited when not deep
+        var visited = 0
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(rootNode)
         var depth = 0
-        while (queue.isNotEmpty() && depth < MAX_TRAVERSAL_DEPTH) {
+        while (queue.isNotEmpty() && depth < maxDepth &&
+            (nodeBudget == 0 || visited < nodeBudget)
+        ) {
+            visited++
             val node = queue.removeFirst()
             val text = try { extractNodeText(node)?.trim() } catch (e: Exception) { null }
             if (text != null) {

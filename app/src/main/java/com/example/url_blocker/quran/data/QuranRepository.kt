@@ -77,13 +77,28 @@ class QuranRepository(context: Context) {
     }
 
     /**
+     * Process-wide cache of the parsed English verses (the flat Quran-ordered
+     * list), so repeated picks AND prev/next navigation don't re-parse the
+     * cache file on every call. Stamped against the cache file so a later
+     * (re)download is picked up. Only ever accessed from background threads.
+     */
+    private fun englishVerses(): List<QuranVerse>? {
+        val stamp = store.cacheStamp()
+        if (versesStamp != stamp) {
+            EnglishVersesCache = store.loadVerses()
+            versesStamp = stamp
+        }
+        return EnglishVersesCache
+    }
+
+    /**
      * Picks a random verse from the cached translation, persists it as the
      * current verse and returns it. Avoids repeating the verse that is
      * currently displayed (when there is more than one choice). Returns null
      * only when no data is available (offline first run).
      */
     suspend fun pickRandomVerse(): QuranVerse? = withContext(Dispatchers.IO) {
-        val verses = store.loadVerses() ?: return@withContext null
+        val verses = englishVerses() ?: return@withContext null
         if (verses.isEmpty()) return@withContext null
 
         val current = store.readCurrentVerse()
@@ -110,6 +125,51 @@ class QuranRepository(context: Context) {
     /** The currently displayed verse (instant; null before first download). */
     fun getCurrentVerse(): QuranVerse? = store.readCurrentVerse()
 
+    /**
+     * Returns the verse [step] positions away (+1 = next ayah, -1 = previous
+     * ayah) from (surahNumber, ayahNumber). The flat cache is Quran-ordered,
+     * so surah boundaries wrap naturally: previous of 2:1 is 1:286, next of
+     * 1:7 is 2:1, etc. The result is enriched with Arabic text when available
+     * and persisted as the current verse. Null at the very first/last verse of
+     * the Quran, or when no data is cached yet.
+     */
+    suspend fun getAdjacentVerse(surahNumber: Int, ayahNumber: Int, step: Int): QuranVerse? =
+        withContext(Dispatchers.IO) {
+            val verses = englishVerses() ?: return@withContext null
+            if (verses.isEmpty()) return@withContext null
+            val index = verses.indexOfFirst {
+                it.surahNumber == surahNumber && it.ayahNumber == ayahNumber
+            }
+            if (index < 0) return@withContext null
+            val targetIndex = index + step
+            if (targetIndex !in verses.indices) return@withContext null
+
+            val raw = verses[targetIndex]
+            val enriched = if (raw.arabicText.isBlank()) {
+                raw.copy(
+                    arabicText = arabicTexts()?.get(Pair(raw.surahNumber, raw.ayahNumber)) ?: ""
+                )
+            } else {
+                raw
+            }
+            store.saveCurrentVerse(enriched)
+            enriched
+        }
+
+    /**
+     * Whether a verse exists [step] positions away (+1 / -1) from
+     * (surahNumber, ayahNumber) — used to disable the Previous/Next buttons at
+     * the start and end of the Quran.
+     */
+    suspend fun hasAdjacentVerse(surahNumber: Int, ayahNumber: Int, step: Int): Boolean =
+        withContext(Dispatchers.IO) {
+            val verses = englishVerses() ?: return@withContext false
+            val index = verses.indexOfFirst {
+                it.surahNumber == surahNumber && it.ayahNumber == ayahNumber
+            }
+            index >= 0 && (index + step) in verses.indices
+        }
+
     /** User-chosen interval (hours) between automatic new-verse refreshes. */
     fun getRefreshIntervalHours(): Int = store.getRefreshIntervalHours()
 
@@ -132,5 +192,9 @@ class QuranRepository(context: Context) {
         @Volatile
         private var ArabicTextsCache: Map<Pair<Int, Int>, String>? = null
         private var arabicTextsStamp = -1L
+
+        @Volatile
+        private var EnglishVersesCache: List<QuranVerse>? = null
+        private var versesStamp = -1L
     }
 }
