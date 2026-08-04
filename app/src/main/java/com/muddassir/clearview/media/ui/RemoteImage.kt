@@ -34,7 +34,9 @@ import java.net.URL
 fun RemoteImage(
     url: String?,
     modifier: Modifier = Modifier,
-    contentScale: ContentScale = ContentScale.Crop
+    contentScale: ContentScale = ContentScale.Crop,
+    /** When false, the loading state is a plain surface box (no spinner). */
+    showLoadingSpinner: Boolean = true
 ) {
     var bitmap by remember(url) { mutableStateOf<Bitmap?>(null) }
 
@@ -53,7 +55,7 @@ fun RemoteImage(
             modifier = modifier,
             contentScale = contentScale
         )
-    } else {
+    } else if (showLoadingSpinner) {
         Box(
             modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center
@@ -63,6 +65,8 @@ fun RemoteImage(
                 strokeWidth = 2.dp
             )
         }
+    } else {
+        Box(modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant))
     }
 }
 

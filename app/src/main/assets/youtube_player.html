@@ -238,7 +238,8 @@
   function startProgressTimer() {
     if (progressTimer) { clearInterval(progressTimer); }
     reportProgress();
-    progressTimer = setInterval(reportProgress, 5000);
+    reportMuted();
+    progressTimer = setInterval(function () { reportProgress(); reportMuted(); }, 5000);
   }
   function stopProgressTimer(reportFinal) {
     if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
@@ -254,6 +255,11 @@
   var player = null;
   var apiReady = false;
   var pending = null; // videoId
+  // When the last loadVideo happened: used to re-apply the preferred mute
+  // state at the exact moment the new video's playback starts (only within a
+  // short window after a load — never later, so an iframe-control unmute is
+  // never overridden).
+  var recentLoadAt = 0;
 
   function onYouTubeIframeAPIReady() {
     apiReady = true;
@@ -293,8 +299,16 @@
         onReady: function (e) {
           notify('onReady');
           // Belt-and-braces: ensure muted autoplay even if the playerVars
-          // autoplay was deferred.
-          try { e.target.mute(); e.target.playVideo(); } catch (ex) {}
+          // autoplay was deferred, then restore the user's preferred sound
+          // state once playback has actually started (unmuting after a muted
+          // start is never blocked by the no-gesture autoplay rule).
+          try {
+            e.target.mute();
+            e.target.playVideo();
+            if (!preferredMuted) e.target.unMute();
+          } catch (ex) {}
+          // Resume from a saved position if this player was created for one.
+          applyResume(pendingResume);
           // Apply the attributes from YouTube's official embed snippet to the
           // generated iframe (title, referrerpolicy, allow + web-share).
           try {
@@ -318,6 +332,10 @@
           if (e.data === 1) {
             lastPlayingAt = Date.now();
             startProgressTimer();   // playing → track position every 5 s
+            // Playback just began: if this is right after a loadVideo, the
+            // new video started muted (autoplay-safe); restore the user's
+            // preferred sound state now that playing is guaranteed.
+            if (Date.now() - recentLoadAt < 2500) applyPreferredMuted();
           }
           if (e.data === 2) {
             lastPauseAt = Date.now();
@@ -328,6 +346,7 @@
           }
           logSizes('STATE=' + e.data);
           notify('onStateChange', e.data);
+          reportMuted();
         },
         onError: function (e) {
           // RAW value BEFORE any mapping/processing — proves on-device where
@@ -340,12 +359,117 @@
     });
   }
 
+  // ── Resume position ──────────────────────────────────────────────
+  // The app passes a saved playback position (seconds) with each load; after
+  // the new video is cued we poll-seek until the position actually sticks
+  // (seekTo can be ignored while the next video is still buffering), then
+  // playback continues from there.
+  var pendingResume = 0;
+  function applyResume(seconds) {
+    if (!player || !seconds || seconds <= 0) return;
+    if (typeof player.seekTo !== 'function') return;
+    var attempts = 0;
+    var t = setInterval(function () {
+      attempts++;
+      try {
+        player.seekTo(seconds, true);
+        var now = player.getCurrentTime();
+        if (now >= seconds - 3 || attempts > 12) { clearInterval(t); }
+      } catch (e) { clearInterval(t); }
+    }, 250);
+  }
+
+  // ── Playback speed ───────────────────────────────────────────────
+  function setRate(rate) {
+    try {
+      if (!player || typeof player.setPlaybackRate !== 'function') return;
+      player.setPlaybackRate(rate);
+    } catch (e) { console.error(e); }
+  }
+
+  // ── Re-seek on the current source (Continue Watching / Watch Again) ──
+  function seekToSeconds(seconds) {
+    try {
+      if (!player || typeof player.seekTo !== 'function') return;
+      player.seekTo(seconds, true);
+      if (typeof player.playVideo === 'function') { try { player.playVideo(); } catch (e) {} }
+    } catch (e) { console.error(e); }
+  }
+
+  // ── Transport controls (Shorts viewer) ─────────────────────────────
+  // Explicit play/pause/mute so the Shorts fullscreen viewer can offer its
+  // own always-visible controls (the iframe's own buttons sit behind the
+  // app's swipe layer).
+  function playVideo() {
+    try {
+      if (player && typeof player.playVideo === 'function') player.playVideo();
+    } catch (e) { console.error(e); }
+  }
+  function pauseVideo() {
+    try {
+      if (player && typeof player.pauseVideo === 'function') player.pauseVideo();
+    } catch (e) { console.error(e); }
+  }
+  // Nudge the playback position by delta seconds (negative = back).
+  function seekBy(delta) {
+    try {
+      if (!player || typeof player.seekTo !== 'function' ||
+          typeof player.getCurrentTime !== 'function') return;
+      var t = player.getCurrentTime();
+      if (!isFinite(t)) return;
+      player.seekTo(Math.max(0, t + delta), true);
+    } catch (e) { console.error(e); }
+  }
+  // The desired mute state — remembered so EVERY video (not just the current
+  // one) loads with the user's choice. Default true (autoplay requires muted).
+  var preferredMuted = true;
+  function applyPreferredMuted() {
+    try {
+      if (!player || typeof player.mute !== 'function') return;
+      if (preferredMuted) { player.mute(); } else { player.unMute(); }
+      reportMuted();
+    } catch (e) { console.error(e); }
+  }
+  function setPreferredMuted(muted) {
+    preferredMuted = !!muted;
+    applyPreferredMuted();
+  }
+  function setMuted(muted) {
+    setPreferredMuted(muted);
+  }
+  // Reports the player's real muted state to Android (the UI keeps its mute
+  // button in sync even when the user unmutes via the iframe controls).
+  function reportMuted() {
+    try {
+      if (!player || typeof player.isMuted !== 'function') return;
+      var m = player.isMuted();
+      notify('onMuteState', m ? 1 : 0);
+    } catch (e) {}
+  }
+
   // Called from Android via evaluateJavascript.
-  function loadVideo(id) {
+  // loadVideo(id) → plain playback; loadVideo(id, seconds) → resume from
+  // seconds; loadVideo(id, seconds, muted) also pins the desired mute state
+  // (persists across videos until the user toggles it again).
+  function loadVideo(id, seconds, muted) {
     pending = id;
+    pendingResume = (typeof seconds === 'number' && seconds > 0) ? seconds : 0;
+    if (typeof muted === 'boolean') preferredMuted = muted;
     if (!apiReady) return;
     if (player && typeof player.loadVideoById === 'function') {
-      try { player.loadVideoById(id); player.mute(); } catch (e) { console.error(e); }
+      recentLoadAt = Date.now();
+      try {
+        // Start muted (the no-gesture autoplay rule demands it). The user's
+        // preferred sound state is restored once the new video actually
+        // begins playing (see the onStateChange PLAYING hook) — never before,
+        // so playback itself is never blocked by a with-sound autoplay.
+        player.mute();
+        player.loadVideoById(id);
+        // Backstop in case the PLAYING state fires outside the 2.5 s window.
+        setTimeout(function () { applyPreferredMuted(); }, 400);
+      } catch (e) { console.error(e); }
+      // Seek after the new video is cued (loadVideoById is async).
+      setTimeout(function () { applyResume(pendingResume); }, 120);
     } else {
       createPlayer(pending);
     }

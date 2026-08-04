@@ -2,10 +2,14 @@ package com.muddassir.clearview.media.data
 
 import android.content.Context
 import android.util.Log
+import com.muddassir.clearview.media.model.FeedFilter
 import com.muddassir.clearview.media.model.MediaChannelUpdate
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.model.SavedChannel
 import com.muddassir.clearview.media.util.MediaUpdates
+import com.muddassir.clearview.media.util.decodeFeedFilter
+import com.muddassir.clearview.media.util.encodeFeedFilter
+import com.muddassir.clearview.media.util.extractYouTubeVideoId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -13,6 +17,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 /**
  * Repository for the Media tab: manages saved channels (add/remove/select,
@@ -80,6 +85,18 @@ class MediaRepository(context: Context) {
             sourceRef = trimmed
         )
         saveChannels(existing + channel)
+        // Notification baseline: fetch the new channel's feed immediately and
+        // mark EVERY existing video as already-notified, so the background
+        // worker never notifies about pre-existing uploads (the "added a
+        // channel → notification spam of old videos" bug). The feed is also
+        // cached here, so the Media tab shows the content right away.
+        runCatching {
+            refreshVideos(channelId)?.let { fresh ->
+                if (fresh.isNotEmpty()) {
+                    markVideosNotified(getNotifiedVideoIds() + fresh.map { it.videoId })
+                }
+            }
+        }
         AddChannelResult.Success(channel)
     }
 
@@ -154,6 +171,100 @@ class MediaRepository(context: Context) {
         return updated
     }
 
+    // ── Manual videos (added by URL) ───────────────────────────────
+
+    /** Result of resolving a pasted video URL into a [MediaVideo]. */
+    sealed class ResolveVideoResult {
+        /** Resolved metadata; the caller should save it as a manual video. */
+        data class Success(val video: MediaVideo) : ResolveVideoResult()
+
+        /** The video is already part of [channel]'s feed (no need to add). */
+        data class AlreadyExists(val video: MediaVideo) : ResolveVideoResult()
+
+        data class Error(val message: String) : ResolveVideoResult()
+    }
+
+    /**
+     * Resolves a user-pasted YouTube URL for [fallbackChannel] (the channel
+     * whose feed the user is adding into). Verifies the video against the
+     * channel's cached/fresh RSS first (best-effort); when it isn't there,
+     * fetches metadata via YouTube's public oEmbed endpoint (title, channel
+     * name, thumbnail — no duration, no description). Publication time stays
+     * 0 (unknown) so the video is never presented as newly published.
+     */
+    suspend fun resolveVideoByUrl(
+        input: String,
+        fallbackChannel: SavedChannel?
+    ): ResolveVideoResult = withContext(Dispatchers.IO) {
+        val videoId = extractYouTubeVideoId(input)
+            ?: return@withContext ResolveVideoResult.Error(
+                "That doesn't look like a YouTube video URL."
+            )
+        // Already in this channel's cache? Reuse the RSS metadata.
+        fallbackChannel?.let { channel ->
+            getCachedVideos(channel.channelId)
+                ?.first?.firstOrNull { it.videoId == videoId }
+                ?.let { return@withContext ResolveVideoResult.AlreadyExists(it) }
+        }
+        // Already in the channel's LIVE feed (cache stale)? Same.
+        fallbackChannel?.let { channel ->
+            fetchFeedVideos(channel.channelId)
+                ?.firstOrNull { it.videoId == videoId }
+                ?.let { return@withContext ResolveVideoResult.AlreadyExists(it) }
+        }
+        // Not in the feed — fetch metadata from oEmbed (no API key needed).
+        val meta = fetchOEmbedMetadata(videoId)
+            ?: return@withContext ResolveVideoResult.Error(
+                "Couldn't load video info. Check the URL and your connection."
+            )
+        ResolveVideoResult.Success(
+            MediaVideo(
+                videoId = videoId,
+                title = meta.title,
+                channelId = fallbackChannel?.channelId ?: "",
+                channelName = fallbackChannel?.displayName ?: meta.authorName,
+                publishedAtEpochMillis = 0L, // unknown date — never pretend it's new
+                thumbnailUrl = meta.thumbnailUrl,
+                viewCount = 0L,
+                isShort = false
+            )
+        )
+    }
+
+    private data class OEmbedMeta(
+        val title: String,
+        val authorName: String,
+        val thumbnailUrl: String
+    )
+
+    /** Fetches title / author / thumbnail via YouTube's public oEmbed endpoint. */
+    private fun fetchOEmbedMetadata(videoId: String): OEmbedMeta? {
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        val apiUrl = "https://www.youtube.com/oembed?url=" +
+            URLEncoder.encode(watchUrl, "UTF-8") + "&format=json"
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val o = JSONObject(body)
+            OEmbedMeta(
+                title = o.optString("title", ""),
+                authorName = o.optString("author_name", ""),
+                thumbnailUrl = o.optString("thumbnail_url", "")
+            )
+        } catch (e: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
     // ── Latest videos (RSS + cache) ─────────────────────────────────
 
     /**
@@ -207,8 +318,44 @@ class MediaRepository(context: Context) {
                         "videoUrl=https://www.youtube.com/watch?v=${v.videoId} title=${v.title}"
                 )
             }
+            // A manually added video is never "new" — even when it later shows
+            // up in RSS, it must not generate a notification (the user added it
+            // deliberately as old content). Baseline it alongside the RSS items.
+            val manualIds = MediaLibraryStore(appContext)
+                .getManuallyAddedVideos().map { it.videoId }.toSet()
+            val baseline = videos.filter { it.videoId in manualIds }.map { it.videoId }
+            if (baseline.isNotEmpty()) {
+                markVideosNotified(getNotifiedVideoIds() + baseline)
+            }
             if (videos.isNotEmpty()) writeCache(channelId, videos)
             videos
+        } catch (e: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    /**
+     * Fetches a channel's RSS and parses the latest videos WITHOUT the Shorts
+     * classification and WITHOUT touching the cache — the lightweight check
+     * used when resolving a user-pasted video URL (verifies membership in the
+     * channel's real feed). Null on any network/parse failure.
+     */
+    private fun fetchFeedVideos(channelId: String): List<MediaVideo>? {
+        val url = "https://www.youtube.com/feeds/videos.xml?channel_id=$channelId"
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/atom+xml")
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            YouTubeRssParser.parse(body, emptySet())
         } catch (e: Exception) {
             null
         } finally {
@@ -286,6 +433,47 @@ class MediaRepository(context: Context) {
         val remaining = getUpdatesHistory().filterNot { it.latestVideoId == latestVideoId }
         prefs.edit().putString(KEY_UPDATES_HISTORY, MediaUpdates.encode(remaining)).apply()
     }
+
+    /**
+     * How many of [updates] the user hasn't seen yet (drives the Media-tab
+     * badge). An update is "unread" until its id is in the seen set.
+     */
+    fun countUnreadUpdates(updates: List<MediaChannelUpdate>): Int =
+        updates.count { it.latestVideoId !in getSeenUpdateIds() }
+
+    /** Marks the given update ids as seen; returns how many were newly marked. */
+    fun markUpdatesSeen(videoIds: List<String>): Int {
+        if (videoIds.isEmpty()) return 0
+        val seen = getSeenUpdateIds()
+        val newly = videoIds.filter { it !in seen }.toSet()
+        if (newly.isEmpty()) return 0
+        val merged = (seen + newly).toList().takeLast(MAX_NOTIFIED_VIDEOS).toSet()
+        prefs.edit().putStringSet(KEY_SEEN_UPDATE_IDS, merged).apply()
+        return newly.size
+    }
+
+    private fun getSeenUpdateIds(): Set<String> =
+        prefs.getStringSet(KEY_SEEN_UPDATE_IDS, emptySet()) ?: emptySet()
+
+    // ── Feed filters (persisted across restarts, per context) ──────
+
+    /**
+     * The saved feed filter for [channelId], or the All Feed filter when
+     * [channelId] is null. Every channel keeps its OWN filter, separate from
+     * the All Feed one. Defaults when never set or corrupt.
+     */
+    fun getFeedFilter(channelId: String? = null): FeedFilter =
+        decodeFeedFilter(prefs.getString(feedFilterKey(channelId), null)) ?: FeedFilter()
+
+    /** Persists the feed filter for [channelId] (null = All Feed). */
+    fun setFeedFilter(filter: FeedFilter, channelId: String? = null) {
+        prefs.edit().putString(feedFilterKey(channelId), encodeFeedFilter(filter)).apply()
+    }
+
+    /** Per-context storage key: the All Feed key, or a per-channel key. */
+    private fun feedFilterKey(channelId: String?): String =
+        if (channelId == null) KEY_FEED_FILTER
+        else KEY_FEED_FILTER + "_channel_" + channelId
 
     /**
      * One-time seed for a fresh install (or the first run after this feature
@@ -391,6 +579,8 @@ class MediaRepository(context: Context) {
         const val KEY_MEDIA_NOTIFICATIONS_ENABLED = "media_notifications_enabled"
         const val KEY_NOTIFIED_VIDEOS = "notified_video_ids"
         const val KEY_UPDATES_HISTORY = "updates_history"
+        const val KEY_SEEN_UPDATE_IDS = "seen_update_ids"
+        const val KEY_FEED_FILTER = "feed_filter"
         const val MAX_NOTIFIED_VIDEOS = 200
         const val DEFAULT_MEDIA_NOTIFICATIONS_ENABLED = true
 

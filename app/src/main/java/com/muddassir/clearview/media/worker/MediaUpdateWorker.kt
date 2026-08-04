@@ -3,6 +3,7 @@ package com.muddassir.clearview.media.worker
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.muddassir.clearview.media.data.MediaBadge
 import com.muddassir.clearview.media.data.MediaRepository
 
 /**
@@ -45,6 +46,13 @@ class MediaUpdateWorker(
         repository.recordChannelUpdates(updates)
 
         repository.markVideosNotified(alreadyNotified + newVideos.map { it.videoId })
+
+        // New uploads detected → the launcher badge should show them (the
+        // in-app unread count is recomputed from the same persisted history).
+        MediaBadge.setBadge(
+            applicationContext,
+            repository.countUnreadUpdates(repository.getUpdatesHistory())
+        )
         return Result.success()
     }
 }

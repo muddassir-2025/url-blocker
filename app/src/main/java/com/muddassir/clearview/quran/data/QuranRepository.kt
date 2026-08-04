@@ -176,6 +176,12 @@ class QuranRepository(context: Context) {
     /** Sets + persists the interval (hours) between automatic new-verse refreshes. */
     fun setRefreshIntervalHours(hours: Int) = store.setRefreshIntervalHours(hours)
 
+    /** Whether the app posts an OS notification when a new verse is chosen. */
+    fun getQuranNotificationsEnabled(): Boolean = store.getQuranNotificationsEnabled()
+
+    /** Persists the Quran-verse notification toggle. */
+    fun setQuranNotificationsEnabled(enabled: Boolean) = store.setQuranNotificationsEnabled(enabled)
+
     // ── Bookmarks ────────────────────────────────────────────────────
 
     /** Set of "surah:ayah" strings the user has bookmarked. */

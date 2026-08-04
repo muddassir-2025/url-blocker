@@ -98,7 +98,36 @@ fun YoutubePlayer(
      */
     onProgress: (currentSeconds: Double, durationSeconds: Double) -> Unit = { _, _ -> },
     /** Bump to force the current source to be re-applied (retry after error). */
-    retryToken: Int = 0
+    retryToken: Int = 0,
+    /**
+     * Playback position (seconds) to resume from for the current source, or
+     * 0 to start from the beginning. Applied right after the video is cued.
+     */
+    resumeFromSeconds: Double = 0.0,
+    /** Desired playback rate (e.g. 1.25); applied once the player is ready. */
+    playbackRate: Double = 1.0,
+    /**
+     * Bump to re-seek on the CURRENT source without reloading the video: the
+     * "Continue Watching" button (seek to [seekToSeconds] = resume position)
+     * and the "Watch Again" button (seek to 0).
+     */
+    seekToken: Int = 0,
+    /** Seconds to seek to when [seekToken] changes (0 = restart). */
+    seekToSeconds: Double = 0.0,
+    /**
+     * Transport commands for the Shorts viewer: bump [commandToken] to send
+     * [command] ("play" / "pause" / "mute" / "unmute") to the page.
+     */
+    commandToken: Int = 0,
+    command: String = "",
+    /**
+     * The user's DESIRED mute state. Passed to every loadVideo call so each
+     * new video (e.g. when swiping through Shorts) starts with the same
+     * setting the user last chose — not a fresh forced-mute.
+     */
+    muted: Boolean = true,
+    /** The player's REAL muted state (reported by the page). */
+    onMuteState: (Boolean) -> Unit = {}
 ) {
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val controller = remember { PlayerController() }
@@ -109,6 +138,7 @@ fun YoutubePlayer(
     val currentOnAutoplayBlocked by rememberUpdatedState(onAutoplayBlocked)
     val currentOnReady by rememberUpdatedState(onReady)
     val currentOnProgress by rememberUpdatedState(onProgress)
+    val currentOnMuteState by rememberUpdatedState(onMuteState)
 
     // JS bridge → main thread → Compose callbacks. The bridge methods run on
     // the WebView's JS thread; everything is marshalled to the main thread.
@@ -131,7 +161,8 @@ fun YoutubePlayer(
             errorCallback = { c -> mainHandler.post { currentOnError(c) } },
             autoplayBlockedCallback = { mainHandler.post { currentOnAutoplayBlocked() } },
             readyCallback = { mainHandler.post { currentOnReady() } },
-            progressCallback = { c, d -> mainHandler.post { currentOnProgress(c, d) } }
+            progressCallback = { c, d -> mainHandler.post { currentOnProgress(c, d) } },
+            muteStateCallback = { muted -> mainHandler.post { currentOnMuteState(muted) } }
         )
     }
 
@@ -432,11 +463,49 @@ fun YoutubePlayer(
                 "videoId=$videoId retryToken=$retryToken")
             controller.videoId = videoId
             controller.retryToken = retryToken
+            controller.preferredMuted = muted
+            // Assigned OUTSIDE the pageReady guard: the first applySource may
+            // come from onPageFinished before any ready update runs, and it
+            // must see the resume position (Continue Watching on first open).
+            controller.resumeFromSeconds = resumeFromSeconds
             if (controller.pageReady &&
                 (controller.appliedVideoId != videoId ||
                     controller.appliedRetryToken != retryToken)
             ) {
                 applySource(webView, controller, bridge)
+            }
+            // Playback speed: applied whenever the requested rate changes
+            // (re-applied after every source change via the source block).
+            if (controller.pageReady && controller.appliedRate != playbackRate) {
+                controller.appliedRate = playbackRate
+                try {
+                    webView.evaluateJavascript("setRate($playbackRate)", null)
+                } catch (e: Exception) {
+                    Log.w(TAG, "SET_RATE_FAILED: ${e.message}")
+                }
+            }
+            // Continue-Watching / Watch-Again re-seek on the current source
+            // (no reload). Applied whenever the token bumps.
+            if (controller.pageReady && controller.appliedSeekToken != seekToken) {
+                controller.appliedSeekToken = seekToken
+                try {
+                    webView.evaluateJavascript("seekToSeconds($seekToSeconds)", null)
+                } catch (e: Exception) {
+                    Log.w(TAG, "SEEK_FAILED: ${e.message}")
+                }
+            }
+            // Shorts transport commands (play / pause / mute). While the page
+            // is still loading the command is remembered and flushed by
+            // applySource once the page finishes — a pause/mute tapped during
+            // buffering must not be silently lost.
+            if (controller.appliedCommandToken != commandToken) {
+                if (controller.pageReady) {
+                    controller.appliedCommandToken = commandToken
+                    sendCommandJs(webView, command)
+                } else {
+                    controller.pendingCommand = command
+                    controller.pendingCommandToken = commandToken
+                }
             }
         },
         onRelease = {
@@ -531,7 +600,10 @@ private fun hideFullscreenCustomView(
 private fun applySource(webView: WebView, controller: PlayerController, bridge: YtBridge) {
     if (!controller.pageReady) return
     val video = controller.videoId ?: return
-    val js = "loadVideo('$video')"
+    val resume = controller.resumeFromSeconds
+    // Always pass the desired mute state so every new video honours the
+    // user's last choice (Shorts swiping keeps the setting consistent).
+    val js = "loadVideo('$video', $resume, ${controller.preferredMuted})"
     controller.appliedVideoId = video
     controller.appliedRetryToken = controller.retryToken
     // New source → a repeated error from the old source must be able to fire
@@ -542,6 +614,32 @@ private fun applySource(webView: WebView, controller: PlayerController, bridge: 
         Log.d(TAG, "SOURCE_APPLIED $js")
     } catch (e: Exception) {
         Log.w(TAG, "SOURCE_APPLY_FAILED: ${e.message}")
+    }
+    // Flush a transport command that arrived while the page was still loading.
+    controller.pendingCommand?.let { cmd ->
+        controller.pendingCommand = null
+        controller.appliedCommandToken = controller.pendingCommandToken
+        sendCommandJs(webView, cmd)
+    }
+}
+
+/** Maps a Shorts-viewer command name to its JS call and evaluates it. */
+private fun sendCommandJs(webView: WebView, command: String) {
+    val js = when (command) {
+        "play" -> "playVideo()"
+        "pause" -> "pauseVideo()"
+        "mute" -> "setMuted(true)"
+        "unmute" -> "setMuted(false)"
+        "back10" -> "seekBy(-10)"
+        "fwd10" -> "seekBy(10)"
+        else -> null
+    }
+    if (js != null) {
+        try {
+            webView.evaluateJavascript(js, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "COMMAND_FAILED: ${e.message}")
+        }
     }
 }
 
@@ -554,6 +652,19 @@ private class PlayerController {
     var appliedVideoId: String? = null
     var retryToken = 0
     var appliedRetryToken = 0
+    /** Resume position (seconds) for the current source (applied via loadVideo). */
+    var resumeFromSeconds: Double = 0.0
+    /** The user's desired mute state (applied with every source load). */
+    @Volatile var preferredMuted: Boolean = true
+    /** Last seekToken honored (drives the Continue-Watching re-seek). */
+    var appliedSeekToken: Int = 0
+    /** Last commandToken honored (Shorts transport commands). */
+    var appliedCommandToken: Int = 0
+    /** Command queued while the page was still loading (flushed on page ready). */
+    var pendingCommand: String? = null
+    var pendingCommandToken: Int = -1
+    /** Last playback rate pushed to the player (applied when it changes). */
+    @Volatile var appliedRate: Double = 1.0
     /** Last player state reported by the IFrame API (for rotation diagnostics). */
     @Volatile var lastState: Int = YtState.UNSTARTED
     /** Fullscreen custom-view hosting (the player's built-in fullscreen button). */
@@ -636,7 +747,8 @@ private class YtBridge(
     private val errorCallback: (Int) -> Unit,
     private val autoplayBlockedCallback: () -> Unit,
     private val readyCallback: () -> Unit,
-    private val progressCallback: (Double, Double) -> Unit
+    private val progressCallback: (Double, Double) -> Unit,
+    private val muteStateCallback: (Boolean) -> Unit
 ) {
     /** Dedup: surface a given error code only once per loaded source. */
     @Volatile
@@ -687,6 +799,12 @@ private class YtBridge(
     fun onReady() {
         Log.d(TAG, "IFRAME_READY")
         readyCallback()
+    }
+
+    /** The player's real muted state (1 = muted, 0 = unmuted). */
+    @JavascriptInterface
+    fun onMuteState(muted: Int) {
+        muteStateCallback(muted == 1)
     }
 
     /** Internal path (non-JS errors) — fires the same Kotlin callback. */

@@ -5,9 +5,10 @@
     android:layout_height="match_parent"
     android:background="@drawable/widget_quran_reminder_bg"
     android:orientation="vertical"
-    android:padding="10dp">
+    android:padding="8dp">
 
-    <!-- Header: title + Copy / Refresh actions (compact 3x1) -->
+    <!-- Header: bold sage-green title + two circular action buttons. Content
+         hugs the card; the row is exactly as tall as the buttons. -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -19,17 +20,17 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:ellipsize="end"
-            android:fontFamily="serif"
+            android:fontFamily="sans-serif"
             android:maxLines="1"
             android:text="@string/widget_quran_reminder_title"
             android:textColor="@color/widget_title"
-            android:textSize="12sp"
+            android:textSize="14sp"
             android:textStyle="bold" />
 
         <ImageView
             android:id="@+id/widget_copy_button"
-            android:layout_width="22dp"
-            android:layout_height="22dp"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
             android:background="@drawable/widget_action_button_bg"
             android:contentDescription="@string/widget_quran_copy"
             android:padding="3dp"
@@ -38,8 +39,8 @@
 
         <ImageView
             android:id="@+id/widget_refresh_button"
-            android:layout_width="22dp"
-            android:layout_height="22dp"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
             android:layout_marginStart="6dp"
             android:background="@drawable/widget_action_button_bg"
             android:contentDescription="@string/widget_quran_refresh"
@@ -48,29 +49,35 @@
             android:src="@drawable/ic_widget_refresh" />
     </LinearLayout>
 
-    <!-- Verse text: full wrapping, capped for the short widget -->
+    <!-- Body verse: white, weight=1 so it absorbs any extra cell height —
+         title stays pinned to the top, citation to the bottom, and the card
+         height never shifts between short and long verses. 1.3 line-height,
+         max 3 lines with ellipsis on the 4x2 card. -->
     <TextView
         android:id="@+id/widget_verse_text"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
+        android:layout_weight="1"
+        android:layout_marginTop="5dp"
         android:ellipsize="end"
-        android:fontFamily="serif"
-        android:lineSpacingExtra="2dp"
-        android:maxLines="2"
+        android:fontFamily="sans-serif"
+        android:gravity="center_vertical"
+        android:lineSpacingMultiplier="1.3"
+        android:maxLines="3"
         android:textColor="@color/widget_verse_text"
-        android:textSize="13sp" />
+        android:textSize="14sp" />
 
-    <!-- Reference: Quran S:V (Surah Name) -->
+    <!-- Citation: gray, italic, right-aligned, hugging the bottom edge -->
     <TextView
         android:id="@+id/widget_verse_ref"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
+        android:layout_marginTop="3dp"
         android:ellipsize="end"
         android:fontFamily="sans-serif"
         android:gravity="end"
         android:maxLines="1"
         android:textColor="@color/widget_ref"
-        android:textSize="10sp" />
+        android:textSize="10sp"
+        android:textStyle="italic" />
 </LinearLayout>

@@ -15,33 +15,54 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -49,18 +70,33 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.muddassir.clearview.media.data.MediaLibraryStore
 import com.muddassir.clearview.media.data.MediaRepository
 import com.muddassir.clearview.media.data.WatchProgressStore
+import com.muddassir.clearview.media.model.FeedContentFilter
+import com.muddassir.clearview.media.model.FeedDateFilter
+import com.muddassir.clearview.media.model.FeedFilter
+import com.muddassir.clearview.media.model.FeedLibraryFilter
+import com.muddassir.clearview.media.model.FeedSortOrder
+import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.model.SavedChannel
+import com.muddassir.clearview.media.model.datePickerMillisToLocalStart
+import com.muddassir.clearview.media.util.MediaVideos
+import com.muddassir.clearview.media.util.applyFeedFilter
+import com.muddassir.clearview.media.util.feedFilterSummary
 import com.muddassir.clearview.media.util.formatViews
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -82,12 +118,18 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MediaTab(
-    onPlayVideo: (MediaVideo) -> Unit,
+    onPlayVideo: (MediaVideo, List<MediaVideo>, Int) -> Unit,
+    /** Fired when the Media tab is shown (marks channel updates as seen). */
+    onMediaOpened: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val repository = remember { MediaRepository(context.applicationContext) }
     val progressStore = remember { WatchProgressStore(context.applicationContext) }
+    val libraryStore = remember { MediaLibraryStore(context.applicationContext) }
+    // Bumped whenever the library changes (bookmark / hide / manual add) so
+    // the merged feed and the Continue Watching row recompute.
+    var libraryRevision by remember { mutableIntStateOf(0) }
 
     var channels by remember { mutableStateOf(repository.getSavedChannels()) }
     var filterChannelId by remember { mutableStateOf<String?>(null) }
@@ -96,7 +138,27 @@ fun MediaTab(
     var showingCached by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var showAddVideoDialog by remember { mutableStateOf(false) }
+    var showHiddenDialog by remember { mutableStateOf(false) }
     var pendingRemove by remember { mutableStateOf<SavedChannel?>(null) }
+    // The feed filter is persisted per context (survives restarts): the All
+    // Feed filter when no channel is selected, and each channel's own filter
+    // when one is. Switching channels swaps to that channel's saved filter.
+    var feedFilter by remember(filterChannelId) {
+        mutableStateOf(repository.getFeedFilter(filterChannelId))
+    }
+    var showFilterSheet by remember { mutableStateOf(false) }
+    // Feed search: a live title/channel filter applied on top of the current
+    // feed (All Feed or a selected channel) — never refetches.
+    var searchActive by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    val saveFilter: (FeedFilter) -> Unit = { f ->
+        feedFilter = f
+        repository.setFeedFilter(f, filterChannelId)
+    }
+
+    // The user opened the Media tab — its channel updates count as seen.
+    LaunchedEffect(Unit) { onMediaOpened() }
 
     // Stable key: the channel IDS only. The avatar backfill below replaces the
     // list object with the same ids (avoids keying the feed load on the list
@@ -139,13 +201,78 @@ fun MediaTab(
         if (withAvatars != null) channels = withAvatars
     }
 
-    val displayed = if (filterChannelId == null) {
-        videos
-    } else {
-        videos.filter { it.channelId == filterChannelId }
+    // The feed plus the user's library (bookmarked / manually added videos —
+    // which can be older than the RSS window), merged by id (RSS wins).
+    // Hidden videos are filtered out everywhere EXCEPT the Hidden manager.
+    val bookmarkedVideos = remember(libraryRevision) { libraryStore.getBookmarkedVideos() }
+    val manualVideos = remember(libraryRevision) { libraryStore.getManuallyAddedVideos() }
+    val hiddenVideos = remember(libraryRevision) { libraryStore.getHiddenVideos() }
+    // Hidden videos are scoped to the current feed context: in a channel feed
+    // only THAT channel's hidden videos are shown in the manager; in the All
+    // Feed every channel's hidden videos appear.
+    val contextHiddenVideos = remember(hiddenVideos, filterChannelId) {
+        if (filterChannelId == null) hiddenVideos
+        else hiddenVideos.filter { it.channelId == filterChannelId }
     }
-    val shorts = displayed.filter { it.isShort }
-    val longs = displayed.filterNot { it.isShort }
+    val hiddenIds = remember(hiddenVideos) { hiddenVideos.map { it.videoId }.toSet() }
+    val mergedVideos = remember(videos, bookmarkedVideos, manualVideos) {
+        MediaVideos.merge(videos, bookmarkedVideos + manualVideos)
+    }
+    val visibleVideos = remember(mergedVideos, hiddenIds) {
+        mergedVideos.filterNot { it.videoId in hiddenIds }
+    }
+
+    // Channel strip filter + the All Feed filters are applied locally to the
+    // already-loaded videos — no refetching.
+    val channelVideos = remember(visibleVideos, filterChannelId) {
+        if (filterChannelId == null) visibleVideos
+        else visibleVideos.filter { it.channelId == filterChannelId }
+    }
+    val displayed = remember(channelVideos, feedFilter, libraryRevision) {
+        applyFeedFilter(
+            channelVideos,
+            feedFilter,
+            progressOf = { progressStore.get(it) },
+            bookmarkedOf = { libraryStore.isBookmarked(it) }
+        )
+    }
+    // Feed search: matches titles and channel names (case-insensitive) over
+    // the channel + feed-filtered list; a blank query leaves the feed alone.
+    // The shorts queue built from `shorts` below inherits the search scope, so
+    // swiping through results stays within the matches.
+    val searchResults = remember(displayed, searchQuery) {
+        val q = searchQuery.trim()
+        if (q.isEmpty()) displayed
+        else displayed.filter {
+            it.title.contains(q, ignoreCase = true) ||
+                it.channelName.contains(q, ignoreCase = true)
+        }
+    }
+    val shorts = searchResults.filter { it.isShort }
+    val longs = searchResults.filterNot { it.isShort }
+    val isSearching = searchActive && searchQuery.isNotBlank()
+
+    // ── Continue Watching: partially watched LONG videos in the current
+    // channel context, capped so the section stays compact (Shorts never
+    // appear here — they're meant to be watched in one sitting).
+    val continueWatching = remember(channelVideos, hiddenIds, libraryRevision) {
+        channelVideos
+            .filter { v ->
+                !v.isShort &&
+                    (progressStore.get(v.videoId)?.let {
+                        it >= 0.02f && it < 0.9f
+                    } ?: false)
+            }
+            .sortedByDescending { it.publishedAtEpochMillis }
+            .take(6)
+    }
+    val playShort: (MediaVideo) -> Unit = { video ->
+        val idx = shorts.indexOfFirst { it.videoId == video.videoId }
+        onPlayVideo(video, shorts, idx)
+    }
+    val playLong: (MediaVideo) -> Unit = { video ->
+        onPlayVideo(video, emptyList(), -1)
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
 
@@ -178,19 +305,73 @@ fun MediaTab(
 
         Spacer(Modifier.height(4.dp))
 
+        // ── All Feed header: filter button (highlighted when active) + summary ──
+        // Shown whenever there is a feed at all — including when a filter hides
+        // every video (so it can always be reset). Hidden during the empty
+        // no-channels / loading states.
+        if (videos.isNotEmpty()) {
+            FeedHeader(
+                filter = feedFilter,
+                resultCount = searchResults.size,
+                hiddenCount = contextHiddenVideos.size,
+                canAddVideo = filterChannelId != null,
+                searchActive = searchActive,
+                searchQuery = searchQuery,
+                onSearchQueryChange = { searchQuery = it },
+                onToggleSearch = {
+                    searchActive = !searchActive
+                    searchQuery = ""
+                },
+                onOpenFilter = { showFilterSheet = true },
+                onReset = { saveFilter(FeedFilter()) },
+                onOpenHidden = { showHiddenDialog = true },
+                onAddVideo = { showAddVideoDialog = true }
+            )
+        }
+
         // ── Feed ───────────────────────────────────────────────────
         when {
             errorMessage != null && videos.isEmpty() -> ErrorCard(errorMessage!!)
             channels.isEmpty() && videos.isEmpty() && !isLoading ->
                 ErrorCard("No channels saved. Tap + Add to save one.")
             videos.isEmpty() && !isLoading -> ErrorCard("No videos yet for your channels.")
+            videos.isNotEmpty() && displayed.isNotEmpty() &&
+                searchResults.isEmpty() && isSearching && !isLoading ->
+                ErrorCard("No videos match your search.")
             videos.isNotEmpty() && displayed.isEmpty() && !isLoading ->
-                ErrorCard("No videos for this channel yet.")
+                ErrorCard(
+                    if (feedFilter.isActive) "No videos match your filters."
+                    else "No videos for this channel yet."
+                )
             else -> {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
                 ) {
+                    // ── Continue Watching: partially watched videos, in the
+                    // current channel context (All Feed OR a selected channel).
+                    // Auto-hides when none remain — and while a search is
+                    // active, so results stay focused on the matches.
+                    if (continueWatching.isNotEmpty() && !isSearching) {
+                        item(key = "continue-header") {
+                            SectionHeader(
+                                title = "Continue Watching",
+                                isLoading = false,
+                                showingCached = false
+                            )
+                        }
+                        item(key = "continue-row") {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                items(continueWatching, key = { it.videoId }) { video ->
+                                    ContinueWatchingCard(
+                                        video = video,
+                                        progressStore = progressStore,
+                                        onClick = { playLong(video) }
+                                    )
+                                }
+                            }
+                        }
+                    }
                     if (shorts.isNotEmpty()) {
                         item(key = "shorts-header") {
                             SectionHeader(
@@ -202,7 +383,25 @@ fun MediaTab(
                         item(key = "shorts-row") {
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 items(shorts, key = { it.videoId }) { video ->
-                                    ShortCard(video = video, onClick = { onPlayVideo(video) })
+                                    ShortCard(
+                                        video = video,
+                                        progressStore = progressStore,
+                                        isBookmarked = libraryStore.isBookmarked(video.videoId),
+                                        isManual = libraryStore.isManuallyAdded(video.videoId),
+                                        onClick = { playShort(video) },
+                                        onToggleBookmark = {
+                                            libraryStore.toggleBookmark(video)
+                                            libraryRevision++
+                                        },
+                                        onHide = {
+                                            libraryStore.hideVideo(video)
+                                            libraryRevision++
+                                        },
+                                        onRemoveManual = {
+                                            libraryStore.removeManuallyAdded(video.videoId)
+                                            libraryRevision++
+                                        }
+                                    )
                                 }
                             }
                         }
@@ -219,7 +418,21 @@ fun MediaTab(
                             LongVideoCard(
                                 video = video,
                                 progressStore = progressStore,
-                                onClick = { onPlayVideo(video) }
+                                isBookmarked = libraryStore.isBookmarked(video.videoId),
+                                isManual = libraryStore.isManuallyAdded(video.videoId),
+                                onClick = { playLong(video) },
+                                onToggleBookmark = {
+                                    libraryStore.toggleBookmark(video)
+                                    libraryRevision++
+                                },
+                                onHide = {
+                                    libraryStore.hideVideo(video)
+                                    libraryRevision++
+                                },
+                                onRemoveManual = {
+                                    libraryStore.removeManuallyAdded(video.videoId)
+                                    libraryRevision++
+                                }
                             )
                         }
                     }
@@ -238,6 +451,54 @@ fun MediaTab(
                 filterChannelId = channel.channelId
             },
             onDismiss = { showAddDialog = false }
+        )
+    }
+
+    // ── Filter bottom sheet ────────────────────────────────────────
+    if (showFilterSheet) {
+        FilterSheet(
+            filter = feedFilter,
+            onApply = { applied ->
+                saveFilter(applied)
+                showFilterSheet = false
+            },
+            onReset = {
+                saveFilter(FeedFilter())
+                showFilterSheet = false
+            },
+            onDismiss = { showFilterSheet = false }
+        )
+    }
+
+    // ── Hidden videos manager ──────────────────────────────────────
+    // Lists only the current context's hidden videos (channel feed → that
+    // channel's; All Feed → everything). "Unhide all" follows the same scope:
+    // inside a channel it only unhides that channel's hidden videos.
+    if (showHiddenDialog) {
+        HiddenVideosDialog(
+            libraryStore = libraryStore,
+            hiddenVideos = contextHiddenVideos,
+            onUnhideAll = {
+                if (filterChannelId == null) {
+                    libraryStore.unhideAll()
+                } else {
+                    contextHiddenVideos.forEach { libraryStore.unhideVideo(it.videoId) }
+                }
+                libraryRevision++
+            },
+            onChanged = { libraryRevision++ },
+            onDismiss = { showHiddenDialog = false }
+        )
+    }
+
+    // ── Add video by URL ───────────────────────────────────────────
+    if (showAddVideoDialog) {
+        AddVideoDialog(
+            repository = repository,
+            libraryStore = libraryStore,
+            channel = channels.firstOrNull { it.channelId == filterChannelId },
+            onAdded = { libraryRevision++ },
+            onDismiss = { showAddVideoDialog = false }
         )
     }
 
@@ -454,7 +715,18 @@ private fun AddAvatar(onClick: () -> Unit) {
  * style), with a small play badge in the corner.
  */
 @Composable
-private fun ShortCard(video: MediaVideo, onClick: () -> Unit) {
+private fun ShortCard(
+    video: MediaVideo,
+    progressStore: WatchProgressStore,
+    isBookmarked: Boolean,
+    isManual: Boolean,
+    onClick: () -> Unit,
+    onToggleBookmark: () -> Unit,
+    onHide: () -> Unit,
+    onRemoveManual: () -> Unit
+) {
+    val fraction = remember(video.videoId) { progressStore.get(video.videoId) }
+    val watched = (fraction ?: 0f) >= 0.9f
     Card(
         onClick = onClick,
         modifier = Modifier.width(150.dp),
@@ -481,26 +753,96 @@ private fun ShortCard(video: MediaVideo, onClick: () -> Unit) {
                         )
                     )
             )
-            // Play badge in the corner.
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp),
-                shape = RoundedCornerShape(8.dp),
-                color = Color.Black.copy(alpha = 0.35f)
-            ) {
-                Icon(
-                    Icons.Filled.PlayArrow,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.padding(2.dp).size(16.dp)
+            // Watch status: watched dims the card, partial shows a thin bar.
+            if (watched) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.35f))
                 )
+                Surface(
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.primary
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Spacer(Modifier.width(3.dp))
+                        Text(
+                            text = "Watched",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    }
+                }
+            } else if (fraction != null && fraction > 0.02f) {
+                Surface(
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    shape = RoundedCornerShape(5.dp),
+                    color = Color.Black.copy(alpha = 0.6f)
+                ) {
+                    Text(
+                        text = "${(fraction.coerceIn(0f, 1f) * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .background(Color.Black.copy(alpha = 0.45f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
+            }
+            // Overflow menu (top-right, where the play badge used to be):
+            // bookmark / hide / remove manual.
+            VideoCardMenu(
+                modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                isBookmarked = isBookmarked,
+                isManual = isManual,
+                onToggleBookmark = onToggleBookmark,
+                onHide = onHide,
+                onRemoveManual = onRemoveManual
+            )
+            // Manually added indicator.
+            if (isManual) {
+                Surface(
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
+                    shape = RoundedCornerShape(5.dp),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+                ) {
+                    Text(
+                        text = "Manually added",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                    )
+                }
             }
             // Title + views overlaid at the bottom.
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(10.dp)
+                    .padding(end = 8.dp)
             ) {
                 Text(
                     text = video.title,
@@ -535,7 +877,12 @@ private fun ShortCard(video: MediaVideo, onClick: () -> Unit) {
 private fun LongVideoCard(
     video: MediaVideo,
     progressStore: WatchProgressStore,
-    onClick: () -> Unit
+    isBookmarked: Boolean,
+    isManual: Boolean,
+    onClick: () -> Unit,
+    onToggleBookmark: () -> Unit,
+    onHide: () -> Unit,
+    onRemoveManual: () -> Unit
 ) {
     val fraction = remember(video.videoId) { progressStore.get(video.videoId) }
     val watched = (fraction ?: 0f) >= 0.9f
@@ -556,6 +903,29 @@ private fun LongVideoCard(
                     .aspectRatio(16f / 9f)
             ) {
                 RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
+                // Overflow menu (bookmark / hide / remove manual).
+                VideoCardMenu(
+                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                    isBookmarked = isBookmarked,
+                    isManual = isManual,
+                    onToggleBookmark = onToggleBookmark,
+                    onHide = onHide,
+                    onRemoveManual = onRemoveManual
+                )
+                if (isManual) {
+                    Surface(
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp),
+                        shape = RoundedCornerShape(5.dp),
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+                    ) {
+                        Text(
+                            text = "Manually added",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                        )
+                    }
+                }
                 if (watched) {
                     // Dim + badge, like YouTube's watched treatment.
                     Box(
@@ -664,6 +1034,565 @@ private fun LongVideoCard(
     }
 }
 
+/**
+ * The All Feed heading row: title + filter button (highlighted when active) +
+ * an overflow menu (Hidden videos manager, Add video by URL) + active summary
+ * and Reset.
+ */
+@Composable
+private fun FeedHeader(
+    filter: FeedFilter,
+    resultCount: Int,
+    hiddenCount: Int,
+    canAddVideo: Boolean,
+    searchActive: Boolean,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
+    onToggleSearch: () -> Unit,
+    onOpenFilter: () -> Unit,
+    onReset: () -> Unit,
+    onOpenHidden: () -> Unit,
+    onAddVideo: () -> Unit
+) {
+    var showMenu by remember { mutableStateOf(false) }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    // Autofocus the search field the moment search mode opens.
+    val searchFocus = remember { FocusRequester() }
+    LaunchedEffect(searchActive) {
+        if (searchActive) {
+            searchFocus.requestFocus()
+        } else {
+            // The field leaves composition when search closes — dismiss the
+            // keyboard too, otherwise it lingers over the feed.
+            keyboardController?.hide()
+        }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 2.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Accent bar — echoes the SectionHeader brand mark.
+            Box(
+                modifier = Modifier
+                    .size(width = 3.dp, height = 16.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = if (searchActive) "Search" else "All Feed",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f)
+            )
+            // Search toggle: a magnifier normally, an ✕ to close in search mode
+            // (closing also clears the query via onToggleSearch).
+            IconButton(
+                onClick = onToggleSearch,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    if (searchActive) Icons.Filled.Close else Icons.Filled.Search,
+                    contentDescription = if (searchActive) "Close search" else "Search feed",
+                    tint = if (searchActive) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Box {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        contentDescription = "More feed options",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (hiddenCount > 0) "Hidden videos ($hiddenCount)"
+                                else "Hidden videos"
+                            )
+                        },
+                        onClick = {
+                            showMenu = false
+                            onOpenHidden()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Add video by URL") },
+                        enabled = canAddVideo,
+                        onClick = {
+                            showMenu = false
+                            onAddVideo()
+                        }
+                    )
+                }
+            }
+            IconButton(
+                onClick = onOpenFilter,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    Icons.Filled.FilterList,
+                    contentDescription = "Filter feed",
+                    tint = if (filter.isActive) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+        // Search field — shown only while search mode is active.
+        if (searchActive) {
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = onSearchQueryChange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(searchFocus),
+                placeholder = { Text("Search videos & channels") },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (searchQuery.isNotBlank()) {
+                        IconButton(onClick = { onSearchQueryChange("") }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                        }
+                    }
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { keyboardController?.hide() })
+            )
+            if (searchQuery.isNotBlank()) {
+                Text(
+                    text = "$resultCount result${if (resultCount == 1) "" else "s"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+                )
+            }
+        }
+        if (filter.isActive) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = feedFilterSummary(filter, resultCount),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(
+                    onClick = onReset,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Text("Reset", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Bottom sheet with the All Feed filter controls: Date presets (+ custom range
+ * via date pickers), Content type, Sort, and Reset / Apply. Draft state is
+ * only committed on Apply.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FilterSheet(
+    filter: FeedFilter,
+    onApply: (FeedFilter) -> Unit,
+    onReset: (FeedFilter) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var draft by remember { mutableStateOf(filter) }
+    var showStartPicker by remember { mutableStateOf(false) }
+    var showEndPicker by remember { mutableStateOf(false) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            Text(
+                text = "Filter",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Date",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(4.dp))
+            FeedDateFilter.entries.forEach { option ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { draft = draft.copy(date = option) },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = draft.date == option,
+                        onClick = { draft = draft.copy(date = option) }
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(option.label, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            if (draft.date == FeedDateFilter.CUSTOM) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { showStartPicker = true },
+                        modifier = Modifier.weight(1f)
+                    ) { Text(formatShortDate(draft.customStartEpochMillis, "Start")) }
+                    OutlinedButton(
+                        onClick = { showEndPicker = true },
+                        modifier = Modifier.weight(1f)
+                    ) { Text(formatShortDate(draft.customEndEpochMillis, "End")) }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Content",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FeedContentFilter.entries.forEach { option ->
+                    FilterChip(
+                        selected = draft.content == option,
+                        onClick = { draft = draft.copy(content = option) },
+                        label = { Text(option.label) }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Sort",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(4.dp))
+            FeedSortOrder.entries.forEach { option ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { draft = draft.copy(sort = option) },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = draft.sort == option,
+                        onClick = { draft = draft.copy(sort = option) }
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(option.label, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Watch Status",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(4.dp))
+            FeedWatchStatus.entries.forEach { option ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { draft = draft.copy(watchStatus = option) },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = draft.watchStatus == option,
+                        onClick = { draft = draft.copy(watchStatus = option) }
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(option.label, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Library",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FeedLibraryFilter.entries.forEach { option ->
+                    FilterChip(
+                        selected = draft.library == option,
+                        onClick = { draft = draft.copy(library = option) },
+                        label = { Text(option.label) }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { draft = FeedFilter() },
+                    modifier = Modifier.weight(1f)
+                ) { Text("Reset") }
+                Button(
+                    onClick = { onApply(draft) },
+                    modifier = Modifier.weight(1f)
+                ) { Text("Apply") }
+            }
+        }
+    }
+
+    // Custom range: start date picker.
+    if (showStartPicker) {
+        val startState = rememberDatePickerState(
+            initialSelectedDateMillis = draft.customStartEpochMillis
+        )
+        DatePickerDialog(
+            onDismissRequest = { showStartPicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    startState.selectedDateMillis?.let { picked ->
+                        draft = draft.copy(
+                            customStartEpochMillis = datePickerMillisToLocalStart(picked)
+                        )
+                    }
+                    showStartPicker = false
+                }) { Text("OK") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStartPicker = false }) { Text("Cancel") }
+            }
+        ) {
+            DatePicker(state = startState)
+        }
+    }
+
+    // Custom range: end date picker.
+    if (showEndPicker) {
+        val endState = rememberDatePickerState(
+            initialSelectedDateMillis = draft.customEndEpochMillis
+        )
+        DatePickerDialog(
+            onDismissRequest = { showEndPicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    endState.selectedDateMillis?.let { picked ->
+                        draft = draft.copy(
+                            customEndEpochMillis = datePickerMillisToLocalStart(picked)
+                        )
+                    }
+                    showEndPicker = false
+                }) { Text("OK") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEndPicker = false }) { Text("Cancel") }
+            }
+        ) {
+            DatePicker(state = endState)
+        }
+    }
+}
+
+/** "12 Jan 2026", or the [fallback] placeholder when no date is picked yet. */
+private fun formatShortDate(millis: Long?, fallback: String): String {
+    if (millis == null) return fallback
+    return java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault())
+        .format(java.util.Date(millis))
+}
+
+/**
+ * Continue Watching card for the horizontal row: thumbnail with a progress
+ * bar + the resume position ("12:34 / 42:10") so the user knows exactly where
+ * they left off.
+ */
+@Composable
+private fun ContinueWatchingCard(
+    video: MediaVideo,
+    progressStore: WatchProgressStore,
+    onClick: () -> Unit
+) {
+    val progress = remember(video.videoId) { progressStore.getProgress(video.videoId) }
+    Card(
+        onClick = onClick,
+        modifier = Modifier.width(200.dp),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+        )
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+            ) {
+                RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
+                val fraction = (progress?.fraction ?: 0f).coerceIn(0f, 1f)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .background(Color.Black.copy(alpha = 0.45f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(fraction)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
+                Surface(
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                    shape = RoundedCornerShape(5.dp),
+                    color = Color.Black.copy(alpha = 0.7f)
+                ) {
+                    Text(
+                        text = formatResumeLabel(progress?.positionSeconds, progress?.durationSeconds),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+            Column(modifier = Modifier.padding(10.dp)) {
+                Text(
+                    text = video.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = video.channelName.ifBlank { "YouTube" },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+/** "12:34 / 42:10", or "Resume" when the duration isn't known yet. */
+private fun formatResumeLabel(positionSeconds: Long?, durationSeconds: Long?): String {
+    val pos = positionSeconds ?: return "Resume"
+    val dur = durationSeconds ?: return "Resume"
+    if (dur <= 0L) return "Resume"
+    return "${formatClock(pos)} / ${formatClock(dur)}"
+}
+
+/** "12:34", or "1:02:34" past an hour. */
+private fun formatClock(seconds: Long): String {
+    val s = seconds.coerceAtLeast(0L)
+    val h = s / 3600
+    val m = (s % 3600) / 60
+    val sec = s % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%02d:%02d".format(m, sec)
+}
+
+/**
+ * Overflow menu on feed cards: Bookmark toggle, Hide video, and (for
+ * manually added videos) Remove. Tapping any entry does NOT trigger the
+ * card's own onClick (the inner clickable consumes the tap).
+ */
+@Composable
+private fun VideoCardMenu(
+    modifier: Modifier = Modifier,
+    isBookmarked: Boolean,
+    isManual: Boolean,
+    onToggleBookmark: () -> Unit,
+    onHide: () -> Unit,
+    onRemoveManual: () -> Unit
+) {
+    var showMenu by remember { mutableStateOf(false) }
+    Box(modifier = modifier) {
+        Surface(
+            modifier = Modifier
+                .size(26.dp)
+                .clip(CircleShape)
+                .clickable { showMenu = true },
+            shape = CircleShape,
+            color = Color.Black.copy(alpha = 0.45f)
+        ) {
+            Icon(
+                Icons.Filled.MoreVert,
+                contentDescription = "Video options",
+                tint = Color.White,
+                modifier = Modifier.padding(4.dp)
+            )
+        }
+        DropdownMenu(
+            expanded = showMenu,
+            onDismissRequest = { showMenu = false }
+        ) {
+            DropdownMenuItem(
+                text = { Text(if (isBookmarked) "Remove bookmark" else "Bookmark") },
+                onClick = {
+                    showMenu = false
+                    onToggleBookmark()
+                }
+            )
+            if (isManual) {
+                DropdownMenuItem(
+                    text = { Text("Remove (manually added)") },
+                    onClick = {
+                        showMenu = false
+                        onRemoveManual()
+                    }
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("Hide video") },
+                onClick = {
+                    showMenu = false
+                    onHide()
+                }
+            )
+        }
+    }
+}
+
 @Composable
 private fun AddChannelDialog(
     repository: MediaRepository,
@@ -727,6 +1656,83 @@ private fun AddChannelDialog(
     )
 }
 
+/**
+ * Hidden-videos manager: lists the hidden videos of the current context (a
+ * single channel, or every channel in the All Feed) with an Unhide action,
+ * plus an "Unhide all" escape hatch (scoped to the shown list). Hidden
+ * videos stay out of every feed until unhidden here.
+ */
+@Composable
+private fun HiddenVideosDialog(
+    libraryStore: MediaLibraryStore,
+    hiddenVideos: List<MediaVideo>,
+    onUnhideAll: () -> Unit,
+    onChanged: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Hidden videos") },
+        text = {
+            if (hiddenVideos.isEmpty()) {
+                Text(
+                    text = "No hidden videos. When you hide a video it will be listed here so you can bring it back.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 380.dp)
+                ) {
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f, fill = false)
+                    ) {
+                        items(hiddenVideos, key = { it.videoId }) { video ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(width = 64.dp, height = 36.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                ) {
+                                    RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    text = video.title,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(onClick = {
+                                    libraryStore.unhideVideo(video.videoId)
+                                    onChanged()
+                                }) { Text("Unhide") }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (hiddenVideos.isNotEmpty()) {
+                TextButton(onClick = {
+                    onUnhideAll()
+                }) { Text("Unhide all") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
 @Composable
 private fun ErrorCard(message: String) {
     Card(
@@ -749,6 +1755,88 @@ private fun ErrorCard(message: String) {
             )
         }
     }
+}
+
+/**
+ * "Add video by URL": pastes a YouTube URL, resolves it via the channel's
+ * feed or oEmbed, and saves it as a manually added video in the library
+ * (marked "Manually added", never treated as new, never notified).
+ */
+@Composable
+private fun AddVideoDialog(
+    repository: MediaRepository,
+    libraryStore: MediaLibraryStore,
+    channel: SavedChannel?,
+    onAdded: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var input by remember { mutableStateOf("") }
+    var status by remember { mutableStateOf<String?>(null) }
+    var adding by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = { if (!adding) onDismiss() },
+        title = { Text("Add video by URL") },
+        text = {
+            Column {
+                Text(
+                    text = "Paste a YouTube link. It will be added to " +
+                        (channel?.displayName ?: "your feed") +
+                        " as a manually added video.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it; status = null },
+                    singleLine = true,
+                    enabled = !adding,
+                    isError = status?.startsWith("Couldn't") == true,
+                    label = { Text("YouTube URL") }
+                )
+                if (status != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = status!!,
+                        color = if (status!!.startsWith("Couldn't")) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !adding,
+                onClick = {
+                    adding = true
+                    status = null
+                    scope.launch {
+                        status = when (val result = repository.resolveVideoByUrl(input, channel)) {
+                            is MediaRepository.ResolveVideoResult.Success -> {
+                                if (libraryStore.addManuallyAdded(result.video)) {
+                                    onAdded()
+                                    onDismiss()
+                                    null
+                                } else {
+                                    "That video is already in your library."
+                                }
+                            }
+                            is MediaRepository.ResolveVideoResult.AlreadyExists ->
+                                "That video is already in this channel's feed."
+                            is MediaRepository.ResolveVideoResult.Error -> result.message
+                        }
+                        adding = false
+                    }
+                }
+            ) { Text(if (adding) "Adding…" else "Add") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !adding) { Text("Cancel") }
+        }
+    )
 }
 
 /** Two-letter initials for the avatar fallback ("Safina Society" → "SS"). */

@@ -13,12 +13,17 @@ import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.LiveTv
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayCircle
-import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.Notifications
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -37,12 +42,14 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.muddassir.clearview.R
+import com.muddassir.clearview.media.data.MediaBadge
 import com.muddassir.clearview.media.data.MediaRepository
 import com.muddassir.clearview.media.model.MediaChannelUpdate
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.ui.LiveTab
 import com.muddassir.clearview.media.ui.MediaTab
 import com.muddassir.clearview.media.ui.VideoPlayerScreen
+import com.muddassir.clearview.media.worker.MediaNotifier
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
 import com.muddassir.clearview.quran.data.QuranRepository
 import com.muddassir.clearview.quran.model.QuranVerse
@@ -77,6 +84,10 @@ class ContentHubState(appContext: Context) {
     // Vertical fullscreen (YouTube Shorts style): the video fills the whole
     // portrait screen and the bars hide. Reset when the video changes/exits.
     var playerFullscreen by mutableStateOf(false)
+    // Ordered Shorts list for the vertical viewer (empty for long videos) +
+    // the index of the currently playing video within it.
+    var shortsQueue by mutableStateOf<List<MediaVideo>>(emptyList())
+    var shortsIndex by mutableStateOf(-1)
     // Previous/Next verse navigation availability (false at the very first /
     // last verse of the Quran, or before the cache is loaded).
     var canGoPrevious by mutableStateOf(false)
@@ -90,6 +101,15 @@ class ContentHubState(appContext: Context) {
     var mediaNotificationsEnabled by mutableStateOf(true)
     var mediaUpdates by mutableStateOf<List<MediaChannelUpdate>>(emptyList())
     var mediaUpdatesLoading by mutableStateOf(false)
+    // Number of updates the user hasn't seen yet (drives the Media-tab badge).
+    var unreadMediaUpdates by mutableStateOf(0)
+
+    // ── Quran notifications (new verse) ────────────────────────────
+    var quranNotificationsEnabled by mutableStateOf(true)
+
+    // ── Top-bar sheets on the Quran tab (settings gear / notifications bell) ──
+    var showSettingsSheet by mutableStateOf(false)
+    var showNotificationsSheet by mutableStateOf(false)
 
     private val appContext: Context = appContext
     private val quranRepository = QuranRepository(appContext)
@@ -110,6 +130,7 @@ class ContentHubState(appContext: Context) {
             DEFAULT_REFRESH_INTERVAL_HOURS
         }
         mediaNotificationsEnabled = mediaRepository.isMediaNotificationsEnabled()
+        quranNotificationsEnabled = quranRepository.getQuranNotificationsEnabled()
         verseLoading = true
     }
 
@@ -150,15 +171,31 @@ class ContentHubState(appContext: Context) {
     fun refreshMediaUpdates() {
         scope.launch {
             mediaUpdatesLoading = true
-            mediaUpdates = withContext(Dispatchers.IO) {
+            val (updates, unread) = withContext(Dispatchers.IO) {
                 // Fresh installs start empty until the first background check;
                 // the one-time seed pre-fills from the cached feeds (never
                 // re-runs after the history has been written, so dismissals
                 // are never resurrected).
                 mediaRepository.ensureUpdatesHistorySeeded(mediaRepository.getSavedChannels())
-                mediaRepository.getUpdatesHistory()
+                val list = mediaRepository.getUpdatesHistory()
+                list to mediaRepository.countUnreadUpdates(list)
             }
+            mediaUpdates = updates
+            unreadMediaUpdates = unread
             mediaUpdatesLoading = false
+            // Keep the launcher app-icon badge in sync with the unread count.
+            MediaBadge.setBadge(appContext, unread)
+        }
+    }
+
+    /** Marks every currently listed update as seen (the Media tab was opened). */
+    fun markMediaUpdatesSeen() {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                mediaRepository.markUpdatesSeen(mediaUpdates.map { it.latestVideoId })
+            }
+            unreadMediaUpdates = 0
+            MediaBadge.setBadge(appContext, 0)
         }
     }
 
@@ -178,14 +215,59 @@ class ContentHubState(appContext: Context) {
         }
     }
 
+    /** Persists the Quran-verse notification toggle (OS notification on new verse). */
+    fun setQuranNotifications(enabled: Boolean) {
+        quranNotificationsEnabled = enabled
+        quranRepository.setQuranNotificationsEnabled(enabled)
+    }
+
+    /**
+     * Opens the notifications panel; viewing it marks every listed update as
+     * seen (clears the bell / tab / launcher badges), like opening the Media
+     * tab does.
+     */
+    fun openNotificationsPanel() {
+        markMediaUpdatesSeen()
+        showNotificationsSheet = true
+    }
+
     /**
      * Removes one update from the "Latest Updates" feed (persisted — it won't
      * come back on the next refresh).
      */
     fun dismissUpdate(latestVideoId: String) {
         scope.launch {
+            // Remove its OS notification too (deterministic per-channel id), so
+            // the shade and the launcher bubble follow the in-app feed.
+            mediaUpdates.firstOrNull { it.latestVideoId == latestVideoId }
+                ?.let { MediaNotifier.cancelChannelNotification(appContext, it.channelId) }
             withContext(Dispatchers.IO) { mediaRepository.dismissUpdate(latestVideoId) }
-            mediaUpdates = mediaUpdates.filterNot { it.latestVideoId == latestVideoId }
+            val updated = mediaUpdates.filterNot { it.latestVideoId == latestVideoId }
+            mediaUpdates = updated
+            // All updates gone → the group summary in the shade must go too,
+            // otherwise the launcher bubble lingers after clearing the feed.
+            if (updated.isEmpty()) MediaNotifier.cancelSummary(appContext)
+            val unread = withContext(Dispatchers.IO) {
+                mediaRepository.countUnreadUpdates(updated)
+            }
+            unreadMediaUpdates = unread
+            MediaBadge.setBadge(appContext, unread)
+        }
+    }
+
+    /** Starts a video from the Media tab; [queue]/[index] enable Shorts paging. */
+    fun playVideo(video: MediaVideo, queue: List<MediaVideo> = emptyList(), index: Int = -1) {
+        shortsQueue = queue
+        shortsIndex = index
+        playingVideo = video
+    }
+
+    /** Vertical Shorts paging: +1 next, -1 previous (no-op at the ends). */
+    fun navigateShorts(delta: Int) {
+        val next = shortsIndex + delta
+        if (next in shortsQueue.indices) {
+            shortsIndex = next
+            playingVideo = shortsQueue[next]
         }
     }
 
@@ -354,41 +436,44 @@ fun ContentHubTabContent(
             if (state.selectedTab == ContentTab.QURAN) state.refreshMediaUpdates()
         }
         // Leaving the player (or switching to a different video) always exits
-        // vertical fullscreen.
+        // vertical fullscreen — EXCEPT when navigating within the Shorts queue
+        // (swipe up/down), where fullscreen must stay put.
         LaunchedEffect(state.playingVideo?.videoId) {
-            state.playerFullscreen = false
+            val current = state.playingVideo
+            val inShortsQueue = current != null &&
+                state.shortsIndex in state.shortsQueue.indices &&
+                state.shortsQueue[state.shortsIndex].videoId == current.videoId
+            if (!inShortsQueue) state.playerFullscreen = false
         }
         when {
             state.playingVideo != null -> VideoPlayerScreen(
                 video = state.playingVideo!!,
                 isLandscape = isLandscape,
                 fullscreenVertical = state.playerFullscreen,
-                onToggleFullscreen = { state.playerFullscreen = !state.playerFullscreen }
+                onToggleFullscreen = { state.playerFullscreen = !state.playerFullscreen },
+                onExit = { state.playingVideo = null },
+                shortsQueue = state.shortsQueue,
+                shortsIndex = state.shortsIndex,
+                onNavigateShorts = { state.navigateShorts(it) }
             )
 
             state.selectedTab == ContentTab.QURAN -> QuranTab(
                 verse = state.verse,
                 isLoading = state.verseLoading,
-                refreshIntervalHours = state.refreshIntervalHours,
-                onRefreshIntervalChange = { state.changeInterval(context, it) },
                 onNewVerse = { state.pickNewVerse() },
                 onCopyVerse = { state.copyVerse(context) },
                 canGoPrevious = state.canGoPrevious,
                 canGoNext = state.canGoNext,
                 onPrevious = { state.goToAdjacentVerse(-1) },
-                onNext = { state.goToAdjacentVerse(+1) },
-                mediaNotificationsEnabled = state.mediaNotificationsEnabled,
-                onMediaNotificationsToggle = { enabled ->
-                    state.setMediaNotifications(enabled, context)
-                },
-                mediaUpdates = state.mediaUpdates,
-                mediaUpdatesLoading = state.mediaUpdatesLoading,
-                onPlayUpdate = { state.playMediaUpdate(it) },
-                onDismissUpdate = { state.dismissUpdate(it) }
+                onNext = { state.goToAdjacentVerse(+1) }
             )
 
             state.selectedTab == ContentTab.MEDIA -> MediaTab(
-                onPlayVideo = { state.playingVideo = it }
+                onPlayVideo = { video, queue, index ->
+                    state.playVideo(video, queue, index)
+                    if (index < 0) state.markMediaUpdatesSeen()
+                },
+                onMediaOpened = { state.markMediaUpdatesSeen() }
             )
 
             else -> LiveTab(isLandscape = isLandscape)
@@ -439,11 +524,15 @@ fun ContentHubTopBar(
                 }
             },
             actions = {
+                // Settings: verse refresh interval + notification toggles.
                 IconButton(
-                    onClick = { state.shareVerse(context) },
+                    onClick = { state.showSettingsSheet = true },
                     enabled = state.verse != null && !state.verseLoading
                 ) {
-                    Icon(Icons.Filled.Share, contentDescription = stringResource(R.string.quran_share))
+                    Icon(
+                        Icons.Filled.Settings,
+                        contentDescription = stringResource(R.string.quran_settings)
+                    )
                 }
                 IconButton(
                     onClick = { state.toggleBookmark(context) },
@@ -454,11 +543,31 @@ fun ContentHubTopBar(
                         contentDescription = stringResource(R.string.quran_bookmark)
                     )
                 }
+                // Notifications: opens the updates panel; badge = unread count.
                 IconButton(
-                    onClick = { state.copyVerse(context) },
+                    onClick = { state.openNotificationsPanel() },
                     enabled = state.verse != null && !state.verseLoading
                 ) {
-                    Icon(Icons.Filled.ContentCopy, contentDescription = stringResource(R.string.quran_verse_copy))
+                    if (state.unreadMediaUpdates > 0) {
+                        BadgedBox(
+                            badge = {
+                                Badge {
+                                    Text(state.unreadMediaUpdates.coerceAtMost(99).toString())
+                                }
+                            }
+                        ) {
+                            Icon(
+                                Icons.Filled.Notifications,
+                                contentDescription = stringResource(R.string.quran_notifications_title),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    } else {
+                        Icon(
+                            Icons.Outlined.Notifications,
+                            contentDescription = stringResource(R.string.quran_notifications_title)
+                        )
+                    }
                 }
             }
         )
@@ -484,6 +593,14 @@ fun ContentHubTopBar(
                 }
             }
         )
+    }
+
+    // Settings / notifications sheets (opened from the Quran tab top bar).
+    if (state.showSettingsSheet) {
+        QuranSettingsSheet(state = state, onDismiss = { state.showSettingsSheet = false })
+    }
+    if (state.showNotificationsSheet) {
+        NotificationsSheet(state = state, onDismiss = { state.showNotificationsSheet = false })
     }
 }
 

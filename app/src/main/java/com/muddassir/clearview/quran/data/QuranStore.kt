@@ -99,6 +99,15 @@ class QuranStore(context: Context) {
         prefs.edit().putInt(KEY_REFRESH_INTERVAL_HOURS, hours).apply()
     }
 
+    /** Whether the app posts an OS notification when a new verse is chosen. */
+    fun getQuranNotificationsEnabled(): Boolean =
+        prefs.getBoolean(KEY_QURAN_NOTIFICATIONS_ENABLED, DEFAULT_QURAN_NOTIFICATIONS_ENABLED)
+
+    /** Persists the Quran-verse notification toggle. */
+    fun setQuranNotificationsEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_QURAN_NOTIFICATIONS_ENABLED, enabled).apply()
+    }
+
     /** Persists the verse currently shown on the widget. */
     fun saveCurrentVerse(verse: QuranVerse) {
         prefs.edit()
@@ -165,7 +174,9 @@ class QuranStore(context: Context) {
         const val KEY_ARABIC_TEXT = "current_verse_arabic_text"
         const val KEY_LAST_UPDATED = "current_verse_updated_at"
         const val KEY_REFRESH_INTERVAL_HOURS = "refresh_interval_hours"
+        const val KEY_QURAN_NOTIFICATIONS_ENABLED = "quran_notifications_enabled"
         const val KEY_BOOKMARKS = "bookmarked_verses"
         const val DEFAULT_REFRESH_INTERVAL_HOURS = 6
+        const val DEFAULT_QURAN_NOTIFICATIONS_ENABLED = true
     }
 }

@@ -8,9 +8,17 @@ import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.text.format.DateUtils
 import android.util.Log
+import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,33 +26,65 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.muddassir.clearview.R
+import com.muddassir.clearview.media.data.MediaLibraryStore
+import com.muddassir.clearview.media.data.VideoProgress
 import com.muddassir.clearview.media.data.WatchProgressStore
 import com.muddassir.clearview.media.model.MediaVideo
 import kotlinx.coroutines.delay
@@ -62,6 +102,12 @@ import kotlinx.coroutines.delay
  * The UI reflects the player's REAL state from the IFrame API: a buffering
  * indicator while the video loads, the actual error card (by IFrame error
  * code) when playback fails, and a gentle hint when autoplay was blocked.
+ *
+ * Portrait shows a dedicated control panel BELOW the video (title, Continue
+ * Watching / Watch Again, Copy, Share, Speed, Bookmark, Hide, Mark as
+ * watched) — the video itself stays uncluttered. Vertical fullscreen is a
+ * Shorts-style viewer: swipe up/down to navigate the [shortsQueue] (when it
+ * has more than one item), exit via the on-screen button or back.
  */
 @Composable
 fun VideoPlayerScreen(
@@ -69,6 +115,14 @@ fun VideoPlayerScreen(
     isLandscape: Boolean,
     fullscreenVertical: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
+    /** Called after the user hides this video (the player should close). */
+    onExit: () -> Unit = {},
+    /** Ordered Shorts list for the vertical viewer (empty for long videos). */
+    shortsQueue: List<MediaVideo> = emptyList(),
+    /** Index of [video] within [shortsQueue], or -1. */
+    shortsIndex: Int = -1,
+    /** Swipe navigation: +1 = next Short, -1 = previous. */
+    onNavigateShorts: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -76,20 +130,100 @@ fun VideoPlayerScreen(
 
     var playerState by remember { mutableStateOf(YtState.UNSTARTED) }
     var errorCode by remember { mutableStateOf<Int?>(null) }
-    var autoplayBlocked by remember { mutableStateOf(false) }
     var timedOut by remember { mutableStateOf(false) }
     var retryToken by remember { mutableStateOf(0) }
+    // Whether the current source has EVER reached a ready/playing state. The
+    // blurred loading placeholder shows only until that first start — buffering
+    // caused by a forward/backward seek must NOT re-blur the video.
+    var sourceStarted by remember { mutableStateOf(false) }
     // The "Open in YouTube app" option appears only after an in-app Retry has
     // already failed (per spec: "if the error persists after retrying once").
     var hasRetried by remember { mutableStateOf(false) }
 
     // Watch progress: the player reports the real playback position (every
-    // ~5 s while playing + on pause/end); we persist a throttled fraction so
-    // the Media tab can show progress bars and a "Watched" badge.
+    // ~5 s while playing + on pause/end); we persist position + duration so
+    // the Media tab can show progress bars, a "Watched" badge, and Continue
+    // Watching can resume from the exact position.
     val progressStore = remember { WatchProgressStore(context.applicationContext) }
+    val libraryStore = remember { MediaLibraryStore(context.applicationContext) }
     var lastProgressSavedAt by remember { mutableStateOf(0L) }
+    // Bumped when progress is persisted / marked watched so the control panel
+    // reflects the latest watch state (e.g. Continue Watching → Watch Again).
+    var progressRevision by remember { mutableIntStateOf(0) }
+
+    // Continue Watching state for THIS video (re-read on every revision).
+    val savedProgress: VideoProgress? =
+        remember(video.videoId, progressRevision) { progressStore.getProgress(video.videoId) }
+    val isWatched = (savedProgress?.fraction ?: 0f) >= 0.9f
+    // Continue Watching / resume applies ONLY to long videos — Shorts always
+    // play from the beginning (they're watched in one sitting). Progress is
+    // still tracked for Shorts (cards show the % / Watched badge).
+    val hasPartialProgress =
+        !video.isShort && !isWatched && (savedProgress?.fraction ?: 0f) >= 0.02f
+    // Auto-resume from the saved position unless the video was completed
+    // (completed → start over).
+    val resumeFromSeconds =
+        if (hasPartialProgress) savedProgress!!.positionSeconds.toDouble() else 0.0
+
+    // Continue Watching / Watch Again re-seek (no reload).
+    var seekToken by remember { mutableIntStateOf(0) }
+    var seekToSeconds by remember { mutableStateOf(0.0) }
+    val requestSeek: (Double) -> Unit = { target ->
+        seekToSeconds = target
+        seekToken++
+    }
+
+    // Playback speed, persisted across restarts.
+    val playerPrefs = remember {
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
+    var playbackRate by remember {
+        mutableStateOf(playerPrefs.getFloat(KEY_PLAYBACK_RATE, 1f).toDouble())
+    }
+    val setPlaybackRate: (Double) -> Unit = { rate ->
+        playbackRate = rate
+        playerPrefs.edit().putFloat(KEY_PLAYBACK_RATE, rate.toFloat()).apply()
+    }
+
+    // Bookmark state for this video.
+    var isBookmarked by remember(video.videoId) {
+        mutableStateOf(libraryStore.isBookmarked(video.videoId))
+    }
+    var showSpeedMenu by remember { mutableStateOf(false) }
+    var showHideConfirm by remember { mutableStateOf(false) }
+
+    // Player commands for the Shorts viewer (play/pause/mute). Each command is
+    // a token + label pair: bumping the token re-sends the command to the page.
+    var commandToken by remember { mutableIntStateOf(0) }
+    var command by remember { mutableStateOf("") }
+    val sendCommand: (String) -> Unit = { cmd ->
+        command = cmd
+        commandToken++
+    }
+    // Muted state: starts from the PERSISTED preference (default true) and is
+    // remembered across videos, so muting/unmuting one Short carries to every
+    // Short you swipe to. The JS bridge reports the player's real state and
+    // the toggle applies + persists the change immediately.
+    var isMuted by remember {
+        mutableStateOf(playerPrefs.getBoolean(KEY_MUTED, true))
+    }
+
+    fun shareVideo() {
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(
+                Intent.EXTRA_TEXT,
+                "Watch: ${video.title}\nhttps://www.youtube.com/watch?v=${video.videoId}"
+            )
+        }
+        runCatching {
+            context.startActivity(Intent.createChooser(send, "Share video"))
+        }
+    }
 
     // Reset retry history when a different video is selected (NOT on retry).
+    // NOTE: the mute preference is deliberately NOT reset here — the user's
+    // choice carries across videos (all Shorts stay muted/unmuted).
     LaunchedEffect(video.videoId) {
         hasRetried = false
     }
@@ -98,8 +232,8 @@ fun VideoPlayerScreen(
     LaunchedEffect(video.videoId, retryToken) {
         playerState = YtState.UNSTARTED
         errorCode = null
-        autoplayBlocked = false
         timedOut = false
+        sourceStarted = false
         // Safety net: if the IFrame API never delivers any event (e.g. the
         // api script can't load — no network), surface an error instead of
         // an eternal spinner.
@@ -120,9 +254,17 @@ fun VideoPlayerScreen(
         }
     }
 
+    // Loading: no real state yet — the placeholder (blurred thumbnail) is
+    // shown until the player actually starts or is paused. CUED is included:
+    // a cued-but-still-buffering video would otherwise show the embed's own
+    // oversized play graphic over a black surface.
     val isBuffering = errorCode == null && !timedOut &&
-        (playerState == YtState.UNSTARTED || playerState == YtState.BUFFERING)
-    val showTapToPlay = autoplayBlocked && errorCode == null && !timedOut &&
+        (playerState == YtState.UNSTARTED ||
+            playerState == YtState.BUFFERING ||
+            playerState == YtState.CUED)
+    // Ready but paused (incl. muted-autoplay blocked): a small centered play
+    // button, shown ONLY once the video is actually ready.
+    val showPlayOverlay = errorCode == null && !timedOut && !isBuffering &&
         playerState == YtState.PAUSED
 
     Column(
@@ -141,13 +283,27 @@ fun VideoPlayerScreen(
             YoutubePlayer(
                 videoId = video.videoId,
                 retryToken = retryToken,
+                resumeFromSeconds = resumeFromSeconds,
+                playbackRate = playbackRate,
+                seekToken = seekToken,
+                seekToSeconds = seekToSeconds,
+                commandToken = commandToken,
+                command = command,
+                muted = isMuted,
                 modifier = Modifier.fillMaxSize(),
+                onMuteState = { muted -> isMuted = muted },
                 onPlayerState = { s ->
                     // Late connection: playback finally started — drop any timeout card.
-                    if (s == YtState.PLAYING || s == YtState.PAUSED) timedOut = false
+                    if (s == YtState.PLAYING || s == YtState.PAUSED) {
+                        timedOut = false
+                        sourceStarted = true
+                    }
                     playerState = s
                     // Video finished: the whole thing counts as watched.
-                    if (s == YtState.ENDED) progressStore.set(video.videoId, 1f)
+                    if (s == YtState.ENDED) {
+                        progressStore.set(video.videoId, 1f)
+                        progressRevision++
+                    }
                 },
                 onProgress = { currentSeconds, durationSeconds ->
                     // Persist throttled (the JS reports every ~5 s; don't burn
@@ -155,11 +311,24 @@ fun VideoPlayerScreen(
                     // positions on pause/end pass the throttle: fraction 1.0
                     // and near-completion values are worth saving immediately.
                     if (durationSeconds > 0) {
+                        // While a resume seek is still landing, early reports
+                        // can read ~0 and would overwrite the saved position.
+                        // Skip until the position actually reaches the target.
+                        if (resumeFromSeconds > 3.0 &&
+                            currentSeconds < resumeFromSeconds - 3.0
+                        ) {
+                            return@YoutubePlayer
+                        }
                         val fraction = (currentSeconds / durationSeconds)
                             .toFloat().coerceIn(0f, 1f)
                         val now = System.currentTimeMillis()
                         if (fraction >= 0.98f || now - lastProgressSavedAt >= 5_000L) {
-                            progressStore.set(video.videoId, fraction)
+                            progressStore.setProgress(
+                                video.videoId,
+                                fraction,
+                                currentSeconds.toLong(),
+                                durationSeconds.toLong()
+                            )
                             lastProgressSavedAt = now
                         }
                     }
@@ -170,21 +339,131 @@ fun VideoPlayerScreen(
                     Log.w(TAG, "YouTube player error code = $code videoId = ${video.videoId}")
                     timedOut = false
                     errorCode = code
-                },
-                onAutoplayBlocked = { autoplayBlocked = true }
+                }
             )
 
-            if (isBuffering) {
-                Column(
-                    modifier = Modifier.align(Alignment.Center),
-                    horizontalAlignment = Alignment.CenterHorizontally
+            // ── Shorts vertical swipe navigation (full-screen viewer) ──
+            // A transparent layer ABOVE the WebView translates vertical drags
+            // into next/previous Shorts. Taps pass through to the player's
+            // own controls (only drags are consumed). Drawn below the
+            // fullscreen button + error overlays so those stay tappable.
+            if (fullscreenVertical && shortsQueue.size > 1) {
+                val swipeThreshold = with(LocalDensity.current) { 60.dp.toPx() }
+                // CRITICAL: pointerInput(Unit) launches its gesture block ONCE
+                // and never restarts, so plain captures of shortsIndex / queue
+                // size would be frozen at the moment the layer first appeared
+                // (the first short opened). The "previous" guard (index > 0)
+                // would then stay permanently false and swiping back would
+                // never work. rememberUpdatedState keeps both values live.
+                val currentIndex by rememberUpdatedState(shortsIndex)
+                val currentQueueSize by rememberUpdatedState(shortsQueue.size)
+                var swipeAccum by remember { mutableStateOf(0f) }
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectVerticalDragGestures(
+                                onVerticalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    swipeAccum += dragAmount
+                                },
+                                onDragEnd = {
+                                    when {
+                                        swipeAccum <= -swipeThreshold &&
+                                            currentIndex < currentQueueSize - 1 ->
+                                            onNavigateShorts(1)
+                                        swipeAccum >= swipeThreshold && currentIndex > 0 ->
+                                            onNavigateShorts(-1)
+                                    }
+                                    swipeAccum = 0f
+                                },
+                                onDragCancel = { swipeAccum = 0f }
+                            )
+                        }
+                )
+                // Position counter pill (e.g. "3 / 12").
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(12.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color.Black.copy(alpha = 0.45f)
                 ) {
-                    CircularProgressIndicator()
-                    Spacer(Modifier.height(10.dp))
                     Text(
-                        text = stringResource(R.string.media_player_buffering),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = "${(shortsIndex + 1).coerceAtLeast(1)} / ${shortsQueue.size}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
+                }
+            }
+
+            // ── Shorts viewer transport bar: play/pause + mute (the iframe's
+            // own controls are hidden behind the swipe layer, so the viewer
+            // gets its own always-visible controls). Drawn ABOVE the swipe
+            // layer so the buttons stay tappable. Shown ONLY for Shorts — a
+            // long video in vertical fullscreen has no swipe layer, so the
+            // embed's own on-video controls remain reachable.
+            if (fullscreenVertical && shortsQueue.isNotEmpty()) {
+                ShortsControlBar(
+                    isPlaying = playerState == YtState.PLAYING,
+                    isMuted = isMuted,
+                    canGoPrevious = shortsIndex > 0,
+                    canGoNext = shortsIndex < shortsQueue.size - 1,
+                    onTogglePlay = {
+                        sendCommand(if (playerState == YtState.PLAYING) "pause" else "play")
+                    },
+                    onToggleMute = {
+                        val target = !isMuted
+                        isMuted = target
+                        playerPrefs.edit().putBoolean(KEY_MUTED, target).apply()
+                        sendCommand(if (target) "mute" else "unmute")
+                    },
+                    onSeekBack = { sendCommand("back10") },
+                    onSeekForward = { sendCommand("fwd10") },
+                    onPrevious = { onNavigateShorts(-1) },
+                    onNext = { onNavigateShorts(1) },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 20.dp)
+                )
+            }
+
+            // ── Loading placeholder: a blurred thumbnail of the actual video
+            // (or a plain dark box) that fades away when playback first starts.
+            // No icon, no spinner, no text — the video area stays clean. Shown
+            // ONLY until the source has started once (sourceStarted): a fresh
+            // video load gets the blur, but buffering during a forward/backward
+            // seek re-uses the real frames and must never be covered by it.
+            if (!sourceStarted) {
+                LoadingPlaceholderOverlay(
+                    visible = isBuffering,
+                    thumbnailUrl = video.thumbnailUrl,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+
+            // ── Ready-but-paused: a single centered play button (only shown
+            // once the video is ready, so there's never a play graphic during
+            // the loading phase). Tapping it resumes playback. Shown ONLY for
+            // Shorts — long videos keep the embed's own on-video controls
+            // (which are reachable without the swipe layer), so a duplicate
+            // overlay button is unnecessary there.
+            if (showPlayOverlay && video.isShort) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(68.dp)
+                        .clickable { sendCommand("play") },
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.55f)
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = "Play",
+                        tint = Color.White,
+                        modifier = Modifier.padding(16.dp)
                     )
                 }
             }
@@ -230,20 +509,6 @@ fun VideoPlayerScreen(
                             "Fullscreen",
                         tint = Color.White,
                         modifier = Modifier.size(22.dp)
-                    )
-                }
-            }
-
-            if (showTapToPlay) {
-                Surface(
-                    modifier = Modifier.align(Alignment.Center),
-                    shape = RoundedCornerShape(24.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
-                ) {
-                    Text(
-                        text = stringResource(R.string.media_player_tap_to_play),
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        style = MaterialTheme.typography.bodyMedium
                     )
                 }
             }
@@ -307,40 +572,440 @@ fun VideoPlayerScreen(
             }
         }
 
-        // ── Details panel: BELOW the video area in portrait — it can never
+        // ── Control panel: BELOW the video area in portrait — it can never
         // cover the player. Hidden in landscape and in vertical fullscreen
         // (the video fills the screen).
         if (!isLandscape && !fullscreenVertical) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.92f))
-                    .padding(16.dp)
+            PlayerControlPanel(
+                video = video,
+                progress = savedProgress,
+                isWatched = isWatched,
+                hasPartialProgress = hasPartialProgress,
+                playbackRate = playbackRate,
+                isBookmarked = isBookmarked,
+                showSpeedMenu = showSpeedMenu,
+                onSpeedMenuToggle = { showSpeedMenu = !showSpeedMenu },
+                onSpeedSelect = { setPlaybackRate(it); showSpeedMenu = false },
+                onContinue = { requestSeek(resumeFromSeconds) },
+                onWatchAgain = { requestSeek(0.0) },
+                onShare = { shareVideo() },
+                onToggleBookmark = {
+                    val nowBookmarked = libraryStore.toggleBookmark(video)
+                    isBookmarked = nowBookmarked
+                    Toast.makeText(
+                        context,
+                        if (nowBookmarked) "Bookmarked" else "Bookmark removed",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                },
+                onHide = { showHideConfirm = true },
+                onMarkWatched = {
+                    progressStore.set(video.videoId, 1f)
+                    progressRevision++
+                    Toast.makeText(context, "Marked as watched", Toast.LENGTH_SHORT).show()
+                }
+            )
+        }
+    }
+
+    // ── Hide confirmation ───────────────────────────────────────────
+    if (showHideConfirm) {
+        AlertDialog(
+            onDismissRequest = { showHideConfirm = false },
+            title = { Text("Hide this video?") },
+            text = { Text("This video will be removed from your feeds.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    libraryStore.hideVideo(video)
+                    showHideConfirm = false
+                    Toast.makeText(context, "Video hidden", Toast.LENGTH_SHORT).show()
+                    onExit()
+                }) { Text("Hide", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showHideConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+/**
+ * The dedicated controls area BELOW the video (portrait): title + channel,
+ * the primary Continue Watching / Watch Again action, and a four-button
+ * action row (⋮ More with Hide / Mark as watched, Share, Speed, Bookmark).
+ * Keeps every secondary action off the video itself.
+ */
+@Composable
+private fun PlayerControlPanel(
+    video: MediaVideo,
+    progress: VideoProgress?,
+    isWatched: Boolean,
+    hasPartialProgress: Boolean,
+    playbackRate: Double,
+    isBookmarked: Boolean,
+    showSpeedMenu: Boolean,
+    onSpeedMenuToggle: () -> Unit,
+    onSpeedSelect: (Double) -> Unit,
+    onContinue: () -> Unit,
+    onWatchAgain: () -> Unit,
+    onShare: () -> Unit,
+    onToggleBookmark: () -> Unit,
+    onHide: () -> Unit,
+    onMarkWatched: () -> Unit
+) {
+    var showMoreMenu by remember { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.92f))
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 16.dp)
+    ) {
+        // Title + channel · time.
+        Text(
+            text = video.title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = buildString {
+                append(video.channelName.ifBlank { video.channelId })
+                if (video.publishedAtEpochMillis > 0L) {
+                    append(" · ").append(
+                        DateUtils.getRelativeTimeSpanString(
+                            video.publishedAtEpochMillis,
+                            System.currentTimeMillis(),
+                            DateUtils.MINUTE_IN_MILLIS
+                        ).toString()
+                    )
+                }
+                val duration = progress?.durationSeconds ?: 0L
+                if (duration > 0L) {
+                    append(" · ").append(formatPosition(duration))
+                }
+                if (duration > 0L && !isWatched && hasPartialProgress) {
+                    append(" · ").append("${((progress?.fraction ?: 0f) * 100).toInt()}%")
+                }
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+
+        // Primary action: Continue Watching / Watch Again.
+        if (hasPartialProgress) {
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = onContinue,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    text = video.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
                 )
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.width(6.dp))
                 Text(
-                    text = video.channelName.ifBlank { video.channelId } +
-                        if (video.publishedAtEpochMillis > 0L) {
-                            " · " + DateUtils.getRelativeTimeSpanString(
-                                video.publishedAtEpochMillis,
-                                System.currentTimeMillis(),
-                                DateUtils.MINUTE_IN_MILLIS
-                            ).toString()
-                        } else "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    "Continue Watching · " +
+                        formatPosition(progress?.positionSeconds ?: 0L)
                 )
             }
+        } else if (isWatched) {
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = onWatchAgain,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("Watch Again")
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Spacer(Modifier.height(4.dp))
+
+        // ── Action row ──
+        Row(modifier = Modifier.fillMaxWidth()) {
+            // ⋮ More: Hide video / Mark as watched.
+            Box(modifier = Modifier.weight(1f)) {
+                PanelAction(
+                    icon = Icons.Filled.MoreVert,
+                    label = "More",
+                    onClick = { showMoreMenu = true },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                DropdownMenu(
+                    expanded = showMoreMenu,
+                    onDismissRequest = { showMoreMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Hide video") },
+                        onClick = {
+                            showMoreMenu = false
+                            onHide()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Mark as watched") },
+                        onClick = {
+                            showMoreMenu = false
+                            onMarkWatched()
+                        }
+                    )
+                }
+            }
+            PanelAction(
+                icon = Icons.Filled.Share,
+                label = "Share",
+                onClick = onShare,
+                modifier = Modifier.weight(1f)
+            )
+            // Speed hosts its own dropdown menu.
+            Box(modifier = Modifier.weight(1f)) {
+                PanelAction(
+                    icon = Icons.Filled.Speed,
+                    label = "Speed",
+                    onClick = onSpeedMenuToggle,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                DropdownMenu(
+                    expanded = showSpeedMenu,
+                    onDismissRequest = onSpeedMenuToggle
+                ) {
+                    SPEED_OPTIONS.forEach { rate ->
+                        DropdownMenuItem(
+                            text = { Text(formatRate(rate)) },
+                            trailingIcon = if (rate == playbackRate) {
+                                { Icon(Icons.Filled.Check, contentDescription = null) }
+                            } else null,
+                            onClick = { onSpeedSelect(rate) }
+                        )
+                    }
+                }
+            }
+            PanelAction(
+                icon = if (isBookmarked) Icons.Filled.Bookmark
+                else Icons.Outlined.BookmarkBorder,
+                label = if (isBookmarked) "Bookmarked" else "Bookmark",
+                onClick = onToggleBookmark,
+                tint = if (isBookmarked) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
         }
     }
 }
+
+/**
+ * Fades the loading placeholder in/out. Wrapped in its own composable so the
+ * [AnimatedVisibility] call resolves to the top-level overload (inside the
+ * video Box the ColumnScope extension would otherwise be ambiguous).
+ */
+@Composable
+private fun LoadingPlaceholderOverlay(
+    visible: Boolean,
+    thumbnailUrl: String,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(),
+        exit = fadeOut(animationSpec = tween(400)),
+        modifier = modifier
+    ) {
+        VideoLoadingPlaceholder(thumbnailUrl = thumbnailUrl)
+    }
+}
+
+/**
+ * The loading placeholder shown over the player until the video is ready: a
+ * blurred, darkened thumbnail of the actual video poster (no icon, no spinner,
+ * no text) or a plain dark box when no thumbnail is available. The video fades
+ * in beneath it, so there's no layout shift.
+ */
+@Composable
+private fun VideoLoadingPlaceholder(
+    thumbnailUrl: String,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier.background(Color.Black)) {
+        if (thumbnailUrl.isNotBlank()) {
+            RemoteImage(
+                url = thumbnailUrl,
+                showLoadingSpinner = false,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .scale(1.15f) // cover the blur's soft edges
+                    .blur(18.dp)
+            )
+            // Darken so it reads as a placeholder, not the actual poster.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f))
+            )
+        }
+    }
+}
+
+/** One cell of the action row: icon over a small label, tap target ~48dp. */
+@Composable
+private fun PanelAction(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color = MaterialTheme.colorScheme.primary
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(22.dp)
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1
+        )
+    }
+}
+
+/**
+ * The Shorts fullscreen transport bar: previous / play-pause / mute / next.
+ * The IFrame player's own on-video controls are unreachable behind the swipe
+ * layer, so this always-visible bar provides the essential controls.
+ */
+@Composable
+private fun ShortsControlBar(
+    isPlaying: Boolean,
+    isMuted: Boolean,
+    canGoPrevious: Boolean,
+    canGoNext: Boolean,
+    onTogglePlay: () -> Unit,
+    onToggleMute: () -> Unit,
+    onSeekBack: () -> Unit,
+    onSeekForward: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(30.dp),
+        color = Color.Black.copy(alpha = 0.6f)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+        ) {
+            TransportIconButton(
+                icon = Icons.Filled.KeyboardArrowUp,
+                label = "Previous short",
+                enabled = canGoPrevious,
+                onClick = onPrevious
+            )
+            TransportIconButton(
+                icon = Icons.Filled.Replay10,
+                label = "Back 10 seconds",
+                enabled = true,
+                onClick = onSeekBack
+            )
+            TransportIconButton(
+                icon = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                label = if (isPlaying) "Pause" else "Play",
+                enabled = true,
+                onClick = onTogglePlay,
+                emphasized = true
+            )
+            TransportIconButton(
+                icon = Icons.Filled.Forward10,
+                label = "Forward 10 seconds",
+                enabled = true,
+                onClick = onSeekForward
+            )
+            TransportIconButton(
+                icon = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff
+                else Icons.AutoMirrored.Filled.VolumeUp,
+                label = if (isMuted) "Unmute" else "Mute",
+                enabled = true,
+                onClick = onToggleMute
+            )
+            TransportIconButton(
+                icon = Icons.Filled.KeyboardArrowDown,
+                label = "Next short",
+                enabled = canGoNext,
+                onClick = onNext
+            )
+        }
+    }
+}
+
+@Composable
+private fun TransportIconButton(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    emphasized: Boolean = false
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.size(if (emphasized) 60.dp else 52.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = Color.White.copy(alpha = if (enabled) 1f else 0.4f),
+            modifier = Modifier.size(if (emphasized) 34.dp else 28.dp)
+        )
+    }
+}
+
+/** "12:34", or "1:02:34" past an hour. */
+private fun formatPosition(seconds: Long): String {
+    val s = seconds.coerceAtLeast(0L)
+    val h = s / 3600
+    val m = (s % 3600) / 60
+    val sec = s % 60
+    return if (h > 0) {
+        "%d:%02d:%02d".format(h, m, sec)
+    } else {
+        "%02d:%02d".format(m, sec)
+    }
+}
+
+/** "1.0x", "1.25x", … (whole values rendered without a trailing .0). */
+private fun formatRate(rate: Double): String =
+    (if (rate == rate.toLong().toDouble()) rate.toLong().toString() else rate.toString()) + "x"
+
+/** The playback-speed options offered by the embedded player. */
+private val SPEED_OPTIONS = listOf(0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
+
+/** SharedPreferences holding the user's persisted playback rate. */
+private const val PREFS_NAME = "media_player_prefs"
+private const val KEY_PLAYBACK_RATE = "playback_rate"
+private const val KEY_MUTED = "muted"
 
 private const val TAG = "VideoPlayerScreen"
 

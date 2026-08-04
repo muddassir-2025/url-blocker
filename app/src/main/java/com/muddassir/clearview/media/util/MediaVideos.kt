@@ -1,0 +1,78 @@
+package com.muddassir.clearview.media.util
+
+import com.muddassir.clearview.media.model.MediaVideo
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Pure helpers for persisting [MediaVideo] lists — used by the library store
+ * (bookmarks / hidden / manually added). Kept free of Android dependencies so
+ * the round-trip logic is unit-testable on the JVM. Mirrors the per-channel
+ * cache encoding in [com.muddassir.clearview.media.data.MediaRepository].
+ */
+object MediaVideos {
+
+    /** JSON-encodes the list for SharedPreferences persistence. */
+    fun encode(videos: List<MediaVideo>): String {
+        val arr = JSONArray()
+        videos.forEach { v ->
+            arr.put(
+                JSONObject()
+                    .put("videoId", v.videoId)
+                    .put("title", v.title)
+                    .put("channelId", v.channelId)
+                    .put("channelName", v.channelName)
+                    .put("publishedAt", v.publishedAtEpochMillis)
+                    .put("thumbnailUrl", v.thumbnailUrl)
+                    .put("viewCount", v.viewCount)
+                    .put("isShort", v.isShort)
+            )
+        }
+        return arr.toString()
+    }
+
+    /** Decodes the persisted JSON; empty list on blank/corrupt input. */
+    fun decode(json: String?): List<MediaVideo> {
+        if (json.isNullOrBlank()) return emptyList()
+        return try {
+            val arr = JSONArray(json)
+            (0 until arr.length()).mapNotNull { i ->
+                try {
+                    val o = arr.getJSONObject(i)
+                    val videoId = o.optString("videoId", "")
+                    if (videoId.isBlank()) {
+                        null
+                    } else {
+                        MediaVideo(
+                            videoId = videoId,
+                            title = o.optString("title", ""),
+                            channelId = o.optString("channelId", ""),
+                            channelName = o.optString("channelName", ""),
+                            publishedAtEpochMillis = o.optLong("publishedAt", 0L),
+                            thumbnailUrl = o.optString("thumbnailUrl", ""),
+                            viewCount = o.optLong("viewCount", 0L),
+                            isShort = o.optBoolean("isShort", false)
+                        )
+                    }
+                } catch (e: Exception) {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Merges two video lists by id, newest first. [authoritative] wins when the
+     * same id appears in both (an RSS copy carries fresher metadata than a
+     * stored bookmark/manual copy).
+     */
+    fun merge(
+        primary: List<MediaVideo>,
+        supplemental: List<MediaVideo>
+    ): List<MediaVideo> =
+        (primary + supplemental)
+            .distinctBy { it.videoId }
+            .sortedByDescending { it.publishedAtEpochMillis }
+}

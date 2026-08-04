@@ -216,7 +216,23 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                                 hub.selectedTab = item.tab
                                 selectedTab = tabFor(item.tab)
                             },
-                            icon = item.icon,
+                            icon = {
+                                // Channel-update badge: shows the number of
+                                // unseen updates; clears once Media is opened.
+                                if (item.tab == ContentTab.MEDIA && hub.unreadMediaUpdates > 0) {
+                                    BadgedBox(
+                                        badge = {
+                                            Badge {
+                                                Text(hub.unreadMediaUpdates.coerceAtMost(99).toString())
+                                            }
+                                        }
+                                    ) {
+                                        item.icon()
+                                    }
+                                } else {
+                                    item.icon()
+                                }
+                            },
                             label = { Text(item.label) }
                         )
                     }

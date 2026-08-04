@@ -14,29 +14,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import com.muddassir.clearview.ui.ContentHubTabContent
 import com.muddassir.clearview.ui.ContentHubTopBar
-import com.muddassir.clearview.ui.ContentTab
 import com.muddassir.clearview.ui.applyImmersiveIfNeeded
-import com.muddassir.clearview.ui.contentHubNavItems
 import com.muddassir.clearview.ui.isLandscape
 import com.muddassir.clearview.ui.rememberContentHubState
 import com.muddassir.clearview.ui.theme.UrlblockerTheme
 
 /**
- * Islamic content hub — opened by tapping the Quran Reminder widget.
+ * Quran-only screen — opened by tapping the Quran Reminder widget.
  *
- * Three tabs behind a bottom navigation bar:
- *  - Quran: the complete current verse (Arabic + English) with copy / share /
- *    bookmark and the refresh-frequency picker.
- *  - Media: latest videos from saved YouTube channels, played INSIDE the app.
- *  - Live: Makkah / Madinah live broadcasts, played INSIDE the app.
- *
- * All three render through the shared [ContentHubState] / content composables,
- * the same ones the main app's Quran / Media / Live tabs use — the widget and
- * the app can never drift apart.
+ * Deliberately NO bottom navigation: the widget experience is exclusively the
+ * Quran tab (the complete current verse with copy / share / bookmark and the
+ * refresh-frequency picker). It renders through the same shared
+ * [ContentHubState] / content composables as the main app, so the verse shown
+ * here is ALWAYS the exact verse the widget displays and vice-versa — the
+ * widget and the app can never drift apart.
  *
  * The activity declares android:configChanges (see AndroidManifest) so
- * rotation never recreates it — the embedded player keeps playing while the
- * UI switches to immersive landscape fullscreen and back.
+ * rotation never recreates it.
  */
 class QuranVerseActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -64,15 +58,18 @@ private fun HubScreen() {
         else hub.playingVideo = null
     }
 
-    // Immersive fullscreen: landscape + (video player OR live tab), or the
-    // vertical Shorts-style fullscreen, hides the system bars; portrait
-    // restores them. Playback is never restarted because the activity doesn't
-    // recreate on rotation (configChanges in the manifest).
+    // Immersive fullscreen: landscape + a playing video (or the vertical
+    // Shorts-style fullscreen) hides the system bars; portrait restores them.
+    // Playback is never restarted because the activity doesn't recreate on
+    // rotation (configChanges in the manifest).
     val isFullscreen =
-        (landscape && (hub.playingVideo != null || hub.selectedTab == ContentTab.LIVE)) ||
+        (landscape && hub.playingVideo != null) ||
             (hub.playerFullscreen && hub.playingVideo != null)
     applyImmersiveIfNeeded(isFullscreen)
 
+    // Widget surface = Quran only: no bottom navigation bar. ContentHubTabContent
+    // renders the persisted verse (the same one the widget shows); the selected
+    // tab can never leave QURAN because there is no way to switch it here.
     Scaffold(
         topBar = {
             if (!isFullscreen) {
@@ -80,20 +77,6 @@ private fun HubScreen() {
                     state = hub,
                     onBack = { (context as? Activity)?.finish() }
                 )
-            }
-        },
-        bottomBar = {
-            if (hub.playingVideo == null && !isFullscreen) {
-                NavigationBar {
-                    contentHubNavItems().forEach { item ->
-                        NavigationBarItem(
-                            selected = hub.selectedTab == item.tab,
-                            onClick = { hub.selectedTab = item.tab },
-                            icon = item.icon,
-                            label = { Text(item.label) }
-                        )
-                    }
-                }
             }
         }
     ) { padding ->

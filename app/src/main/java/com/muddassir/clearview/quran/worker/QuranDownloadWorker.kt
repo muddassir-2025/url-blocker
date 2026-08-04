@@ -39,8 +39,16 @@ class QuranDownloadWorker(
                 return Result.retry()
             }
 
-            if (mode == MODE_REFRESH || repository.getCurrentVerse() == null) {
+            val picked = if (mode == MODE_REFRESH || repository.getCurrentVerse() == null) {
                 repository.pickRandomVerse()
+            } else {
+                null
+            }
+            // A background refresh chose a fresh verse → notify the user (when
+            // the Quran-notifications toggle + OS permission allow it). The
+            // initial one-time download never notifies.
+            if (mode == MODE_REFRESH && picked != null) {
+                QuranNotifier.notifyNewVerse(applicationContext, picked)
             }
 
             QuranReminderWidgetProvider.refreshAllWidgets(applicationContext)

@@ -66,7 +66,7 @@ object MediaNotifier {
         // can still be off — silently skip instead of throwing.
         if (!manager.areNotificationsEnabled()) return 0
 
-        updates.take(MAX_SHOWN).forEachIndexed { index, update ->
+        updates.take(MAX_SHOWN).forEach { update ->
             val notification = NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_widget_copy)
                 .setContentTitle(
@@ -77,7 +77,9 @@ object MediaNotifier {
                 .setAutoCancel(true)
                 .setGroup(GROUP_KEY)
                 .build()
-            manager.notify(channelNotificationId(update.channelId, index), notification)
+            // Deterministic per-channel id: dismissing an update in the app can
+            // cancel exactly the notification that was posted for it.
+            manager.notify(channelNotificationId(update.channelId), notification)
         }
 
         // Group summary ("3 channels have updates") so the notifications collapse.
@@ -116,7 +118,23 @@ object MediaNotifier {
         )
     }
 
+    /**
+     * Cancels the notification posted for [channelId] (called when the user
+     * dismisses that channel's update in the app — the shade and the launcher
+     * badge follow the in-app feed).
+     */
+    fun cancelChannelNotification(context: Context, channelId: String) {
+        val manager = NotificationManagerCompat.from(context)
+        manager.cancel(channelNotificationId(channelId))
+    }
+
+    /** Cancels the "N channels have updates" group summary notification. */
+    fun cancelSummary(context: Context) {
+        val manager = NotificationManagerCompat.from(context)
+        manager.cancel(SUMMARY_ID)
+    }
+
     /** Stable per-channel notification id (positive, won't collide with the summary). */
-    private fun channelNotificationId(channelId: String, index: Int): Int =
-        (channelId.hashCode() and 0x7FFFFFFF) % 100_000 + index + 1
+    private fun channelNotificationId(channelId: String): Int =
+        (channelId.hashCode() and 0x7FFFFFFF) % 100_000 + 1
 }
