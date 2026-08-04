@@ -8,7 +8,7 @@ package com.muddassir.clearview.quran.model
  * @property surahName    English transliterated surah name, e.g. "At-Talaaq"
  * @property surahTranslation English meaning of the surah name, e.g. "Divorce"
  * @property text         English verse text (Sahih International)
- * @property arabicText   Arabic verse text (Uthmani script, quran-uthmani).
+ * @property arabicText   Arabic verse text (IndoPak script, quran-indopak).
  *                        Empty string when the Arabic edition is not cached
  *                        yet (the widget and detail screen still work — they
  *                        just show English).

@@ -15,6 +15,18 @@ package com.muddassir.clearview.media.model
  *                          from the `#shorts` hashtag OR the channel's /shorts
  *                          tab; persisted in the cache (old caches default to
  *                          false until the next refresh).
+ * @property isLive         True when this upload is a LIVE broadcast (the RSS
+ *                          feed has no duration, so the parser keys off the
+ *                          live thumbnail `…/hqdefault_live.jpg`). Live
+ *                          broadcasts are never Shorts and are excluded from
+ *                          watch-progress tracking (a live stream has no
+ *                          finite duration to mark watched).
+ * @property durationSeconds The video's length in seconds, or 0 when unknown.
+ *                          The RSS feed omits durations, so this is resolved
+ *                          per-video from the watch page (see
+ *                          VideoDurationResolver) for the newest uploads and
+ *                          persisted in the cache; used for the time badge on
+ *                          feed cards.
  */
 data class MediaVideo(
     val videoId: String,
@@ -24,7 +36,9 @@ data class MediaVideo(
     val publishedAtEpochMillis: Long,
     val thumbnailUrl: String,
     val viewCount: Long = 0L,
-    val isShort: Boolean = false
+    val isShort: Boolean = false,
+    val isLive: Boolean = false,
+    val durationSeconds: Long = 0L
 ) {
     companion object {
         /**

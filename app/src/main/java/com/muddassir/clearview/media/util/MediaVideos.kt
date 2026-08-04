@@ -26,6 +26,8 @@ object MediaVideos {
                     .put("thumbnailUrl", v.thumbnailUrl)
                     .put("viewCount", v.viewCount)
                     .put("isShort", v.isShort)
+                    .put("isLive", v.isLive)
+                    .put("durationSeconds", v.durationSeconds)
             )
         }
         return arr.toString()
@@ -51,7 +53,9 @@ object MediaVideos {
                             publishedAtEpochMillis = o.optLong("publishedAt", 0L),
                             thumbnailUrl = o.optString("thumbnailUrl", ""),
                             viewCount = o.optLong("viewCount", 0L),
-                            isShort = o.optBoolean("isShort", false)
+                            isShort = o.optBoolean("isShort", false),
+                            isLive = o.optBoolean("isLive", false),
+                            durationSeconds = o.optLong("durationSeconds", 0L)
                         )
                     }
                 } catch (e: Exception) {

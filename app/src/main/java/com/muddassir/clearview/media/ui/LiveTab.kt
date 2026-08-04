@@ -29,6 +29,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -54,6 +56,11 @@ import kotlinx.coroutines.delay
  * height in landscape (immersive fullscreen) but STAYS in composition so the
  * player keeps its slot and rotation never restarts the stream. The caption
  * sits BELOW the player in portrait.
+ *
+ * CONNECTING BACKDROP: while a stream is connecting — or when it ends / is
+ * unavailable — a smooth gradient backdrop ([LiveBackdrop]) fills the player
+ * slot (it only ever plays a resolved video id), so the tab never reads as a
+ * dead black screen while the player spins up.
  */
 @Composable
 fun LiveTab(
@@ -135,7 +142,11 @@ fun LiveTab(
 
         // ── Player + its overlays: single stable slot, never recreated on
         // rotation. The live broadcast video id is applied when resolution
-        // succeeds; while null the player page idles under the overlay.
+        // succeeds; the WebView stays composed across channel switches so the
+        // player is never torn down and recreated (loadVideoById switches the
+        // source in place). While it's connecting (or the stream is
+        // unavailable/ended) a frosted blurred backdrop fills the slot so it
+        // never reads as a plain black screen.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -161,6 +172,13 @@ fun LiveTab(
                     unavailable = true
                 }
             )
+
+            // Smooth gradient backdrop while connecting (or when the stream is
+            // unavailable/ended): hides the idle player slot behind a soft
+            // single-layer gradient instead of a plain black screen.
+            if (isConnecting || unavailable) {
+                LiveBackdrop(modifier = Modifier.fillMaxSize())
+            }
 
             if (isConnecting) {
                 Column(
@@ -225,6 +243,56 @@ fun LiveTab(
                 }
             }
         }
+    }
+}
+
+/**
+ * Connecting backdrop for the Live tab: a SINGLE smooth full-area gradient
+ * (theme container colors, plus a soft top glow), under a light scrim for
+ * legibility. Shown while a stream is connecting (or when it ends / is
+ * unavailable) so the player slot never reads as a dead black screen. Purely
+ * decorative — the spinner and error card are drawn on top of it by the
+ * caller.
+ *
+ * IMPORTANT: drawn with gradient brushes, NOT `Modifier.blur`. Compose's blur
+ * effect silently falls back to UNBLURRED rendering on some GPUs, which made
+ * the earlier multi-blob design appear as a mosaic of hard-edged solid
+ * rectangles. Linear gradients are rendered natively on every device — they
+ * always look smooth and can never fragment or tile.
+ */
+@Composable
+private fun LiveBackdrop(modifier: Modifier = Modifier) {
+    // Base: one continuous vertical wash across the palette container colors.
+    Box(
+        modifier = modifier.background(
+            Brush.verticalGradient(
+                listOf(
+                    MaterialTheme.colorScheme.primaryContainer,
+                    MaterialTheme.colorScheme.secondaryContainer,
+                    MaterialTheme.colorScheme.tertiaryContainer
+                )
+            )
+        )
+    ) {
+        // Soft top glow — still a single linear gradient layer, no blur.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                            Color.Transparent
+                        )
+                    )
+                )
+        )
+        // Scrim so the spinner / labels stay legible.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.25f))
+        )
     }
 }
 

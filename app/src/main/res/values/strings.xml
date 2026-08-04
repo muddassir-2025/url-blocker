@@ -43,7 +43,6 @@
     </plurals>
     <string name="quran_verse_refresh_frequency">New verse every</string>
     <string name="quran_verse_hour_short">%1$d hr</string>
-    <string name="quran_verse_custom">Custom</string>
     <string name="quran_verse_surah">Surah %1$s</string>
     <string name="quran_verse_reference">Quran %1$d:%2$d</string>
     <string name="quran_settings">Settings</string>
@@ -55,6 +54,42 @@
     <string name="quran_notification_channel_desc">New verse notifications</string>
     <string name="quran_new_verse_notification_title">New verse · %1$s</string>
     <string name="media_updates_checking">Checking for updates…</string>
+
+    <!-- Quran search (top-bar search icon + search sheet) -->
+    <string name="quran_search">Search Quran</string>
+    <string name="quran_search_back">Back</string>
+    <string name="quran_search_hint">Search by word or verse (e.g. mercy, 2:255)</string>
+    <string name="quran_search_clear">Clear search</string>
+    <string name="quran_search_idle">Type above to search the Quran</string>
+    <string name="quran_search_no_results">No verses found</string>
+    <string name="quran_search_loading">Searching…</string>
+    <string name="quran_search_mode_search">Search</string>
+    <string name="quran_search_mode_surah">Surah</string>
+    <string name="quran_bookmarks_loading">Loading bookmarks…</string>
+    <plurals name="quran_search_results_count">
+        <item quantity="one">%1$d result</item>
+        <item quantity="other">%1$d results</item>
+    </plurals>
+
+    <!-- Quran bookmarks manager (opened from the settings sheet) -->
+    <string name="quran_bookmarks_title">Bookmarks</string>
+    <string name="quran_bookmarks_view">View bookmarks</string>
+    <string name="quran_bookmarks_search_hint">Filter bookmarks</string>
+    <string name="quran_bookmarks_empty">No bookmarks yet. Tap the bookmark icon on a verse to save it here.</string>
+    <string name="quran_bookmarks_no_match">No bookmarks match your filter</string>
+    <string name="quran_bookmarks_remove">Remove bookmark</string>
+    <string name="quran_bookmarks_remove_confirm_title">Remove bookmark?</string>
+    <string name="quran_bookmarks_remove_confirm_text">This verse will be removed from your bookmarks.</string>
+    <string name="quran_bookmarks_remove_confirm">Remove</string>
+    <string name="quran_cancel">Cancel</string>
+    <plurals name="quran_bookmarks_note">
+        <item quantity="one">%1$d verse saved</item>
+        <item quantity="other">%1$d verses saved</item>
+    </plurals>
+    <plurals name="quran_bookmarks_count">
+        <item quantity="one">%1$d bookmarked verse</item>
+        <item quantity="other">%1$d bookmarked verses</item>
+    </plurals>
 
     <!-- In-app media player (YouTube IFrame API) -->
     <string name="media_player_buffering">Loading video…</string>
@@ -80,9 +115,5 @@ This video cannot be played inside the app.</string>
     <plurals name="quran_verse_refresh_note_hours">
         <item quantity="one">Refreshes automatically every %1$d hour · works offline</item>
         <item quantity="other">Refreshes automatically every %1$d hours · works offline</item>
-    </plurals>
-    <plurals name="quran_verse_custom_hours">
-        <item quantity="one">every %1$d hour</item>
-        <item quantity="other">every %1$d hours</item>
     </plurals>
 </resources>

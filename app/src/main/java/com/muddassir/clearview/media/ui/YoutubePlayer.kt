@@ -97,6 +97,12 @@ fun YoutubePlayer(
      * ready.
      */
     onProgress: (currentSeconds: Double, durationSeconds: Double) -> Unit = { _, _ -> },
+    /**
+     * The player detected a LIVE broadcast (the IFrame API reports an infinite
+     * duration). Reliable runtime live detection — independent of the feed's
+     * isLive thumbnail hint, which RSS rarely provides.
+     */
+    onLive: () -> Unit = {},
     /** Bump to force the current source to be re-applied (retry after error). */
     retryToken: Int = 0,
     /**
@@ -138,6 +144,7 @@ fun YoutubePlayer(
     val currentOnAutoplayBlocked by rememberUpdatedState(onAutoplayBlocked)
     val currentOnReady by rememberUpdatedState(onReady)
     val currentOnProgress by rememberUpdatedState(onProgress)
+    val currentOnLive by rememberUpdatedState(onLive)
     val currentOnMuteState by rememberUpdatedState(onMuteState)
 
     // JS bridge → main thread → Compose callbacks. The bridge methods run on
@@ -162,6 +169,7 @@ fun YoutubePlayer(
             autoplayBlockedCallback = { mainHandler.post { currentOnAutoplayBlocked() } },
             readyCallback = { mainHandler.post { currentOnReady() } },
             progressCallback = { c, d -> mainHandler.post { currentOnProgress(c, d) } },
+            liveCallback = { mainHandler.post { currentOnLive() } },
             muteStateCallback = { muted -> mainHandler.post { currentOnMuteState(muted) } }
         )
     }
@@ -748,6 +756,7 @@ private class YtBridge(
     private val autoplayBlockedCallback: () -> Unit,
     private val readyCallback: () -> Unit,
     private val progressCallback: (Double, Double) -> Unit,
+    private val liveCallback: () -> Unit,
     private val muteStateCallback: (Boolean) -> Unit
 ) {
     /** Dedup: surface a given error code only once per loaded source. */
@@ -793,6 +802,17 @@ private class YtBridge(
         if (durationSeconds <= 0) return
         Log.d(TAG, "IFRAME_PROGRESS ${Math.round(currentSeconds)}s/${Math.round(durationSeconds)}s")
         progressCallback(currentSeconds, durationSeconds)
+    }
+
+    /**
+     * The player reported an infinite duration — this source is LIVE. Fired by
+     * the page's reportProgress when getDuration() is not finite (see
+     * youtube_player.html), before any finite progress would be forwarded.
+     */
+    @JavascriptInterface
+    fun onLive() {
+        Log.d(TAG, "IFRAME_LIVE")
+        liveCallback()
     }
 
     @JavascriptInterface

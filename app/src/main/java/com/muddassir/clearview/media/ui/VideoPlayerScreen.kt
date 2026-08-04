@@ -61,6 +61,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -147,19 +148,73 @@ fun VideoPlayerScreen(
     val progressStore = remember { WatchProgressStore(context.applicationContext) }
     val libraryStore = remember { MediaLibraryStore(context.applicationContext) }
     var lastProgressSavedAt by remember { mutableStateOf(0L) }
+    // Runtime live signal: the IFrame API reports a NON-finite duration
+    // (Infinity) for a live broadcast, and the JS bridge only forwards
+    // progress when the duration is finite. Some live streams report the
+    // stream's ELAPSED time as a finite, growing duration instead — those are
+    // caught by the monotonic-growth check in onProgress. sawFiniteDuration
+    // therefore only means "a bounded duration was seen at least once"; the
+    // reliable live guards are the onLive bridge signal + duration growth +
+    // sawPartialPlayback. `video.isLive` (thumbnail heuristic) is only a hint.
+    var sawFiniteDuration by remember(video.videoId) { mutableStateOf(false) }
+    // Runtime live signal from the JS bridge: the page reports an infinite
+    // duration for a live broadcast (see youtube_player.html). This is the
+    // RELIABLE live detection — `video.isLive` (thumbnail heuristic) rarely
+    // fires for RSS feeds, so a live stream from a saved channel would
+    // otherwise pass every non-live guard below and get marked watched the
+    // moment the user leaves the player.
+    var isLiveRuntime by remember(video.videoId) { mutableStateOf(false) }
+    // Combined live state: the runtime bridge signal OR the feed's hint.
+    val isLiveNow = video.isLive || isLiveRuntime
+    // Duration-growth live detection: a NORMAL video reports the SAME fixed
+    // duration on every progress tick, but a live broadcast that reports the
+    // stream's ELAPSED time as its "duration" grows it on every tick (e.g.
+    // 100s → 105s → 110s). Monotonic growth across two consecutive reports is
+    // the runtime signature of a live stream that never reports the Infinity
+    // the onLive bridge is keyed on — catching it here keeps such streams out
+    // of watched/continue state.
+    var lastReportedDuration by remember(video.videoId) { mutableDoubleStateOf(0.0) }
+    // Consecutive reports where the duration GREW. Reset on any non-growing
+    // report, so an in-stream ad (a one-off duration switch on a normal video)
+    // can never accumulate to the live threshold.
+    var growingReports by remember(video.videoId) { mutableIntStateOf(0) }
+    // True once this source showed a genuinely PARTIAL position (< 98% of a
+    // stable duration). A bounded video always passes through partial
+    // positions while playing; an elapsed-time live stream reads ≈100% from
+    // its very first report — so a near-complete fraction is only trusted
+    // once this is set. This is what blocks the fast-exit path (a live stream
+    // exited within seconds of opening must not be marked watched).
+    var sawPartialPlayback by remember(video.videoId) { mutableStateOf(false) }
     // Bumped when progress is persisted / marked watched so the control panel
     // reflects the latest watch state (e.g. Continue Watching → Watch Again).
     var progressRevision by remember { mutableIntStateOf(0) }
 
+    // One-shot transition into live for THIS source: purge any stale progress
+    // (persisted by older builds that misclassified live streams as watched)
+    // and pin isLiveRuntime so every non-live guard below switches off. The
+    // bridge re-fires onLive every ~5 s while a stream plays; the guard makes
+    // the purge a one-shot per video.
+    fun markSourceLive() {
+        if (!isLiveRuntime) {
+            isLiveRuntime = true
+            progressStore.remove(video.videoId)
+            progressRevision++
+        }
+    }
+
     // Continue Watching state for THIS video (re-read on every revision).
     val savedProgress: VideoProgress? =
         remember(video.videoId, progressRevision) { progressStore.getProgress(video.videoId) }
-    val isWatched = (savedProgress?.fraction ?: 0f) >= 0.9f
+    // A live broadcast has no finite duration to complete — never present it
+    // as watched or resumable, even if an older build left stale progress for
+    // it (misclassified live → watched bug).
+    val isWatched = !isLiveNow && (savedProgress?.fraction ?: 0f) >= 0.9f
     // Continue Watching / resume applies ONLY to long videos — Shorts always
     // play from the beginning (they're watched in one sitting). Progress is
     // still tracked for Shorts (cards show the % / Watched badge).
     val hasPartialProgress =
-        !video.isShort && !isWatched && (savedProgress?.fraction ?: 0f) >= 0.02f
+        !isLiveNow && !video.isShort && !isWatched &&
+            (savedProgress?.fraction ?: 0f) >= 0.02f
     // Auto-resume from the saved position unless the video was completed
     // (completed → start over).
     val resumeFromSeconds =
@@ -299,18 +354,63 @@ fun VideoPlayerScreen(
                         sourceStarted = true
                     }
                     playerState = s
-                    // Video finished: the whole thing counts as watched.
-                    if (s == YtState.ENDED) {
+                    // Video finished: the whole thing counts as watched. Live
+                    // broadcasts can report ENDED when the user simply leaves
+                    // the player — a live stream has no finite duration to
+                    // complete, so it must never be marked watched. The runtime
+                    // live signal (isLiveNow) catches live streams even when
+                    // the thumbnail-based isLive hint missed them, and
+                    // sawPartialPlayback requires the source to have actually
+                    // played through partial positions first (an elapsed-time
+                    // live stream reads ≈100% from the start, so it never
+                    // satisfies this).
+                    if (s == YtState.ENDED && !isLiveNow &&
+                        sawFiniteDuration && sawPartialPlayback
+                    ) {
                         progressStore.set(video.videoId, 1f)
                         progressRevision++
                     }
                 },
+                onLive = {
+                    // First time THIS source reports live: purge any stale
+                    // progress persisted by older builds (which misclassified
+                    // live streams as watched) so the Watched badge and
+                    // Continue-Watching state clear immediately.
+                    markSourceLive()
+                },
                 onProgress = { currentSeconds, durationSeconds ->
-                    // Persist throttled (the JS reports every ~5 s; don't burn
-                    // disk writes faster than the report cadence). Final
-                    // positions on pause/end pass the throttle: fraction 1.0
-                    // and near-completion values are worth saving immediately.
+                    // A finite duration report is the runtime proof this is a
+                    // bounded (non-live) video — live streams never report one
+                    // (they report Infinity or the growing elapsed time, both
+                    // handled here).
                     if (durationSeconds > 0) {
+                        // Elapsed-time live detection: a broadcast that reports
+                        // the stream's elapsed time as its duration GROWS it on
+                        // every tick, monotonically. Two consecutive growing
+                        // reports = live, even when the Infinity signal never
+                        // fires. Any non-growing report (stable VOD duration, or
+                        // an in-stream ad's one-off duration switch) resets the
+                        // counter, so ads can't trigger a false positive.
+                        if (lastReportedDuration > 0.0) {
+                            if (durationSeconds - lastReportedDuration > 1.0) {
+                                growingReports++
+                                if (growingReports >= 2) {
+                                    markSourceLive()
+                                    return@YoutubePlayer
+                                }
+                            } else {
+                                growingReports = 0
+                            }
+                        }
+                        lastReportedDuration = durationSeconds
+                        sawFiniteDuration = true
+                    }
+                    // Live streams are excluded from progress tracking entirely:
+                    // the IFrame API reports a live/unknown duration, which
+                    // would render a fake progress bar and could pin the video
+                    // as watched. Once the stream ends and becomes a VOD it is
+                    // re-parsed as a normal video and tracked normally.
+                    if (!isLiveNow && durationSeconds > 0) {
                         // While a resume seek is still landing, early reports
                         // can read ~0 and would overwrite the saved position.
                         // Skip until the position actually reaches the target.
@@ -321,6 +421,15 @@ fun VideoPlayerScreen(
                         }
                         val fraction = (currentSeconds / durationSeconds)
                             .toFloat().coerceIn(0f, 1f)
+                        if (fraction < 0.98f) sawPartialPlayback = true
+                        // A near-complete fraction is only trusted once the
+                        // source showed genuinely partial playback — an
+                        // elapsed-time live stream reads ≈100% from the very
+                        // first report, so trusting it here would mark the
+                        // stream watched even before the growth check runs.
+                        if (fraction >= 0.98f && !sawPartialPlayback) {
+                            return@YoutubePlayer
+                        }
                         val now = System.currentTimeMillis()
                         if (fraction >= 0.98f || now - lastProgressSavedAt >= 5_000L) {
                             progressStore.setProgress(
@@ -578,6 +687,7 @@ fun VideoPlayerScreen(
         if (!isLandscape && !fullscreenVertical) {
             PlayerControlPanel(
                 video = video,
+                isLive = isLiveNow,
                 progress = savedProgress,
                 isWatched = isWatched,
                 hasPartialProgress = hasPartialProgress,
@@ -638,6 +748,7 @@ fun VideoPlayerScreen(
 @Composable
 private fun PlayerControlPanel(
     video: MediaVideo,
+    isLive: Boolean,
     progress: VideoProgress?,
     isWatched: Boolean,
     hasPartialProgress: Boolean,
@@ -755,13 +866,17 @@ private fun PlayerControlPanel(
                             onHide()
                         }
                     )
-                    DropdownMenuItem(
-                        text = { Text("Mark as watched") },
-                        onClick = {
-                            showMoreMenu = false
-                            onMarkWatched()
-                        }
-                    )
+                    // A live broadcast has no finite duration to complete, so
+                    // "Mark as watched" is meaningless for it.
+                    if (!isLive) {
+                        DropdownMenuItem(
+                            text = { Text("Mark as watched") },
+                            onClick = {
+                                showMoreMenu = false
+                                onMarkWatched()
+                            }
+                        )
+                    }
                 }
             }
             PanelAction(

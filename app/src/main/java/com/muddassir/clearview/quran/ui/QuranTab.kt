@@ -23,7 +23,6 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -49,7 +48,7 @@ import com.muddassir.clearview.quran.model.QuranVerse
  *
  * LAYOUT NOTE: every child is a plain element of the vertically scrollable
  * Column — no Box overlays, no stacked content. The Previous/Next row is part
- * of that normal flow (below the reference chip, above the translation), so it
+ * of that normal flow (below the Arabic verse, above the translation), so it
  * pushes the content below it down naturally and nothing ever overlaps.
  */
 @Composable
@@ -115,10 +114,10 @@ fun QuranTab(
 }
 
 /**
- * The full verse reading view: surah header, verse reference, Arabic verse +
- * reference chip, Previous/Next navigation, English translation and the
- * action buttons — all plain Column children in order, so they stack
- * vertically with normal spacing and never overlap.
+ * The full verse reading view: surah header, verse reference, Arabic verse,
+ * Previous/Next navigation, English translation and the action buttons — all
+ * plain Column children in order, so they stack vertically with normal
+ * spacing and never overlap.
  */
 @Composable
 private fun VerseDisplay(
@@ -166,24 +165,11 @@ private fun VerseDisplay(
             textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(28.dp))
-        Surface(
-            shape = MaterialTheme.shapes.large,
-            color = MaterialTheme.colorScheme.primaryContainer
-        ) {
-            Text(
-                text = "${v.surahNumber}:${v.ayahNumber}",
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-        }
-        Spacer(Modifier.height(20.dp))
     }
 
-    // Previous / Next navigation — small, subtle, centered, directly under the
-    // reference chip and above the English translation. A plain centered Row in
-    // the normal vertical flow (pushes the translation down; never overlays it).
+    // Previous / Next navigation — centered, directly under the Arabic verse
+    // and above the English translation. A plain centered Row in the normal
+    // vertical flow (pushes the translation down; never overlays it).
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Center,
@@ -192,34 +178,34 @@ private fun VerseDisplay(
         OutlinedButton(
             onClick = onPrevious,
             enabled = canGoPrevious,
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+            contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp)
         ) {
             Icon(
                 Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = null,
-                modifier = Modifier.size(16.dp)
+                modifier = Modifier.size(20.dp)
             )
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(8.dp))
             Text(
                 text = stringResource(R.string.quran_verse_previous),
-                style = MaterialTheme.typography.labelLarge
+                style = MaterialTheme.typography.titleSmall
             )
         }
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(16.dp))
         OutlinedButton(
             onClick = onNext,
             enabled = canGoNext,
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+            contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp)
         ) {
             Text(
                 text = stringResource(R.string.quran_verse_next),
-                style = MaterialTheme.typography.labelLarge
+                style = MaterialTheme.typography.titleSmall
             )
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(8.dp))
             Icon(
                 Icons.AutoMirrored.Filled.ArrowForward,
                 contentDescription = null,
-                modifier = Modifier.size(16.dp)
+                modifier = Modifier.size(20.dp)
             )
         }
     }

@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.muddassir.clearview.LauncherActivity
 import com.muddassir.clearview.R
@@ -27,6 +28,7 @@ import com.muddassir.clearview.R
  */
 object MediaBadge {
 
+    private const val TAG = "MediaBadge"
     private const val BADGE_CHANNEL_ID = "media_badge"
     private const val BADGE_NOTIFICATION_ID = 0xBAD6E
 
@@ -55,7 +57,7 @@ object MediaBadge {
             }
         }
         if (c == 0) {
-            manager.cancel(BADGE_NOTIFICATION_ID)
+            runCatching { manager.cancel(BADGE_NOTIFICATION_ID) }
         } else {
             ensureChannel(context, manager)
             val intent = PendingIntent.getActivity(
@@ -80,7 +82,11 @@ object MediaBadge {
                 .setNumber(c)
                 .setCategory(NotificationCompat.CATEGORY_STATUS)
                 .build()
-            manager.notify(BADGE_NOTIFICATION_ID, notification)
+            // Raw NotificationManager.notify() throws SecurityException on 13+
+            // when POST_NOTIFICATIONS is denied — the badge is best-effort, so
+            // never let it crash a background worker over a launcher bubble.
+            runCatching { manager.notify(BADGE_NOTIFICATION_ID, notification) }
+                .onFailure { Log.w(TAG, "Badge notification blocked: ${it.message}") }
         }
     }
 

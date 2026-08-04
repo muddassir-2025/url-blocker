@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.Notifications
@@ -107,9 +108,12 @@ class ContentHubState(appContext: Context) {
     // ── Quran notifications (new verse) ────────────────────────────
     var quranNotificationsEnabled by mutableStateOf(true)
 
-    // ── Top-bar sheets on the Quran tab (settings gear / notifications bell) ──
+    // ── Top-bar sheets on the Quran tab (search / settings / notifications) ──
+    var showSearchSheet by mutableStateOf(false)
     var showSettingsSheet by mutableStateOf(false)
     var showNotificationsSheet by mutableStateOf(false)
+    // Bookmarks manager opened from the settings sheet.
+    var showBookmarksSheet by mutableStateOf(false)
 
     private val appContext: Context = appContext
     private val quranRepository = QuranRepository(appContext)
@@ -301,6 +305,8 @@ class ContentHubState(appContext: Context) {
                 verse = next
                 // Keep the home-screen widget in sync with the in-app verse.
                 QuranReminderWidgetProvider.refreshAllWidgets(appContext)
+                // The top-bar bookmark icon must reflect the NEW verse instantly.
+                refreshBookmarkState()
             }
             verseLoading = false
             refreshNavAvailability()
@@ -334,8 +340,10 @@ class ContentHubState(appContext: Context) {
                 verse = next
                 canGoPrevious = prevAvailable
                 canGoNext = nextAvailable
-                // Keep the home-screen widget in sync with the in-app verse.
+                // Keep the home-screen widget in sync with the in-app verse, and
+                // the top-bar bookmark icon with the NEW verse.
                 QuranReminderWidgetProvider.refreshAllWidgets(appContext)
+                refreshBookmarkState()
             }
         }
     }
@@ -390,6 +398,46 @@ class ContentHubState(appContext: Context) {
             context.resources.getQuantityString(R.plurals.quran_verse_interval_set, hours, hours),
             Toast.LENGTH_SHORT
         ).show()
+    }
+
+    // ── Quran search / bookmarks manager ─────────────────────────────
+
+    /**
+     * Searches the cached translation; see [QuranRepository.searchVerses].
+     * Empty when nothing is cached yet (or no matches).
+     */
+    suspend fun searchQuran(query: String): List<QuranVerse> =
+        quranRepository.searchVerses(query)
+
+    /**
+     * Opens [v] as the current verse (persisted, widget synced, nav flags +
+     * bookmark state refreshed) without the full-screen loading spinner — used
+     * by search results and the bookmarks manager.
+     */
+    fun goToVerse(v: QuranVerse) {
+        verse = v
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                // Persist as the current verse so the widget follows instantly.
+                quranRepository.saveCurrentVerse(v)
+            }
+            QuranReminderWidgetProvider.refreshAllWidgets(appContext)
+            refreshNavAvailability()
+            refreshBookmarkState()
+        }
+    }
+
+    /** Resolves every saved bookmark into its full verse (enriched with Arabic). */
+    suspend fun bookmarkedVerses(): List<QuranVerse> = quranRepository.getBookmarkedVerses()
+
+    /** Number of saved bookmarks (instant prefs read, for the settings card). */
+    val bookmarkCount: Int
+        get() = quranRepository.getBookmarks().size
+
+    /** Removes a bookmark (no-op when not bookmarked); updates the top-bar icon. */
+    fun removeBookmark(surahNumber: Int, ayahNumber: Int) {
+        quranRepository.removeBookmark(surahNumber, ayahNumber)
+        refreshBookmarkState()
     }
 
     fun cancel() {
@@ -524,6 +572,16 @@ fun ContentHubTopBar(
                 }
             },
             actions = {
+                // Search: by verse number or English translation text.
+                IconButton(
+                    onClick = { state.showSearchSheet = true },
+                    enabled = state.verse != null && !state.verseLoading
+                ) {
+                    Icon(
+                        Icons.Filled.Search,
+                        contentDescription = stringResource(R.string.quran_search)
+                    )
+                }
                 // Settings: verse refresh interval + notification toggles.
                 IconButton(
                     onClick = { state.showSettingsSheet = true },
@@ -538,9 +596,13 @@ fun ContentHubTopBar(
                     onClick = { state.toggleBookmark(context) },
                     enabled = state.verse != null && !state.verseLoading
                 ) {
+                    // Filled + primary-tinted when bookmarked, outlined + muted
+                    // otherwise — the state change is unmistakable at a glance.
                     Icon(
                         imageVector = if (state.isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.Bookmark,
-                        contentDescription = stringResource(R.string.quran_bookmark)
+                        contentDescription = stringResource(R.string.quran_bookmark),
+                        tint = if (state.isBookmarked) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 // Notifications: opens the updates panel; badge = unread count.
@@ -595,12 +657,19 @@ fun ContentHubTopBar(
         )
     }
 
-    // Settings / notifications sheets (opened from the Quran tab top bar).
+    // Sheets opened from the Quran tab top bar: search, settings, notifications
+    // and the bookmarks manager (the latter is opened from the settings sheet).
+    if (state.showSearchSheet) {
+        QuranSearchScreen(state = state, onDismiss = { state.showSearchSheet = false })
+    }
     if (state.showSettingsSheet) {
         QuranSettingsSheet(state = state, onDismiss = { state.showSettingsSheet = false })
     }
     if (state.showNotificationsSheet) {
         NotificationsSheet(state = state, onDismiss = { state.showNotificationsSheet = false })
+    }
+    if (state.showBookmarksSheet) {
+        BookmarksSheet(state = state, onDismiss = { state.showBookmarksSheet = false })
     }
 }
 

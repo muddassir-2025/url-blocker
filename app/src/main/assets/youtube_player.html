@@ -232,6 +232,14 @@
       if (!player || typeof player.getCurrentTime !== 'function') return;
       var d = (typeof player.getDuration === 'function') ? player.getDuration() : 0;
       var t = player.getCurrentTime();
+      // A live broadcast reports an INFINITE duration — the single reliable
+      // runtime live signal (the feed's isLive thumbnail hint rarely fires
+      // from RSS). Tell Android so the app can exclude the stream from
+      // watch-progress tracking and purge any stale watched state.
+      if (d > 0 && !isFinite(d)) {
+        notify('onLive');
+        return;
+      }
       if (d > 0 && isFinite(d) && isFinite(t)) notify2('onProgress', t, d);
     } catch (e) {}
   }

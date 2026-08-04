@@ -1,6 +1,12 @@
 package com.muddassir.clearview.media.ui
 
 import android.text.format.DateUtils
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -53,6 +59,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
@@ -71,6 +78,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -99,6 +107,7 @@ import com.muddassir.clearview.media.util.applyFeedFilter
 import com.muddassir.clearview.media.util.feedFilterSummary
 import com.muddassir.clearview.media.util.formatViews
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -137,6 +146,16 @@ fun MediaTab(
     var isLoading by remember { mutableStateOf(false) }
     var showingCached by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    // Pull-to-refresh: bumping the token re-runs the feed load. The load effect
+    // is keyed on channelIdsKey (channel add/remove) + this token, so a manual
+    // refresh never needs the channels to change.
+    var refreshToken by remember { mutableIntStateOf(0) }
+    // When the last successful refresh completed (epoch ms) — drives the
+    // "Updated Xm ago" hint under the feed header.
+    var lastRefreshedAt by remember { mutableStateOf(0L) }
+    // Bumped every minute while a refresh time exists so the "Updated Xm ago"
+    // hint re-renders over time instead of freezing at "0 minutes ago".
+    var clockTick by remember { mutableIntStateOf(0) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showAddVideoDialog by remember { mutableStateOf(false) }
     var showHiddenDialog by remember { mutableStateOf(false) }
@@ -160,6 +179,15 @@ fun MediaTab(
     // The user opened the Media tab — its channel updates count as seen.
     LaunchedEffect(Unit) { onMediaOpened() }
 
+    // Keep the "Updated Xm ago" hint fresh: every minute (while a refresh
+    // time exists) bump clockTick, which recomposes the header text.
+    LaunchedEffect(lastRefreshedAt) {
+        while (lastRefreshedAt > 0L) {
+            delay(60_000L)
+            clockTick++
+        }
+    }
+
     // Stable key: the channel IDS only. The avatar backfill below replaces the
     // list object with the same ids (avoids keying the feed load on the list
     // identity — which would re-fetch every feed whenever an avatar landed).
@@ -168,7 +196,7 @@ fun MediaTab(
     // Aggregate load: every channel's cached videos first (instant), then a
     // background refresh of all feeds merged into one list. Re-runs only when
     // a channel is added or removed.
-    LaunchedEffect(channelIdsKey) {
+    LaunchedEffect(channelIdsKey, refreshToken) {
         if (channels.isEmpty()) {
             videos = emptyList()
             isLoading = false
@@ -186,6 +214,7 @@ fun MediaTab(
         if (fresh != null) {
             videos = fresh
             showingCached = false
+            lastRefreshedAt = System.currentTimeMillis()
         } else if (cached.isEmpty()) {
             errorMessage = "Couldn't load videos. Check your internet connection."
         }
@@ -258,7 +287,7 @@ fun MediaTab(
     val continueWatching = remember(channelVideos, hiddenIds, libraryRevision) {
         channelVideos
             .filter { v ->
-                !v.isShort &&
+                !v.isShort && !v.isLive &&
                     (progressStore.get(v.videoId)?.let {
                         it >= 0.02f && it < 0.9f
                     } ?: false)
@@ -317,6 +346,16 @@ fun MediaTab(
                 canAddVideo = filterChannelId != null,
                 searchActive = searchActive,
                 searchQuery = searchQuery,
+                // "Updated Xm ago" — recomputed whenever a refresh lands OR
+                // the minute ticker bumps (clockTick read forces recompose).
+                updatedAgo = if (lastRefreshedAt > 0L && !isLoading && clockTick >= 0) {
+                    val ago = DateUtils.getRelativeTimeSpanString(
+                        lastRefreshedAt,
+                        System.currentTimeMillis(),
+                        DateUtils.MINUTE_IN_MILLIS
+                    ).toString()
+                    if (ago.startsWith("0 min")) "Updated just now" else "Updated $ago"
+                } else null,
                 onSearchQueryChange = { searchQuery = it },
                 onToggleSearch = {
                     searchActive = !searchActive
@@ -330,20 +369,33 @@ fun MediaTab(
         }
 
         // ── Feed ───────────────────────────────────────────────────
-        when {
-            errorMessage != null && videos.isEmpty() -> ErrorCard(errorMessage!!)
-            channels.isEmpty() && videos.isEmpty() && !isLoading ->
-                ErrorCard("No channels saved. Tap + Add to save one.")
-            videos.isEmpty() && !isLoading -> ErrorCard("No videos yet for your channels.")
-            videos.isNotEmpty() && displayed.isNotEmpty() &&
-                searchResults.isEmpty() && isSearching && !isLoading ->
-                ErrorCard("No videos match your search.")
-            videos.isNotEmpty() && displayed.isEmpty() && !isLoading ->
-                ErrorCard(
-                    if (feedFilter.isActive) "No videos match your filters."
-                    else "No videos for this channel yet."
-                )
-            else -> {
+        // Pull-to-refresh wraps the whole feed (including skeleton + empty
+        // states — each is scrollable so the gesture always engages).
+        PullToRefreshBox(
+            isRefreshing = isLoading,
+            onRefresh = { refreshToken++ },
+            modifier = Modifier.weight(1f).fillMaxWidth()
+        ) {
+            when {
+                // First load: no channels → nothing to load (and nothing to
+                // refresh). Shown before the skeleton so a channel-less feed
+                // doesn't shimmer forever.
+                channels.isEmpty() && videos.isEmpty() && !isLoading ->
+                    ErrorCard("No channels saved. Tap + Add to save one.")
+                // First load with channels: shimmer placeholders while the
+                // feeds fetch (never a blank screen).
+                isLoading && videos.isEmpty() -> SkeletonFeed()
+                errorMessage != null && videos.isEmpty() -> ErrorCard(errorMessage!!)
+                videos.isEmpty() && !isLoading -> ErrorCard("No videos yet for your channels.")
+                videos.isNotEmpty() && displayed.isNotEmpty() &&
+                    searchResults.isEmpty() && isSearching && !isLoading ->
+                    ErrorCard("No videos match your search.")
+                videos.isNotEmpty() && displayed.isEmpty() && !isLoading ->
+                    ErrorCard(
+                        if (feedFilter.isActive) "No videos match your filters."
+                        else "No videos for this channel yet."
+                    )
+                else -> {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
@@ -438,6 +490,7 @@ fun MediaTab(
                     }
                 }
             }
+        }
         }
     }
 
@@ -726,7 +779,11 @@ private fun ShortCard(
     onRemoveManual: () -> Unit
 ) {
     val fraction = remember(video.videoId) { progressStore.get(video.videoId) }
-    val watched = (fraction ?: 0f) >= 0.9f
+    // A live broadcast has no finite duration to complete — never show a
+    // "Watched" badge or progress bar on it, even if stale progress was saved
+    // by an older build that misclassified it as a bounded video.
+    val watched = !video.isLive && (fraction ?: 0f) >= 0.9f
+    val live = video.isLive
     Card(
         onClick = onClick,
         modifier = Modifier.width(150.dp),
@@ -783,7 +840,7 @@ private fun ShortCard(
                         )
                     }
                 }
-            } else if (fraction != null && fraction > 0.02f) {
+            } else if (fraction != null && fraction > 0.02f && !live) {
                 Surface(
                     modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
                     shape = RoundedCornerShape(5.dp),
@@ -822,20 +879,26 @@ private fun ShortCard(
                 onHide = onHide,
                 onRemoveManual = onRemoveManual
             )
-            // Manually added indicator.
-            if (isManual) {
-                Surface(
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
-                    shape = RoundedCornerShape(5.dp),
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
-                ) {
-                    Text(
-                        text = "Manually added",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                    )
+            // Bottom-end stack: duration pill (+ "Manually added" above it).
+            Column(
+                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (isManual) {
+                    Surface(
+                        shape = RoundedCornerShape(5.dp),
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+                    ) {
+                        Text(
+                            text = "Manually added",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                        )
+                    }
                 }
+                DurationBadge(seconds = video.durationSeconds)
             }
             // Title + views overlaid at the bottom.
             Column(
@@ -885,7 +948,11 @@ private fun LongVideoCard(
     onRemoveManual: () -> Unit
 ) {
     val fraction = remember(video.videoId) { progressStore.get(video.videoId) }
-    val watched = (fraction ?: 0f) >= 0.9f
+    // A live broadcast has no finite duration to complete — never show a
+    // "Watched" badge or progress bar on it, even if stale progress was saved
+    // by an older build that misclassified it as a bounded video.
+    val watched = !video.isLive && (fraction ?: 0f) >= 0.9f
+    val live = video.isLive
 
     Card(
         onClick = onClick,
@@ -903,6 +970,42 @@ private fun LongVideoCard(
                     .aspectRatio(16f / 9f)
             ) {
                 RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
+                // Watched treatment: dim the whole thumbnail FIRST, so every
+                // badge (LIVE, menu, duration) stays bright on top — matching
+                // the ShortCard ordering.
+                if (watched) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.35f))
+                    )
+                }
+                // Live indicator on the thumbnail.
+                if (live) {
+                    Surface(
+                        modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
+                        shape = RoundedCornerShape(5.dp),
+                        color = Color(0xFFD93025)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .background(Color.White, CircleShape)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "LIVE",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
                 // Overflow menu (bookmark / hide / remove manual).
                 VideoCardMenu(
                     modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
@@ -912,27 +1015,30 @@ private fun LongVideoCard(
                     onHide = onHide,
                     onRemoveManual = onRemoveManual
                 )
-                if (isManual) {
-                    Surface(
-                        modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp),
-                        shape = RoundedCornerShape(5.dp),
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
-                    ) {
-                        Text(
-                            text = "Manually added",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                        )
+                // Bottom-end stack: duration pill (+ "Manually added" above
+                // it when present). Both sit above the watch-progress bar.
+                Column(
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (isManual) {
+                        Surface(
+                            shape = RoundedCornerShape(5.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+                        ) {
+                            Text(
+                                text = "Manually added",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                            )
+                        }
                     }
+                    DurationBadge(seconds = video.durationSeconds)
                 }
                 if (watched) {
-                    // Dim + badge, like YouTube's watched treatment.
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.35f))
-                    )
+                    // Watched badge (the dim is already applied above).
                     Surface(
                         modifier = Modifier
                             .align(Alignment.TopStart)
@@ -958,7 +1064,7 @@ private fun LongVideoCard(
                             )
                         }
                     }
-                } else if (fraction != null && fraction > 0.02f) {
+                } else if (fraction != null && fraction > 0.02f && !live) {
                     // In-progress: YouTube-style thin progress bar + a small
                     // "NN%" pill (top-right) so the watched amount is visible
                     // at a glance.
@@ -1047,6 +1153,8 @@ private fun FeedHeader(
     canAddVideo: Boolean,
     searchActive: Boolean,
     searchQuery: String,
+    /** "Updated Xm ago" text shown under the title row (null = hide). */
+    updatedAgo: String? = null,
     onSearchQueryChange: (String) -> Unit,
     onToggleSearch: () -> Unit,
     onOpenFilter: () -> Unit,
@@ -1206,6 +1314,15 @@ private fun FeedHeader(
                     Text("Reset", style = MaterialTheme.typography.labelMedium)
                 }
             }
+        } else if (updatedAgo != null && !searchActive) {
+            // "Updated Xm ago" — shown in place of the filter summary when no
+            // filter is active, so the feed's freshness is always visible.
+            Text(
+                text = updatedAgo,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+            )
         }
     }
 }
@@ -1522,6 +1639,32 @@ private fun formatResumeLabel(positionSeconds: Long?, durationSeconds: Long?): S
     return "${formatClock(pos)} / ${formatClock(dur)}"
 }
 
+/**
+ * YouTube-style duration pill for card thumbnails — "12:34" (or
+ * "1:02:34" past an hour). Hidden entirely when the duration isn't known
+ * (live broadcasts, or a video that hasn't been enriched yet).
+ */
+@Composable
+private fun DurationBadge(
+    seconds: Long,
+    modifier: Modifier = Modifier
+) {
+    if (seconds <= 0L) return
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(5.dp),
+        color = Color.Black.copy(alpha = 0.7f)
+    ) {
+        Text(
+            text = formatClock(seconds),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+        )
+    }
+}
+
 /** "12:34", or "1:02:34" past an hour. */
 private fun formatClock(seconds: Long): String {
     val s = seconds.coerceAtLeast(0L)
@@ -1733,26 +1876,170 @@ private fun HiddenVideosDialog(
     )
 }
 
+// ── Skeleton loaders ──────────────────────────────────────────────────
+// Shimmer placeholders shown during the first feed load (never a blank
+// screen). The layout mirrors the real feed: a section header, a row of
+// vertical Shorts cards, another header, then long-video rows.
+
+@Composable
+private fun SkeletonFeed() {
+    val brush = rememberShimmerBrush()
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        // The skeleton is a scrollable surface so pull-to-refresh can engage
+        // even while the first load is still in flight.
+        modifier = Modifier.fillMaxSize()
+    ) {
+        item(key = "sk-header-shorts") {
+            SkeletonSectionHeader(brush = brush)
+        }
+        item(key = "sk-row-shorts") {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(3) {
+                    SkeletonBlock(
+                        brush = brush,
+                        modifier = Modifier
+                            .width(150.dp)
+                            .aspectRatio(9f / 16f)
+                            .clip(RoundedCornerShape(16.dp))
+                    )
+                }
+            }
+        }
+        item(key = "sk-header-videos") {
+            SkeletonSectionHeader(brush = brush)
+        }
+        items(4) {
+            SkeletonVideoRow(brush = brush)
+        }
+    }
+}
+
+/** Shimmer section-title placeholder (accent bar + text bar). */
+@Composable
+private fun SkeletonSectionHeader(brush: Brush) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        SkeletonBlock(
+            brush = brush,
+            modifier = Modifier
+                .size(width = 3.dp, height = 16.dp)
+                .clip(RoundedCornerShape(2.dp))
+        )
+        Spacer(Modifier.width(8.dp))
+        SkeletonBlock(
+            brush = brush,
+            modifier = Modifier
+                .width(120.dp)
+                .height(16.dp)
+                .clip(RoundedCornerShape(4.dp))
+        )
+    }
+}
+
+/** Shimmer long-video row: thumbnail block + two text lines. */
+@Composable
+private fun SkeletonVideoRow(brush: Brush) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        SkeletonBlock(
+            brush = brush,
+            modifier = Modifier
+                .width(160.dp)
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(10.dp))
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            SkeletonBlock(
+                brush = brush,
+                modifier = Modifier
+                    .fillMaxWidth(0.85f)
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(4.dp))
+            )
+            Spacer(Modifier.height(8.dp))
+            SkeletonBlock(
+                brush = brush,
+                modifier = Modifier
+                    .fillMaxWidth(0.5f)
+                    .height(12.dp)
+                    .clip(RoundedCornerShape(4.dp))
+            )
+        }
+    }
+}
+
+/** One shimmer placeholder block (animated sweeping gradient). */
+@Composable
+private fun SkeletonBlock(
+    brush: Brush,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier.background(brush))
+}
+
+/**
+ * A single shared animated shimmer brush (one infinite transition for the
+ * whole skeleton, passed down to every block so they sweep in unison).
+ */
+@Composable
+private fun rememberShimmerBrush(): Brush {
+    val base = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    val highlight = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f)
+    val transition = rememberInfiniteTransition(label = "feedShimmer")
+    val x by transition.animateFloat(
+        initialValue = -1f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "feedShimmerX"
+    )
+    // Brush offsets are in PIXELS of the drawn block (not normalized), so the
+    // sweep band must be sized in real pixels. A ~300px highlight band moving
+    // across a ~1000px sweep travels over every block width used in the
+    // skeleton (150dp shorts cards ≈ 450px @3x density, 160dp thumbnails ≈
+    // 480px). Blocks narrower than the band still get a visible shimmer.
+    return Brush.linearGradient(
+        colors = listOf(base, highlight, base),
+        start = Offset(x * 500f - 200f, 0f),
+        end = Offset(x * 500f + 100f, 0f)
+    )
+}
+
 @Composable
 private fun ErrorCard(message: String) {
-    Card(
-        modifier = Modifier.fillMaxWidth().padding(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-        )
+    // Scrollable (even though the card fits) so the pull-to-refresh gesture
+    // can engage from an empty / error state — a stuck feed is exactly when
+    // the user reaches for a manual refresh.
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
     ) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text("📡", fontSize = 36.sp)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = message,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
             )
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("📡", fontSize = 36.sp)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+            }
         }
     }
 }

@@ -25,6 +25,26 @@ class MediaVideosTest {
     }
 
     @Test
+    fun `encode decode round-trips short and live flags`() {
+        val list = listOf(
+            video("short1", 100L).copy(isShort = true),
+            video("live1", 200L).copy(isLive = true),
+            video("both", 300L).copy(isShort = true, isLive = true)
+        )
+        assertEquals(list, MediaVideos.decode(MediaVideos.encode(list)))
+    }
+
+    @Test
+    fun `encode decode round-trips durationSeconds`() {
+        val list = listOf(
+            video("long", 100L).copy(durationSeconds = 7542L),
+            // Default/unknown duration persists as 0.
+            video("unknown", 200L)
+        )
+        assertEquals(list, MediaVideos.decode(MediaVideos.encode(list)))
+    }
+
+    @Test
     fun `decode handles blank and corrupt input`() {
         assertEquals(emptyList<MediaVideo>(), MediaVideos.decode(null))
         assertEquals(emptyList<MediaVideo>(), MediaVideos.decode(""))

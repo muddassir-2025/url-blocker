@@ -9,70 +9,16 @@ class QuranJsonParserTest {
 
     private val sample = """
         {
-          "code": 200,
-          "status": "OK",
-          "data": {
-            "surahs": [
-              {
-                "number": 65,
-                "name": "سُورَةُ الطَّلَاقِ",
-                "englishName": "At-Talaaq",
-                "englishNameTranslation": "Divorce",
-                "revelationType": "Medinan",
-                "numberOfAyahs": 12,
-                "ayahs": [
-                  {
-                    "number": 5200,
-                    "text": "And whoever fears Allah - He will make for him a way out.",
-                    "numberInSurah": 2,
-                    "juz": 28,
-                    "manzil": 6,
-                    "page": 558,
-                    "ruku": 1,
-                    "hizbQuarter": 112,
-                    "sajda": false
-                  },
-                  {
-                    "number": 5201,
-                    "text": "And will provide for him from where he does not expect.",
-                    "numberInSurah": 3,
-                    "juz": 28,
-                    "manzil": 6,
-                    "page": 558,
-                    "ruku": 1,
-                    "hizbQuarter": 112,
-                    "sajda": false
-                  }
-                ]
-              },
-              {
-                "number": 66,
-                "name": "سُورَةُ التَّحْرِيمِ",
-                "englishName": "At-Tahrim",
-                "englishNameTranslation": "The Prohibition",
-                "revelationType": "Medinan",
-                "numberOfAyahs": 12,
-                "ayahs": [
-                  {
-                    "number": 5202,
-                    "text": "O Prophet, why do you prohibit [yourself from] what Allah has made lawful for you?",
-                    "numberInSurah": 1,
-                    "juz": 28,
-                    "manzil": 6,
-                    "page": 560,
-                    "ruku": 1,
-                    "hizbQuarter": 112,
-                    "sajda": false
-                  }
-                ]
-              }
-            ]
-          }
+          "quran": [
+            { "chapter": 65, "verse": 2, "text": "And whoever fears Allah—He will make a way out for them." },
+            { "chapter": 65, "verse": 3, "text": "and provide for them from sources they could never imagine." },
+            { "chapter": 66, "verse": 1, "text": "O Prophet! Why do you forbid what Allah has made lawful to you?" }
+          ]
         }
     """.trimIndent()
 
     @Test
-    fun parsesSurahsAndAyahsIntoFlatVerseList() {
+    fun parsesFlatListIntoVersesWithSurahMetadata() {
         val verses = QuranJsonParser.parse(sample)
 
         assertEquals(3, verses.size)
@@ -80,9 +26,10 @@ class QuranJsonParserTest {
         val first = verses[0]
         assertEquals(65, first.surahNumber)
         assertEquals(2, first.ayahNumber)
+        // Surah name/translation come from the embedded canonical list.
         assertEquals("At-Talaaq", first.surahName)
         assertEquals("Divorce", first.surahTranslation)
-        assertEquals("And whoever fears Allah - He will make for him a way out.", first.text)
+        assertEquals("And whoever fears Allah—He will make a way out for them.", first.text)
 
         val second = verses[1]
         assertEquals(65, second.surahNumber)
@@ -97,8 +44,8 @@ class QuranJsonParserTest {
     }
 
     @Test
-    fun handlesEmptySurahList() {
-        val empty = """{"code":200,"status":"OK","data":{"surahs":[]}}"""
+    fun handlesEmptyVerseList() {
+        val empty = """{"quran":[]}"""
         assertTrue(QuranJsonParser.parse(empty).isEmpty())
     }
 
@@ -108,64 +55,46 @@ class QuranJsonParserTest {
     }
 
     @Test(expected = JSONException::class)
-    fun throwsWhenDataSectionMissing() {
+    fun throwsWhenQuranSectionMissing() {
         QuranJsonParser.parse("""{"code":404}""")
     }
 
     @Test
     fun parsesArabicEditionIntoLookupMap() {
-        // The Arabic edition uses the same JSON shape; parseArabicTexts turns it
+        // The Arabic edition uses the same flat shape; parseArabicTexts turns it
         // into a (surah, ayah) → text lookup.
         val arabic = """
             {
-              "data": {
-                "surahs": [
-                  {
-                    "number": 2,
-                    "ayahs": [
-                      { "numberInSurah": 255, "text": "اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ" },
-                      { "numberInSurah": 256, "text": "لَا إِكْرَاهَ فِي الدِّينِ" }
-                    ]
-                  }
-                ]
-              }
+              "quran": [
+                { "chapter": 2, "verse": 255, "text": "اللّٰهُ لَا إِلٰهَ إِلَّا هُوَ" },
+                { "chapter": 2, "verse": 256, "text": "لَا إِكۡرَاهَ فِي الدِّيۡنِ" }
+              ]
             }
         """.trimIndent()
 
         val map = QuranJsonParser.parseArabicTexts(arabic)
 
         assertEquals(2, map.size)
-        assertEquals("اللَّهُ لَا إِلَٰهَ إِلَّا هُوَ", map[Pair(2, 255)])
-        assertEquals("لَا إِكْرَاهَ فِي الدِّينِ", map[Pair(2, 256)])
+        assertEquals("اللّٰهُ لَا إِلٰهَ إِلَّا هُوَ", map[Pair(2, 255)])
+        assertEquals("لَا إِكۡرَاهَ فِي الدِّيۡنِ", map[Pair(2, 256)])
         assertTrue(map[Pair(2, 999)] == null)
     }
 
     @Test
-    fun ignoresUnknownExtraFields() {
-        // Extra/missing metadata fields in the payload must not break parsing;
-        // only the fields the reminder uses are read.
-        val minimal = """
-            {
-              "data": {
-                "surahs": [
-                  {
-                    "number": 1,
-                    "englishName": "Al-Faatiha",
-                    "ayahs": [
-                      { "numberInSurah": 1, "text": "In the name of Allah" }
-                    ]
-                  }
-                ]
-              }
-            }
-        """.trimIndent()
-
-        val verses = QuranJsonParser.parse(minimal)
-        assertEquals(1, verses.size)
-        assertEquals(1, verses[0].surahNumber)
-        assertEquals(1, verses[0].ayahNumber)
-        assertEquals("Al-Faatiha", verses[0].surahName)
-        // englishNameTranslation is optional and defaults to empty.
-        assertEquals("", verses[0].surahTranslation)
+    fun resolvesSurahMetadataForAll114Surahs() {
+        // Every canonical surah name/translation must resolve (1..114).
+        assertEquals("Al-Faatiha", QuranJsonParser.surahName(1))
+        assertEquals("The Opening", QuranJsonParser.surahTranslation(1))
+        assertEquals("An-Naas", QuranJsonParser.surahName(114))
+        assertEquals("Mankind", QuranJsonParser.surahTranslation(114))
+        // Guard against a transposed/mistyped entry in either hand-maintained
+        // list silently mislabelling every verse of a surah.
+        for (i in 1..114) {
+            assertTrue("surahName($i) must not be blank", QuranJsonParser.surahName(i).isNotBlank())
+            assertTrue("surahTranslation($i) must not be blank", QuranJsonParser.surahTranslation(i).isNotBlank())
+        }
+        // Out-of-range numbers fall back gracefully instead of crashing.
+        assertEquals("Surah 115", QuranJsonParser.surahName(115))
+        assertEquals("", QuranJsonParser.surahTranslation(0))
     }
 }

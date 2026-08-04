@@ -30,9 +30,17 @@ object YouTubeRssParser {
      * newest-first, but a stable sort guards against feed reordering).
      * Returns an empty list on any parse failure (never throws).
      *
-     * A video is classified as a Short when its title carries the `#shorts`
-     * hashtag OR its [videoId] is in [shortsIds] (the channel's /shorts tab,
-     * scraped by [ShortsIdResolver]) — the hashtag alone misses most Shorts.
+     * Shorts classification, in priority order:
+     *  1. The entry's `<link rel="alternate">` href — YouTube's OWN label.
+     *     Shorts are canonicalized to `https://www.youtube.com/shorts/{id}`;
+     *     every other upload (long videos AND live broadcasts) is
+     *     `/watch?v={id}`. This is authoritative, so a live stream's id can
+     *     never be mistaken for a Short even when it leaks into the /shorts
+     *     scrape (a channel's /shorts page carries the currently-live
+     *     broadcast in its shelf data).
+     *  2. Fallbacks when the feed omits the link (defensive): the `#shorts`
+     *     hashtag in the title OR [videoId] in [shortsIds] — but NEVER for a
+     *     live broadcast (identified by its `…_live.` thumbnail).
      */
     fun parse(rssXml: String, shortsIds: Set<String> = emptySet()): List<MediaVideo> {
         return try {
@@ -62,6 +70,21 @@ object YouTubeRssParser {
                 val publishedRaw = firstText(entry, "published")?.trim().orEmpty()
                 val publishedAt = parsePublished(publishedRaw) ?: 0L
                 val thumbnail = firstThumbnailUrl(entry) ?: fallbackThumbnail(videoId)
+                // Live broadcasts use a distinct thumbnail (…/hqdefault_live.jpg,
+                // …/maxresdefault_live.jpg); the feed has no duration field, so
+                // the thumbnail is the fallback live signal.
+                val isLive = thumbnail.contains("_live.", ignoreCase = true)
+                // YouTube's own classification, straight from the entry's
+                // canonical link: /shorts/{id} = Short, /watch?v={id} = long
+                // or live. Authoritative — a live stream is NEVER a Short,
+                // even if its id sneaks into the /shorts scrape.
+                val alternateLink = firstAlternateLink(entry)
+                val isShort = when {
+                    alternateLink.contains("/shorts/", ignoreCase = true) -> true
+                    alternateLink.isNotBlank() -> false
+                    isLive -> false
+                    else -> MediaVideo.isShortsTitle(title) || videoId in shortsIds
+                }
                 videos.add(
                     MediaVideo(
                         videoId = videoId,
@@ -71,7 +94,8 @@ object YouTubeRssParser {
                         publishedAtEpochMillis = publishedAt,
                         thumbnailUrl = thumbnail,
                         viewCount = firstViewCount(entry),
-                        isShort = MediaVideo.isShortsTitle(title) || videoId in shortsIds
+                        isShort = isShort,
+                        isLive = isLive
                     )
                 )
             }
@@ -79,6 +103,24 @@ object YouTubeRssParser {
         } catch (e: Exception) {
             emptyList()
         }
+    }
+
+    /**
+     * The entry's `<link rel="alternate">` href (YouTube's canonical URL for
+     * the upload), or "" when the feed omits it.
+     */
+    private fun firstAlternateLink(parent: Element): String {
+        val all = parent.getElementsByTagName("*")
+        for (i in 0 until all.length) {
+            val node = all.item(i)
+            if (node is Element && node.localName == "link") {
+                if (node.getAttribute("rel").contains("alternate", ignoreCase = true)) {
+                    val href = node.getAttribute("href").trim()
+                    if (href.isNotBlank()) return href
+                }
+            }
+        }
+        return ""
     }
 
     /** First descendant element with the given local tag name, or null. */

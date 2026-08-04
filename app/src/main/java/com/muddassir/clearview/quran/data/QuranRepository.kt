@@ -125,6 +125,9 @@ class QuranRepository(context: Context) {
     /** The currently displayed verse (instant; null before first download). */
     fun getCurrentVerse(): QuranVerse? = store.readCurrentVerse()
 
+    /** Persists [verse] as the currently displayed verse (instant). */
+    fun saveCurrentVerse(verse: QuranVerse) = store.saveCurrentVerse(verse)
+
     /**
      * Returns the verse [step] positions away (+1 = next ayah, -1 = previous
      * ayah) from (surahNumber, ayahNumber). The flat cache is Quran-ordered,
@@ -182,6 +185,51 @@ class QuranRepository(context: Context) {
     /** Persists the Quran-verse notification toggle. */
     fun setQuranNotificationsEnabled(enabled: Boolean) = store.setQuranNotificationsEnabled(enabled)
 
+    // ── Search ───────────────────────────────────────────────────────
+
+    /**
+     * Searches the cached English translation for [query] (case-insensitive,
+     * substring match on the translation text, surah name and reference).
+     *
+     * The query can also be a reference:
+     *  - "2:255" / "2 255" / "2.255"  → that exact surah:ayah
+     *  - "255" (a plain number)        → every verse numbered 255 (any surah)
+     *
+     * Results are enriched with Arabic text when the Arabic edition is cached.
+     * Returns at most [limit] verses (the flat list is Quran-ordered, so the
+     * matches come back in order). Empty when nothing is cached yet.
+     */
+    suspend fun searchVerses(query: String, limit: Int = 200): List<QuranVerse> =
+        withContext(Dispatchers.IO) {
+            val verses = englishVerses() ?: return@withContext emptyList()
+            val q = query.trim()
+            if (q.isEmpty()) return@withContext emptyList()
+
+            val lower = q.lowercase()
+            // "2:255", "2 255" or "2.255" → exact reference.
+            val ref = REFERENCE_REGEX.find(q)
+            val refSurah = ref?.groupValues?.get(1)?.toIntOrNull()
+            val refAyah = ref?.groupValues?.get(2)?.toIntOrNull()
+            val plainNumber = q.toIntOrNull()
+
+            val matches = ArrayList<QuranVerse>(minOf(limit, 64))
+            for (v in verses) {
+                if (matches.size >= limit) break
+                val hit = when {
+                    refSurah != null && refAyah != null ->
+                        v.surahNumber == refSurah && v.ayahNumber == refAyah
+                    plainNumber != null ->
+                        v.surahNumber == plainNumber || v.ayahNumber == plainNumber
+                    else ->
+                        v.text.lowercase().contains(lower) ||
+                            v.surahName.lowercase().contains(lower) ||
+                            "${v.surahNumber}:${v.ayahNumber}".contains(lower)
+                }
+                if (hit) matches.add(enrich(v))
+            }
+            matches
+        }
+
     // ── Bookmarks ────────────────────────────────────────────────────
 
     /** Set of "surah:ayah" strings the user has bookmarked. */
@@ -194,6 +242,37 @@ class QuranRepository(context: Context) {
     fun toggleBookmark(surahNumber: Int, ayahNumber: Int): Boolean =
         store.toggleBookmark(surahNumber, ayahNumber)
 
+    /** Removes the bookmark for a verse. */
+    fun removeBookmark(surahNumber: Int, ayahNumber: Int) =
+        store.removeBookmark(surahNumber, ayahNumber)
+
+    /**
+     * Resolves every saved bookmark into its full verse (enriched with Arabic
+     * when cached), in Quran order (surah, then ayah) — deterministic regardless
+     * of the underlying prefs set. Empty when none are bookmarked or the
+     * translation isn't cached yet.
+     */
+    suspend fun getBookmarkedVerses(): List<QuranVerse> = withContext(Dispatchers.IO) {
+        val verses = englishVerses() ?: return@withContext emptyList()
+        val byRef = HashMap<Pair<Int, Int>, QuranVerse>(verses.size)
+        for (v in verses) byRef[Pair(v.surahNumber, v.ayahNumber)] = v
+
+        store.getBookmarks().mapNotNull { key ->
+            val parts = key.split(":")
+            val surah = parts.getOrNull(0)?.toIntOrNull() ?: return@mapNotNull null
+            val ayah = parts.getOrNull(1)?.toIntOrNull() ?: return@mapNotNull null
+            byRef[Pair(surah, ayah)]?.let { enrich(it) }
+        }.sortedWith(compareBy<QuranVerse> { it.surahNumber }.thenBy { it.ayahNumber })
+    }
+
+    /** Enriches [v] with Arabic text when the Arabic edition is cached. */
+    private fun enrich(v: QuranVerse): QuranVerse =
+        if (v.arabicText.isBlank()) {
+            v.copy(arabicText = arabicTexts()?.get(Pair(v.surahNumber, v.ayahNumber)) ?: "")
+        } else {
+            v
+        }
+
     private companion object {
         @Volatile
         private var ArabicTextsCache: Map<Pair<Int, Int>, String>? = null
@@ -202,5 +281,9 @@ class QuranRepository(context: Context) {
         @Volatile
         private var EnglishVersesCache: List<QuranVerse>? = null
         private var versesStamp = -1L
+
+        // "2:255", "2 255" or "2.255" → exact surah:ayah reference.
+        private val REFERENCE_REGEX =
+            Regex("""^\s*(\d+)\s*[:.\s]\s*(\d+)\s*$""")
     }
 }

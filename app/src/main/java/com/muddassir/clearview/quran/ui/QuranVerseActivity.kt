@@ -12,6 +12,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.muddassir.clearview.media.worker.MediaWorkScheduler
 import com.muddassir.clearview.ui.ContentHubTabContent
 import com.muddassir.clearview.ui.ContentHubTopBar
 import com.muddassir.clearview.ui.applyImmersiveIfNeeded
@@ -35,6 +36,12 @@ import com.muddassir.clearview.ui.theme.UrlblockerTheme
 class QuranVerseActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Media updates: the widget is the app's primary entry point, so the
+        // hourly channel-update check must be scheduled here too — otherwise a
+        // user who only ever opens the app via the widget would never get media
+        // notifications (MainActivity schedules it, but may never be opened).
+        // Idempotent (WorkManager KEEP policy), safe to call every time.
+        MediaWorkScheduler.ensureScheduled(this)
         setContent {
             UrlblockerTheme {
                 HubScreen()

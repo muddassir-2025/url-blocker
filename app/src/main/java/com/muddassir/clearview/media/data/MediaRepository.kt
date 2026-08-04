@@ -11,6 +11,9 @@ import com.muddassir.clearview.media.util.decodeFeedFilter
 import com.muddassir.clearview.media.util.encodeFeedFilter
 import com.muddassir.clearview.media.util.extractYouTubeVideoId
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -32,6 +35,12 @@ class MediaRepository(context: Context) {
     private val appContext = context.applicationContext
     private val prefs =
         appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    init {
+        // Preload the duration resolver's on-disk cache so resolved durations
+        // survive restarts (no watch-page re-fetch on the first refresh).
+        VideoDurationResolver.init(appContext)
+    }
 
     // ── Saved channels ──────────────────────────────────────────────
 
@@ -226,7 +235,14 @@ class MediaRepository(context: Context) {
                 publishedAtEpochMillis = 0L, // unknown date — never pretend it's new
                 thumbnailUrl = meta.thumbnailUrl,
                 viewCount = 0L,
-                isShort = false
+                isShort = false,
+                // Same live-thumbnail signal as the RSS parser.
+                isLive = meta.thumbnailUrl.contains("_live.", ignoreCase = true),
+                // oEmbed omits duration, so resolve it from the watch page too
+                // (best-effort; the card just shows no time badge on failure).
+                durationSeconds = runCatching {
+                    VideoDurationResolver.fetchDuration(videoId)
+                }.getOrNull() ?: 0L
             )
         )
     }
@@ -307,7 +323,20 @@ class MediaRepository(context: Context) {
             // the #shorts hashtag, so title-only detection misses most of them).
             // Best-effort: an empty set degrades to hashtag detection.
             val shortsIds = ShortsIdResolver.fetchShortsIds(channelId)
-            val videos = YouTubeRssParser.parse(body, shortsIds)
+            val fresh = YouTubeRssParser.parse(body, shortsIds)
+            // Carry over already-resolved durations from the cache so a refresh
+            // never re-fetches watch pages for videos we've enriched before
+            // (the RSS feed itself carries no duration field).
+            val knownDurations = getCachedVideos(channelId)?.first
+                ?.associate { it.videoId to it.durationSeconds }
+                ?.filterValues { it > 0L } ?: emptyMap()
+            val withKnown = fresh.map { v ->
+                val known = knownDurations[v.videoId]
+                if (known != null) v.copy(durationSeconds = known) else v
+            }
+            // Then enrich the newest still-unknown videos with their duration
+            // (best-effort: a failure just leaves the badge off).
+            val videos = enrichDurations(withKnown)
             // Trace every feed item straight from the parsed RSS so we can
             // confirm the videoId handed to the embedded player belongs to
             // this exact RSS entry (no stale/mixed/hardcoded ids).
@@ -334,6 +363,47 @@ class MediaRepository(context: Context) {
         } finally {
             connection?.disconnect()
         }
+    }
+
+    /**
+     * Best-effort enrichment: fills [MediaVideo.durationSeconds] for the newest
+     * [top] videos that don't have one yet. Fetching a watch page per video is
+     * expensive, so it's capped to the head of the feed — the values persist in
+     * the cache and are carried over on later refreshes. Never fails a refresh:
+     * any fetch error leaves that video's badge off.
+     *
+     * Fetches run with BOUNDED parallelism ([concurrency] watch-page requests
+     * in flight at once): a multi-channel refresh would otherwise stall on up
+     * to 10 sequential ~1–3s requests per channel. The batches are awaited in
+     * order so the result list keeps its original (newest-first) order.
+     */
+    private suspend fun enrichDurations(
+        videos: List<MediaVideo>,
+        top: Int = 10,
+        concurrency: Int = 4
+    ): List<MediaVideo> {
+        val missing = videos.filter { it.durationSeconds <= 0L }.take(top)
+        if (missing.isEmpty()) return videos
+        val byId = videos.associateBy { it.videoId }.toMutableMap()
+        missing.chunked(concurrency).forEach { batch ->
+            val results = coroutineScope {
+                batch.map { v ->
+                    async {
+                        v.videoId to runCatching {
+                            VideoDurationResolver.fetchDuration(v.videoId)
+                        }.getOrNull()
+                    }
+                }.awaitAll()
+            }
+            for ((videoId, seconds) in results) {
+                if (seconds != null && seconds > 0L) {
+                    byId[videoId]?.let { original ->
+                        byId[videoId] = original.copy(durationSeconds = seconds)
+                    }
+                }
+            }
+        }
+        return videos.map { byId[it.videoId] ?: it }
     }
 
     /**
@@ -542,6 +612,8 @@ class MediaRepository(context: Context) {
                     .put("thumbnailUrl", v.thumbnailUrl)
                     .put("viewCount", v.viewCount)
                     .put("isShort", v.isShort)
+                    .put("isLive", v.isLive)
+                    .put("durationSeconds", v.durationSeconds)
             )
         }
         val obj = JSONObject()
@@ -563,7 +635,9 @@ class MediaRepository(context: Context) {
                     publishedAtEpochMillis = o.optLong("publishedAt", 0L),
                     thumbnailUrl = o.optString("thumbnailUrl", ""),
                     viewCount = o.optLong("viewCount", 0L),
-                    isShort = o.optBoolean("isShort", false)
+                    isShort = o.optBoolean("isShort", false),
+                    isLive = o.optBoolean("isLive", false),
+                    durationSeconds = o.optLong("durationSeconds", 0L)
                 )
             } catch (e: Exception) {
                 null

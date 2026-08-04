@@ -139,6 +139,114 @@ class YouTubeRssParserTest {
     }
 
     @Test
+    fun classifiesLiveBroadcastsFromLiveThumbnailAndNeverAsShorts() {
+        val feed = """
+            <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <yt:videoId>livevid1</yt:videoId>
+                <title>Live Now #Shorts</title>
+                <media:group>
+                  <media:thumbnail url="https://i.ytimg.com/vi/livevid1/hqdefault_live.jpg" width="480" height="360"/>
+                </media:group>
+              </entry>
+              <entry>
+                <yt:videoId>regular1</yt:videoId>
+                <title>Normal Upload</title>
+                <media:group>
+                  <media:thumbnail url="https://i.ytimg.com/vi/regular1/hqdefault.jpg" width="480" height="360"/>
+                </media:group>
+              </entry>
+            </feed>
+        """.trimIndent()
+        // The live id even sneaks into the /shorts scrape — it must STILL be a
+        // long-form live broadcast, never a Short.
+        val videos = YouTubeRssParser.parse(feed, shortsIds = setOf("livevid1"))
+        assertEquals(2, videos.size)
+
+        val live = videos.first { it.videoId == "livevid1" }
+        assertTrue("livevid1 isLive=${live.isLive} isShort=${live.isShort}", live.isLive)
+        assertTrue("livevid1 must not be a Short", !live.isShort)
+
+        val regular = videos.first { it.videoId == "regular1" }
+        assertTrue("regular1 isLive=${regular.isLive}", !regular.isLive)
+        assertTrue("regular1 must not be a Short", !regular.isShort)
+    }
+
+    @Test
+    fun alternateLinkIsAuthoritativeLiveIdInShortsSetStaysLongForm() {
+        // A channel that is currently LIVE: the broadcast appears in the RSS
+        // feed with a /watch?v= alternate link, and its id ALSO leaks into the
+        // /shorts scrape (a live channel's /shorts page carries the broadcast
+        // in its shelf data). The feed's own link wins: never a Short.
+        val feed = """
+            <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <yt:videoId>livelink1</yt:videoId>
+                <title>Live Q and A Now</title>
+                <link rel="alternate" href="https://www.youtube.com/watch?v=livelink1"/>
+              </entry>
+              <entry>
+                <yt:videoId>reallong1</yt:videoId>
+                <title>Long Video</title>
+                <link rel="alternate" href="https://www.youtube.com/watch?v=reallong1"/>
+              </entry>
+            </feed>
+        """.trimIndent()
+        // The live id is (wrongly) present in the channel's /shorts scrape.
+        val videos = YouTubeRssParser.parse(feed, shortsIds = setOf("livelink1"))
+        assertEquals(2, videos.size)
+        assertTrue(
+            "livelink1 must NOT be a Short despite being in shortsIds " +
+                "(isShort=${videos.first { it.videoId == "livelink1" }.isShort})",
+            !videos.first { it.videoId == "livelink1" }.isShort
+        )
+        assertTrue(!videos.first { it.videoId == "reallong1" }.isShort)
+    }
+
+    @Test
+    fun alternateLinkMarksShortEvenWithoutHashtagOrShortsSet() {
+        // YouTube canonicalizes Shorts to /shorts/{id} in the feed — this is
+        // the authoritative signal, stronger than the hashtag and the scrape.
+        val feed = """
+            <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <yt:videoId>shortlinkA</yt:videoId>
+                <title>No hashtag here</title>
+                <link rel="alternate" href="https://www.youtube.com/shorts/shortlinkA"/>
+              </entry>
+              <entry>
+                <yt:videoId>regularB</yt:videoId>
+                <title>Regular</title>
+                <link rel="alternate" href="https://www.youtube.com/watch?v=regularB"/>
+              </entry>
+            </feed>
+        """.trimIndent()
+        // No shortsIds passed at all — the /shorts link alone classifies it.
+        val videos = YouTubeRssParser.parse(feed, shortsIds = emptySet())
+        assertEquals(2, videos.size)
+        assertTrue(videos.first { it.videoId == "shortlinkA" }.isShort)
+        assertTrue(!videos.first { it.videoId == "regularB" }.isShort)
+    }
+
+    @Test
+    fun alternateLinkOverridesShortsSetForRegularVideos() {
+        // A regular video's id should never be short even if a stale/leaky
+        // /shorts scrape contains it — the /watch?v= link is authoritative.
+        val feed = """
+            <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <yt:videoId>longvidX</yt:videoId>
+                <title>Long Form Content</title>
+                <link rel="alternate" href="https://www.youtube.com/watch?v=longvidX"/>
+              </entry>
+            </feed>
+        """.trimIndent()
+        val videos = YouTubeRssParser.parse(feed, shortsIds = setOf("longvidX"))
+        assertEquals(1, videos.size)
+        assertTrue(!videos.first { it.videoId == "longvidX" }.isShort)
+    }
+
+    @Test
     fun classifiesShortsFromChannelShortsSetWithoutHashtag() {
         val feed = """
             <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">

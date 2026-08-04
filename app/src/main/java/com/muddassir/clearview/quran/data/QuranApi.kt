@@ -6,19 +6,26 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Minimal network client for the AlQuran.Cloud API.
+ * Minimal network client for the Quran editions.
  *
- * The full Sahih International translation (~6 MB) is downloaded exactly once
- * and cached locally; the app never re-fetches it during normal use, so this
- * class is only exercised by the initial download worker.
+ * Sources (both from the fawazahmed0/quran-api mirror, served via the jsDelivr
+ * CDN — no API key required, stable public URLs):
+ *  - English: "The Clear Quran" translation by Dr. Mustafa Khattab.
+ *  - Arabic:  the full Quran in IndoPak script.
+ *
+ * Each full edition (~1.5–2 MB) is downloaded exactly once and cached locally;
+ * the app never re-fetches it during normal use, so this class is only
+ * exercised by the initial download worker.
  */
 object QuranApi {
 
-    /** Full Quran, Sahih International English translation. */
-    private const val QURAN_URL = "https://api.alquran.cloud/v1/quran/en.sahih"
+    /** Full Quran, "The Clear Quran" English translation (Mustafa Khattab). */
+    private const val QURAN_URL =
+        "https://cdn.jsdelivr.net/gh/fawazahmed0/quran-api@1/editions/eng-mustafakhattaba.json"
 
-    /** Full Quran, Uthmani Arabic script (for the Arabic verse display). */
-    private const val QURAN_AR_URL = "https://api.alquran.cloud/v1/quran/quran-uthmani"
+    /** Full Quran, IndoPak Arabic script (for the Arabic verse display). */
+    private const val QURAN_AR_URL =
+        "https://cdn.jsdelivr.net/gh/fawazahmed0/quran-api@1/editions/ara-quranindopak.json"
 
     private const val CONNECT_TIMEOUT_MS = 15_000
     private const val READ_TIMEOUT_MS = 60_000
@@ -30,7 +37,7 @@ object QuranApi {
     suspend fun download(): String? = fetch(QURAN_URL)
 
     /**
-     * Downloads the raw JSON body of the full Arabic (Uthmani) edition.
+     * Downloads the raw JSON body of the full Arabic (IndoPak) edition.
      * Returns null on any network/HTTP failure.
      */
     suspend fun downloadArabic(): String? = fetch(QURAN_AR_URL)

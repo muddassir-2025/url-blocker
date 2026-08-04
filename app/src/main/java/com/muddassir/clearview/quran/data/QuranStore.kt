@@ -21,10 +21,33 @@ class QuranStore(context: Context) {
     private val cacheFile = File(context.filesDir, CACHE_FILE_NAME)
     private val arabicCacheFile = File(context.filesDir, AR_CACHE_FILE_NAME)
 
+    init {
+        // One-time migration: editions are "The Clear Quran" (English) + the
+        // IndoPak script. Older builds cached other editions (Sahih/Uthmani
+        // from AlQuran.Cloud, and a broken khattab/indopak pair whose URLs
+        // silently fell back to Arabic). When any of those old files existed we
+        // remove them so they don't linger on disk — and clear the persisted
+        // current verse (which may hold old/wrong text) so the next worker run
+        // picks a fresh verse in the new edition.
+        val hadOldCache = OLD_CACHE_FILE_NAMES.any { name ->
+            File(context.filesDir, name).delete()
+        }
+        if (hadOldCache) {
+            prefs.edit()
+                .remove(KEY_SURAH_NUMBER)
+                .remove(KEY_AYAH_NUMBER)
+                .remove(KEY_SURAH_NAME)
+                .remove(KEY_SURAH_TRANSLATION)
+                .remove(KEY_VERSE_TEXT)
+                .remove(KEY_ARABIC_TEXT)
+                .apply()
+        }
+    }
+
     /** True when the full translation has been downloaded and cached. */
     fun isCached(): Boolean = cacheFile.exists() && cacheFile.length() > 0L
 
-    /** True when the Arabic (Uthmani) edition is downloaded and cached. */
+    /** True when the Arabic (IndoPak) edition is downloaded and cached. */
     fun isArabicCached(): Boolean = arabicCacheFile.exists() && arabicCacheFile.length() > 0L
 
     /** Writes the raw downloaded JSON to the cache file. */
@@ -161,10 +184,32 @@ class QuranStore(context: Context) {
         return added
     }
 
+    /** Removes the bookmark for a verse (no-op when not bookmarked). */
+    fun removeBookmark(surahNumber: Int, ayahNumber: Int) {
+        val key = "$surahNumber:$ayahNumber"
+        val current = getBookmarks().toMutableSet()
+        if (current.remove(key)) {
+            prefs.edit().putStringSet(KEY_BOOKMARKS, current).apply()
+        }
+    }
+
     private companion object {
         const val PREFS_NAME = "quran_reminder_prefs"
-        const val CACHE_FILE_NAME = "quran_en_sahih.json"
-        const val AR_CACHE_FILE_NAME = "quran_ar_uthmani.json"
+        // The Clear Quran (Mustafa Khattab) English translation.
+        const val CACHE_FILE_NAME = "quran_en_clear.json"
+        // IndoPak Arabic script (v2 suffix: a previous build cached Arabic
+        // under the plain "quran_ar_indopak.json" name, so the versioned name
+        // forces a fresh download of the correct script).
+        const val AR_CACHE_FILE_NAME = "quran_ar_indopak_v2.json"
+        // Cache file names from older builds (deleted on first run of the new
+        // build so stale/wrong content can't be mistaken for the current
+        // edition).
+        val OLD_CACHE_FILE_NAMES = listOf(
+            "quran_en_sahih.json",
+            "quran_ar_uthmani.json",
+            "quran_en_khattab.json",
+            "quran_ar_indopak.json"
+        )
 
         const val KEY_SURAH_NUMBER = "current_surah_number"
         const val KEY_AYAH_NUMBER = "current_ayah_number"
