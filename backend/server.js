@@ -221,6 +221,41 @@ function verifyPotWiring() {
   ping.on('error', (e) => console.warn(`[pot] provider /ping FAILED: ${e.message}`));
   ping.setTimeout(5000, () => ping.destroy());
 
+  // 3) DIRECT /get_pot probe: asks the provider to solve BotGuard right now,
+  // independent of yt-dlp. A 200 proves the provider can generate tokens on
+  // THIS IP (the decisive test for Render's datacenter IP); a 500 pins the
+  // failure on the provider's solve path rather than the yt-dlp plugin wiring.
+  const getPotProbe = http.request(
+    {
+      host: '127.0.0.1',
+      port: POT_PORT,
+      path: '/get_pot',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': 2 },
+    },
+    (res) => {
+      let body = '';
+      res.on('data', (d) => (body += d));
+      res.on('end', () => {
+        const ok = res.statusCode === 200;
+        console.log(
+          ok
+            ? '[pot] direct /get_pot probe -> HTTP 200 — provider CAN solve BotGuard on this IP (plugin wiring is the suspect)'
+            : `[pot] direct /get_pot probe -> HTTP ${res.statusCode} — ${String(body).slice(0, 200)} (provider solve is the suspect)`
+        );
+      });
+    }
+  );
+  getPotProbe.on('error', (e) =>
+    console.warn(`[pot] direct /get_pot probe FAILED: ${e.message}`)
+  );
+  getPotProbe.setTimeout(45000, () => {
+    getPotProbe.destroy();
+    console.warn('[pot] direct /get_pot probe timed out after 45s');
+  });
+  getPotProbe.write('{}');
+  getPotProbe.end();
+
   // 3) Full extraction through the plugin, then report whether the provider
   //    actually generated a token during it (potActivity delta). This turns
   //    the boot log into a complete end-to-end verdict.
