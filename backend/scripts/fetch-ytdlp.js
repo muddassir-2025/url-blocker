@@ -25,7 +25,10 @@ const destDir = path.join(__dirname, '..', 'bin');
 const dest = path.join(destDir, fileName);
 const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${fileName}`;
 
-const MIN_SIZE = 5 * 1024 * 1024; // a real binary is never under ~5 MB
+// yt-dlp's Linux asset changed packaging (release 2026.07.04+) and is now a
+// ~3 MB zipapp (the Windows exe is still ~18 MB), so the floor must be low.
+// Only an HTML error page / truncated file should fail the check.
+const MIN_SIZE = 1 * 1024 * 1024;
 
 function log(msg) {
   console.log(`[fetch-ytdlp] ${msg}`);
@@ -96,6 +99,16 @@ function download(u, target) {
     const size = fs.statSync(dest).size;
     if (size < MIN_SIZE) {
       throw new Error(`downloaded file looks wrong (${size} bytes)`);
+    }
+    // A real yt-dlp binary starts with ELF (`\x7fELF`), a zipapp (`PK`/`#!`),
+    // or on Windows `MZ` — never an HTML page.
+    const fd = fs.openSync(dest, 'r');
+    const magic = Buffer.alloc(4);
+    fs.readSync(fd, magic, 0, 4, 0);
+    fs.closeSync(fd);
+    if (magic[0] === 0x3c) {
+      // '<' — HTML error page
+      throw new Error(`downloaded file is HTML, not the yt-dlp binary (${size} bytes)`);
     }
     if (!isWin) fs.chmodSync(dest, 0o755);
     log(`${fileName} ready (${(size / 1024 / 1024).toFixed(1)} MB).`);

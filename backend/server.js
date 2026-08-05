@@ -60,11 +60,12 @@ const UA =
 // and kick a background fetch so the pinned binary is ready for later calls.
 const BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
 const BIN_PATH = path.join(__dirname, 'bin', BIN_NAME);
-// Only trust a non-trivial binary (>= 5 MB) — a truncated fetch must never
-// be "used"; fall back to the lazy auto-download in that case.
+// Only trust a non-trivial binary (>= 1 MB) — a truncated fetch must never
+// be "used"; fall back to the lazy auto-download in that case. (yt-dlp's
+// Linux asset is now a ~3 MB zipapp, so 5 MB would wrongly reject it.)
 const pinnedOk =
   fs.existsSync(BIN_PATH) &&
-  fs.statSync(BIN_PATH).size >= 5 * 1024 * 1024;
+  fs.statSync(BIN_PATH).size >= 1 * 1024 * 1024;
 const ytDlp = pinnedOk ? create(BIN_PATH) : youtubeDl;
 if (ytDlp === youtubeDl) {
   console.warn('[server] pinned yt-dlp binary missing or too small — using lazy auto-download');
@@ -102,6 +103,33 @@ try {
   }
 } catch (e) {
   console.warn('[server] could not load cookies:', e.message);
+}
+
+// Cookie diagnostics — the #1 reason downloads stay bot-blocked is a cookie
+// file exported from a session that was NOT signed in. Log what we actually
+// have so the Render logs make it obvious.
+if (cookiesPath) {
+  try {
+    const raw = fs.readFileSync(cookiesPath, 'utf8');
+    const lines = raw.split(/\r?\n/).filter((l) => l && !l.trimStart().startsWith('#'));
+    const names = new Set(
+      lines.map((l) => (l.split('\t')[5] || '').trim()).filter(Boolean)
+    );
+    const markers = ['__Secure-3PSID', '__Secure-1PSID', 'SAPISID', 'LOGIN_INFO'];
+    const present = markers.filter((k) => names.has(k));
+    console.log(
+      `[server] cookies: ${lines.length} entries, signed-in markers: [${present.join(', ') || 'NONE'}]`
+    );
+    if (!present.length) {
+      console.warn(
+        '[server] WARNING: no signed-in cookies found — YouTube will still bot-block ' +
+          'the server. Re-export cookies from a SIGNED-IN YouTube session ' +
+          '(incognito window → sign in → export) and update COOKIES_B64.'
+      );
+    }
+  } catch (e) {
+    console.warn('[server] could not inspect cookies:', e.message);
+  }
 }
 
 let activeStreams = 0;
