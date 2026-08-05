@@ -45,8 +45,12 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.muddassir.clearview.R
 import com.muddassir.clearview.media.data.MediaBadge
 import com.muddassir.clearview.media.data.MediaRepository
+import com.muddassir.clearview.media.download.AudioDownloads
+import com.muddassir.clearview.media.download.DownloadItem
+import com.muddassir.clearview.media.download.OfflineAudioPlayer
 import com.muddassir.clearview.media.model.MediaChannelUpdate
 import com.muddassir.clearview.media.model.MediaVideo
+import com.muddassir.clearview.media.ui.AudioPlayerScreen
 import com.muddassir.clearview.media.ui.LiveTab
 import com.muddassir.clearview.media.ui.MediaTab
 import com.muddassir.clearview.media.ui.VideoPlayerScreen
@@ -82,6 +86,9 @@ class ContentHubState(appContext: Context) {
 
     var selectedTab by mutableStateOf(ContentTab.QURAN)
     var playingVideo by mutableStateOf<MediaVideo?>(null)
+    // Offline audio playback (downloaded files). Only one of playingVideo /
+    // playingAudio is non-null at a time — playing audio closes the video player.
+    var playingAudio by mutableStateOf<DownloadItem?>(null)
     // Vertical fullscreen (YouTube Shorts style): the video fills the whole
     // portrait screen and the bars hide. Reset when the video changes/exits.
     var playerFullscreen by mutableStateOf(false)
@@ -263,7 +270,31 @@ class ContentHubState(appContext: Context) {
     fun playVideo(video: MediaVideo, queue: List<MediaVideo> = emptyList(), index: Int = -1) {
         shortsQueue = queue
         shortsIndex = index
+        playingAudio = null
         playingVideo = video
+    }
+
+    /**
+     * Plays the downloaded audio for [video] immediately (podcast-style),
+     * closing the WebView video player if it was open. No-op when the video
+     * isn't downloaded yet.
+     */
+    fun playAudio(video: MediaVideo) {
+        AudioDownloads.itemFor(video.videoId)?.let { playAudioItem(it) }
+    }
+
+    /** Plays [item] (its local audio file) immediately. */
+    fun playAudioItem(item: DownloadItem) {
+        playingVideo = null
+        shortsQueue = emptyList()
+        shortsIndex = -1
+        playingAudio = item
+    }
+
+    /** Closes the audio player (stops playback too). */
+    fun exitAudio() {
+        OfflineAudioPlayer.stop()
+        playingAudio = null
     }
 
     /** Vertical Shorts paging: +1 next, -1 previous (no-op at the ends). */
@@ -500,9 +531,15 @@ fun ContentHubTabContent(
                 fullscreenVertical = state.playerFullscreen,
                 onToggleFullscreen = { state.playerFullscreen = !state.playerFullscreen },
                 onExit = { state.playingVideo = null },
+                onPlayOffline = { state.playAudio(state.playingVideo!!) },
                 shortsQueue = state.shortsQueue,
                 shortsIndex = state.shortsIndex,
                 onNavigateShorts = { state.navigateShorts(it) }
+            )
+
+            state.playingAudio != null -> AudioPlayerScreen(
+                item = state.playingAudio!!,
+                onExit = { state.exitAudio() }
             )
 
             state.selectedTab == ContentTab.QURAN -> QuranTab(
@@ -521,6 +558,8 @@ fun ContentHubTabContent(
                     state.playVideo(video, queue, index)
                     if (index < 0) state.markMediaUpdatesSeen()
                 },
+                onPlayOffline = { video -> state.playAudio(video) },
+                onPlayAudio = { item -> state.playAudioItem(item) },
                 onMediaOpened = { state.markMediaUpdatesSeen() }
             )
 
@@ -557,6 +596,22 @@ fun ContentHubTopBar(
             },
             navigationIcon = {
                 IconButton(onClick = { state.playingVideo = null }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+            }
+        )
+
+        // Offline audio: back arrow closes the podcast-style player (stops it).
+        state.playingAudio != null -> TopAppBar(
+            title = {
+                Text(
+                    text = state.playingAudio!!.title,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            navigationIcon = {
+                IconButton(onClick = { state.exitAudio() }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
             }

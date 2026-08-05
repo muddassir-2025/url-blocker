@@ -45,14 +45,18 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -87,6 +91,8 @@ import com.muddassir.clearview.R
 import com.muddassir.clearview.media.data.MediaLibraryStore
 import com.muddassir.clearview.media.data.VideoProgress
 import com.muddassir.clearview.media.data.WatchProgressStore
+import com.muddassir.clearview.media.download.AudioDownloads
+import com.muddassir.clearview.media.download.DownloadStatus
 import com.muddassir.clearview.media.model.MediaVideo
 import kotlinx.coroutines.delay
 
@@ -118,6 +124,8 @@ fun VideoPlayerScreen(
     onToggleFullscreen: () -> Unit = {},
     /** Called after the user hides this video (the player should close). */
     onExit: () -> Unit = {},
+    /** Plays the downloaded audio instead of the video (podcast-style). */
+    onPlayOffline: () -> Unit = {},
     /** Ordered Shorts list for the vertical viewer (empty for long videos). */
     shortsQueue: List<MediaVideo> = emptyList(),
     /** Index of [video] within [shortsQueue], or -1. */
@@ -147,6 +155,11 @@ fun VideoPlayerScreen(
     // Watching can resume from the exact position.
     val progressStore = remember { WatchProgressStore(context.applicationContext) }
     val libraryStore = remember { MediaLibraryStore(context.applicationContext) }
+    // Offline audio: initialize once, then observe this video's download state
+    // (snapshot state — the panel recomposes when the download progresses).
+    LaunchedEffect(Unit) { AudioDownloads.initialize(context.applicationContext) }
+    val downloadStatus = AudioDownloads.statusFor(video.videoId)
+    val isOffline = AudioDownloads.isDownloaded(video.videoId)
     var lastProgressSavedAt by remember { mutableStateOf(0L) }
     // Runtime live signal: the IFrame API reports a NON-finite duration
     // (Infinity) for a live broadcast, and the JS bridge only forwards
@@ -694,6 +707,16 @@ fun VideoPlayerScreen(
                 playbackRate = playbackRate,
                 isBookmarked = isBookmarked,
                 showSpeedMenu = showSpeedMenu,
+                downloadStatus = downloadStatus,
+                isOffline = isOffline,
+                onDownloadAudio = {
+                    AudioDownloads.download(video, AudioDownloads.sourceFor(video))
+                },
+                onPlayOffline = onPlayOffline,
+                onDeleteDownload = {
+                    AudioDownloads.delete(video.videoId)
+                    Toast.makeText(context, "Download deleted", Toast.LENGTH_SHORT).show()
+                },
                 onSpeedMenuToggle = { showSpeedMenu = !showSpeedMenu },
                 onSpeedSelect = { setPlaybackRate(it); showSpeedMenu = false },
                 onContinue = { requestSeek(resumeFromSeconds) },
@@ -755,6 +778,11 @@ private fun PlayerControlPanel(
     playbackRate: Double,
     isBookmarked: Boolean,
     showSpeedMenu: Boolean,
+    downloadStatus: DownloadStatus?,
+    isOffline: Boolean,
+    onDownloadAudio: () -> Unit,
+    onPlayOffline: () -> Unit,
+    onDeleteDownload: () -> Unit,
     onSpeedMenuToggle: () -> Unit,
     onSpeedSelect: (Double) -> Unit,
     onContinue: () -> Unit,
@@ -859,6 +887,15 @@ private fun PlayerControlPanel(
                     expanded = showMoreMenu,
                     onDismissRequest = { showMoreMenu = false }
                 ) {
+                    if (isOffline) {
+                        DropdownMenuItem(
+                            text = { Text("Delete download") },
+                            onClick = {
+                                showMoreMenu = false
+                                onDeleteDownload()
+                            }
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("Hide video") },
                         onClick = {
@@ -917,6 +954,100 @@ private fun PlayerControlPanel(
                 else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f)
             )
+        }
+
+        // ── Offline audio: the Download Audio button with its full state flow
+        // (Download → Preparing… → Downloading NN% → Downloaded → Play offline).
+        // Live broadcasts can't be downloaded, so the button is hidden for them.
+        if (!isLive) {
+            Spacer(Modifier.height(10.dp))
+            when {
+                isOffline -> OutlinedButton(
+                    onClick = onPlayOffline,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Play Offline")
+                }
+                downloadStatus is DownloadStatus.Preparing -> Button(
+                    onClick = {},
+                    enabled = false,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Preparing…")
+                }
+                downloadStatus is DownloadStatus.Downloading -> Column(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedButton(
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            if (downloadStatus.progress >= 0f)
+                                "Downloading ${(downloadStatus.progress.coerceIn(0f, 1f) * 100).toInt()}%"
+                            else
+                                "Downloading…"
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    if (downloadStatus.progress >= 0f) {
+                        LinearProgressIndicator(
+                            progress = { downloadStatus.progress.coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth().height(4.dp)
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(4.dp))
+                    }
+                }
+                downloadStatus is DownloadStatus.Error -> Column(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedButton(
+                        onClick = onDownloadAudio,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Retry download")
+                    }
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = downloadStatus.message,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 2
+                    )
+                }
+                else -> Button(
+                    onClick = onDownloadAudio,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Filled.FileDownload,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Download Audio")
+                }
+            }
         }
     }
 }

@@ -34,4 +34,38 @@ class FormattersTest {
         assertEquals("1B", formatViews(1_000_000_000L))
         assertEquals("1.5B", formatViews(1_500_000_000L))
     }
+
+    @Test
+    fun formatsBytesInBaseUnits() {
+        assertEquals("0 B", formatBytes(0))
+        assertEquals("500 B", formatBytes(500))
+        assertEquals("1023 B", formatBytes(1023))
+    }
+
+    @Test
+    fun formatsBytesInKilobytes() {
+        assertEquals("1 KB", formatBytes(1024))
+        assertEquals("14 KB", formatBytes(14336))
+        assertEquals("1023.9 KB", formatBytes(1_048_473))
+    }
+
+    @Test
+    fun formatsBytesInMegabytes() {
+        assertEquals("1 MB", formatBytes(1024 * 1024))
+        assertEquals("286.7 MB", formatBytes(300_647_000))
+        // Decimals persist across the thousand boundary.
+        assertEquals("1001.4 MB", formatBytes(1_050_000_000))
+    }
+
+    @Test
+    fun formatsBytesInGigabytes() {
+        assertEquals("1 GB", formatBytes(1L shl 30))
+        assertEquals("1.5 GB", formatBytes(1_610_612_736))
+        assertEquals("2 GB", formatBytes(2_147_483_648))
+    }
+
+    @Test
+    fun formatsNegativeBytesAsZero() {
+        assertEquals("0 B", formatBytes(-5))
+    }
 }

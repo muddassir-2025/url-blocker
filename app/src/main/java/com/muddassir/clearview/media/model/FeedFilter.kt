@@ -13,11 +13,21 @@ enum class FeedDateFilter(val label: String) {
     CUSTOM("Custom date range")
 }
 
-/** Content-type filter for the All Feed. */
+/**
+ * Content-type filter for the All Feed.
+ *
+ * [LIVE] shows live broadcasts (the feed marks them via the live thumbnail;
+ * the Live tab remains the dedicated live viewer). [DOWNLOADS] switches the
+ * feed body to the offline Downloads section — the filter is handled by the
+ * Media tab, and [com.muddassir.clearview.media.util.applyFeedFilter] treats
+ * it as matching nothing (the feed list is bypassed entirely).
+ */
 enum class FeedContentFilter(val label: String) {
     ALL("All"),
     VIDEOS("Videos"),
-    SHORTS("Shorts")
+    SHORTS("Shorts"),
+    LIVE("Live"),
+    DOWNLOADS("Downloads")
 }
 
 /** Sort order for the All Feed. */

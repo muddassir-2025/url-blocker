@@ -93,6 +93,9 @@ import androidx.compose.ui.unit.sp
 import com.muddassir.clearview.media.data.MediaLibraryStore
 import com.muddassir.clearview.media.data.MediaRepository
 import com.muddassir.clearview.media.data.WatchProgressStore
+import com.muddassir.clearview.media.download.AudioDownloads
+import com.muddassir.clearview.media.download.DownloadItem
+import com.muddassir.clearview.media.download.DownloadStatus
 import com.muddassir.clearview.media.model.FeedContentFilter
 import com.muddassir.clearview.media.model.FeedDateFilter
 import com.muddassir.clearview.media.model.FeedFilter
@@ -128,6 +131,10 @@ import kotlinx.coroutines.withContext
 @Composable
 fun MediaTab(
     onPlayVideo: (MediaVideo, List<MediaVideo>, Int) -> Unit,
+    /** Plays the downloaded audio for [video] instead of the video (offline). */
+    onPlayOffline: (MediaVideo) -> Unit = {},
+    /** Opens the podcast-style audio player for a downloaded item. */
+    onPlayAudio: (DownloadItem) -> Unit = {},
     /** Fired when the Media tab is shown (marks channel updates as seen). */
     onMediaOpened: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -136,6 +143,9 @@ fun MediaTab(
     val repository = remember { MediaRepository(context.applicationContext) }
     val progressStore = remember { WatchProgressStore(context.applicationContext) }
     val libraryStore = remember { MediaLibraryStore(context.applicationContext) }
+    // Offline audio downloads: idempotent init (cheap after the first call);
+    // the cards and the Downloads section read the state directly below.
+    AudioDownloads.initialize(context.applicationContext)
     // Bumped whenever the library changes (bookmark / hide / manual add) so
     // the merged feed and the Continue Watching row recompute.
     var libraryRevision by remember { mutableIntStateOf(0) }
@@ -295,13 +305,22 @@ fun MediaTab(
             .sortedByDescending { it.publishedAtEpochMillis }
             .take(6)
     }
+    // Already downloaded → play the local offline audio immediately (podcast
+    // style); otherwise the normal (WebView) video playback.
     val playShort: (MediaVideo) -> Unit = { video ->
-        val idx = shorts.indexOfFirst { it.videoId == video.videoId }
-        onPlayVideo(video, shorts, idx)
+        if (AudioDownloads.isDownloaded(video.videoId)) {
+            onPlayOffline(video)
+        } else {
+            val idx = shorts.indexOfFirst { it.videoId == video.videoId }
+            onPlayVideo(video, shorts, idx)
+        }
     }
     val playLong: (MediaVideo) -> Unit = { video ->
-        onPlayVideo(video, emptyList(), -1)
+        if (AudioDownloads.isDownloaded(video.videoId)) onPlayOffline(video)
+        else onPlayVideo(video, emptyList(), -1)
     }
+    // The Downloads content filter swaps the feed for the Downloads section.
+    val downloadsFilter = feedFilter.content == FeedContentFilter.DOWNLOADS
 
     Column(modifier = modifier.fillMaxSize()) {
 
@@ -377,6 +396,11 @@ fun MediaTab(
             modifier = Modifier.weight(1f).fillMaxWidth()
         ) {
             when {
+                // Downloads filter → the Downloads section (storage card +
+                // offline audio list). Replaces the feed entirely.
+                downloadsFilter && !isSearching -> DownloadsSection(
+                    onPlayAudio = onPlayAudio
+                )
                 // First load: no channels → nothing to load (and nothing to
                 // refresh). Shown before the skeleton so a channel-less feed
                 // doesn't shimmer forever.
@@ -440,7 +464,15 @@ fun MediaTab(
                                         progressStore = progressStore,
                                         isBookmarked = libraryStore.isBookmarked(video.videoId),
                                         isManual = libraryStore.isManuallyAdded(video.videoId),
+                                        downloadStatus = AudioDownloads.statusFor(video.videoId),
+                                        isOffline = AudioDownloads.isDownloaded(video.videoId),
                                         onClick = { playShort(video) },
+                                        onDownload = {
+                                            AudioDownloads.download(video, AudioDownloads.sourceFor(video))
+                                        },
+                                        onCancelDownload = { AudioDownloads.cancel(video.videoId) },
+                                        onPlayOffline = { onPlayOffline(video) },
+                                        onDeleteDownload = { AudioDownloads.delete(video.videoId) },
                                         onToggleBookmark = {
                                             libraryStore.toggleBookmark(video)
                                             libraryRevision++
@@ -472,7 +504,15 @@ fun MediaTab(
                                 progressStore = progressStore,
                                 isBookmarked = libraryStore.isBookmarked(video.videoId),
                                 isManual = libraryStore.isManuallyAdded(video.videoId),
+                                downloadStatus = AudioDownloads.statusFor(video.videoId),
+                                isOffline = AudioDownloads.isDownloaded(video.videoId),
                                 onClick = { playLong(video) },
+                                onDownload = {
+                                    AudioDownloads.download(video, AudioDownloads.sourceFor(video))
+                                },
+                                onCancelDownload = { AudioDownloads.cancel(video.videoId) },
+                                onPlayOffline = { onPlayOffline(video) },
+                                onDeleteDownload = { AudioDownloads.delete(video.videoId) },
                                 onToggleBookmark = {
                                     libraryStore.toggleBookmark(video)
                                     libraryRevision++
@@ -773,7 +813,13 @@ private fun ShortCard(
     progressStore: WatchProgressStore,
     isBookmarked: Boolean,
     isManual: Boolean,
+    downloadStatus: DownloadStatus?,
+    isOffline: Boolean,
     onClick: () -> Unit,
+    onDownload: () -> Unit,
+    onCancelDownload: () -> Unit,
+    onPlayOffline: () -> Unit,
+    onDeleteDownload: () -> Unit,
     onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
     onRemoveManual: () -> Unit
@@ -870,21 +916,53 @@ private fun ShortCard(
                 }
             }
             // Overflow menu (top-right, where the play badge used to be):
-            // bookmark / hide / remove manual.
+            // bookmark / download / hide / remove manual.
             VideoCardMenu(
                 modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
                 isBookmarked = isBookmarked,
                 isManual = isManual,
+                downloadLabel = downloadMenuLabel(downloadStatus, isOffline),
+                onDownloadAction = downloadMenuAction(
+                    downloadStatus, isOffline, onDownload, onCancelDownload, onDeleteDownload
+                ),
                 onToggleBookmark = onToggleBookmark,
                 onHide = onHide,
                 onRemoveManual = onRemoveManual
             )
-            // Bottom-end stack: duration pill (+ "Manually added" above it).
+            // Bottom-end stack: download action + status pills + duration pill.
             Column(
                 modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                if (!video.isLive) {
+                    DownloadCardAction(
+                        status = downloadStatus,
+                        isOffline = isOffline,
+                        onClick = {
+                            when {
+                                isOffline -> onPlayOffline()
+                                downloadStatus == null -> onDownload()
+                                downloadStatus is DownloadStatus.Preparing ||
+                                    downloadStatus is DownloadStatus.Downloading -> onCancelDownload()
+                                else -> onDownload() // failed → retry
+                            }
+                        }
+                    )
+                }
+                if (isOffline) {
+                    Surface(
+                        shape = RoundedCornerShape(5.dp),
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+                    ) {
+                        Text(
+                            text = "Offline",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                        )
+                    }
+                }
                 if (isManual) {
                     Surface(
                         shape = RoundedCornerShape(5.dp),
@@ -942,7 +1020,13 @@ private fun LongVideoCard(
     progressStore: WatchProgressStore,
     isBookmarked: Boolean,
     isManual: Boolean,
+    downloadStatus: DownloadStatus?,
+    isOffline: Boolean,
     onClick: () -> Unit,
+    onDownload: () -> Unit,
+    onCancelDownload: () -> Unit,
+    onPlayOffline: () -> Unit,
+    onDeleteDownload: () -> Unit,
     onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
     onRemoveManual: () -> Unit
@@ -1006,22 +1090,54 @@ private fun LongVideoCard(
                         }
                     }
                 }
-                // Overflow menu (bookmark / hide / remove manual).
+                // Overflow menu (bookmark / download / hide / remove manual).
                 VideoCardMenu(
                     modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
                     isBookmarked = isBookmarked,
                     isManual = isManual,
+                    downloadLabel = downloadMenuLabel(downloadStatus, isOffline),
+                    onDownloadAction = downloadMenuAction(
+                        downloadStatus, isOffline, onDownload, onCancelDownload, onDeleteDownload
+                    ),
                     onToggleBookmark = onToggleBookmark,
                     onHide = onHide,
                     onRemoveManual = onRemoveManual
                 )
-                // Bottom-end stack: duration pill (+ "Manually added" above
-                // it when present). Both sit above the watch-progress bar.
+                // Bottom-end stack: download action + status pills + duration
+                // pill. Everything sits above the watch-progress bar.
                 Column(
                     modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
                     horizontalAlignment = Alignment.End,
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    if (!video.isLive) {
+                        DownloadCardAction(
+                            status = downloadStatus,
+                            isOffline = isOffline,
+                            onClick = {
+                                when {
+                                    isOffline -> onPlayOffline()
+                                    downloadStatus == null -> onDownload()
+                                    downloadStatus is DownloadStatus.Preparing ||
+                                        downloadStatus is DownloadStatus.Downloading -> onCancelDownload()
+                                    else -> onDownload() // failed → retry
+                                }
+                            }
+                        )
+                    }
+                    if (isOffline) {
+                        Surface(
+                            shape = RoundedCornerShape(5.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+                        ) {
+                            Text(
+                                text = "Offline",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
                     if (isManual) {
                         Surface(
                             shape = RoundedCornerShape(5.dp),
@@ -1332,7 +1448,10 @@ private fun FeedHeader(
  * via date pickers), Content type, Sort, and Reset / Apply. Draft state is
  * only committed on Apply.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class
+)
 @Composable
 private fun FilterSheet(
     filter: FeedFilter,
@@ -1404,7 +1523,12 @@ private fun FilterSheet(
                 fontWeight = FontWeight.SemiBold
             )
             Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // FlowRow: five chips (All / Videos / Shorts / Live / Downloads)
+            // wrap instead of overflowing on narrow screens.
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 FeedContentFilter.entries.forEach { option ->
                     FilterChip(
                         selected = draft.content == option,
@@ -1684,6 +1808,8 @@ private fun VideoCardMenu(
     modifier: Modifier = Modifier,
     isBookmarked: Boolean,
     isManual: Boolean,
+    downloadLabel: String? = null,
+    onDownloadAction: (() -> Unit)? = null,
     onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
     onRemoveManual: () -> Unit
@@ -1716,6 +1842,15 @@ private fun VideoCardMenu(
                     onToggleBookmark()
                 }
             )
+            if (downloadLabel != null && onDownloadAction != null) {
+                DropdownMenuItem(
+                    text = { Text(downloadLabel) },
+                    onClick = {
+                        showMenu = false
+                        onDownloadAction()
+                    }
+                )
+            }
             if (isManual) {
                 DropdownMenuItem(
                     text = { Text("Remove (manually added)") },
@@ -1734,6 +1869,28 @@ private fun VideoCardMenu(
             )
         }
     }
+}
+
+/** The ⋮ menu label for a card's download entry, by state. */
+private fun downloadMenuLabel(status: DownloadStatus?, isOffline: Boolean): String = when {
+    isOffline -> "Delete download"
+    status == null -> "Download audio"
+    status is DownloadStatus.Preparing || status is DownloadStatus.Downloading -> "Cancel download"
+    else -> "Retry download"
+}
+
+/** The ⋮ menu action for a card's download entry, by state. */
+private fun downloadMenuAction(
+    status: DownloadStatus?,
+    isOffline: Boolean,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit
+): (() -> Unit)? = when {
+    isOffline -> onDelete
+    status == null -> onDownload
+    status is DownloadStatus.Preparing || status is DownloadStatus.Downloading -> onCancel
+    else -> onDownload
 }
 
 @Composable

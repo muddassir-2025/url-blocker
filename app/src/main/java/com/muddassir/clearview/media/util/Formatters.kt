@@ -1,5 +1,7 @@
 package com.muddassir.clearview.media.util
 
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 /**
@@ -27,4 +29,37 @@ private fun compact(count: Long, unit: Long): String {
     if (value >= 10.0) return value.toLong().toString()
     val s = String.format(Locale.US, "%.1f", value)
     return if (s.endsWith(".0")) s.dropLast(2) else s
+}
+
+/**
+ * Human-readable byte size for downloads / storage cards:
+ * 500 → "500 B", 14336 → "14 KB", 286_720_000 → "286.7 MB", 1_500_000_000 → "1.5 GB".
+ * Whole values drop the ".0" ("14 MB", not "14.0 MB").
+ *
+ * Pure JVM function (no Android/Compose dependencies) so it is unit-testable.
+ */
+internal fun formatBytes(bytes: Long): String {
+    val b = bytes.coerceAtLeast(0L)
+    return when {
+        b >= 1L shl 30 -> compactBytes(b, 1L shl 30) + " GB"
+        b >= 1L shl 20 -> compactBytes(b, 1L shl 20) + " MB"
+        b >= 1L shl 10 -> compactBytes(b, 1L shl 10) + " KB"
+        else -> "$b B"
+    }
+}
+
+/** Compact value for byte sizes: one decimal, trailing ".0" stripped. */
+private fun compactBytes(value: Long, unit: Long): String {
+    val s = String.format(Locale.US, "%.1f", value.toDouble() / unit)
+    return if (s.endsWith(".0")) s.dropLast(2) else s
+}
+
+/**
+ * "12 Jan 2026" from an epoch-millis timestamp (download dates, the Manage
+ * Storage sheet), or "—" when the time is unknown. Pure JVM so it is
+ * unit-testable.
+ */
+internal fun formatDownloadDate(epochMillis: Long): String {
+    if (epochMillis <= 0L) return "—"
+    return SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(epochMillis))
 }

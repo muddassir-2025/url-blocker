@@ -12,6 +12,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.muddassir.clearview.media.download.AudioDownloads
+import com.muddassir.clearview.media.worker.AudioWorkScheduler
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
 import com.muddassir.clearview.ui.ContentHubTabContent
 import com.muddassir.clearview.ui.ContentHubTopBar
@@ -42,6 +44,10 @@ class QuranVerseActivity : ComponentActivity() {
         // notifications (MainActivity schedules it, but may never be opened).
         // Idempotent (WorkManager KEEP policy), safe to call every time.
         MediaWorkScheduler.ensureScheduled(this)
+        // Offline audio downloads: app-wide init + daily cleanup — the widget
+        // activity must schedule these too (it hosts the same ContentHub).
+        AudioDownloads.initialize(this)
+        AudioWorkScheduler.ensureScheduled(this)
         setContent {
             UrlblockerTheme {
                 HubScreen()
@@ -63,6 +69,11 @@ private fun HubScreen() {
     BackHandler(enabled = hub.playingVideo != null) {
         if (hub.playerFullscreen) hub.playerFullscreen = false
         else hub.playingVideo = null
+    }
+
+    // System back while the offline audio player is open closes it.
+    BackHandler(enabled = hub.playingAudio != null) {
+        hub.exitAudio()
     }
 
     // Immersive fullscreen: landscape + a playing video (or the vertical

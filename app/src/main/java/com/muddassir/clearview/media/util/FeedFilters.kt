@@ -56,6 +56,10 @@ fun applyFeedFilter(
             FeedContentFilter.ALL -> true
             FeedContentFilter.VIDEOS -> !v.isShort
             FeedContentFilter.SHORTS -> v.isShort
+            FeedContentFilter.LIVE -> v.isLive
+            // The Downloads filter switches the Media tab to the dedicated
+            // Downloads section; the feed list itself never shows here.
+            FeedContentFilter.DOWNLOADS -> false
         }
         val p = progressOf(v.videoId)
         val statusOk = when (filter.watchStatus) {

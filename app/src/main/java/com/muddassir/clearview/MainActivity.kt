@@ -31,6 +31,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.muddassir.clearview.media.download.AudioDownloads
+import com.muddassir.clearview.media.worker.AudioWorkScheduler
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
 import com.muddassir.clearview.quran.worker.QuranWorkScheduler
 import com.muddassir.clearview.ui.BlockTab
@@ -57,6 +59,11 @@ open class MainActivity : ComponentActivity() {
         // Media updates: periodic hourly check for new channel uploads
         // (the worker no-ops while the toggle is off).
         MediaWorkScheduler.ensureScheduled(this)
+
+        // Offline audio downloads: app-wide init (idempotent) + the daily
+        // cleanup worker (expired / orphans / stale .part files).
+        AudioDownloads.initialize(this)
+        AudioWorkScheduler.ensureScheduled(this)
 
         // Use ViewModelProvider (not @Composable viewModel()) since we're in onCreate
         val viewModel = ViewModelProvider(this).get(MainViewModel::class.java)
@@ -147,6 +154,12 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
         else hub.playingVideo = null
     }
 
+    // System back while the offline audio player is open closes it (stops
+    // playback), like the top-bar back arrow.
+    BackHandler(enabled = hub.playingAudio != null) {
+        hub.exitAudio()
+    }
+
     // Immersive fullscreen: landscape + (video player OR live tab), or the
     // vertical Shorts-style fullscreen, hides the system bars; portrait
     // restores them. Playback is never restarted because the activity doesn't
@@ -207,7 +220,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
             }
         },
         bottomBar = {
-            if (hub.playingVideo == null && !isFullscreen) {
+            if (hub.playingVideo == null && hub.playingAudio == null && !isFullscreen) {
                 NavigationBar {
                     contentHubNavItems().forEach { item ->
                         NavigationBarItem(
