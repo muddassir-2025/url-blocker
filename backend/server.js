@@ -342,6 +342,13 @@ function verifyPotWiring() {
     if (ytDlpProbeStarted) return;
     ytDlpProbeStarted = true;
 
+    // Log the exact command so the Render logs prove which args reached
+    // yt-dlp — both --extractor-args flags must be present.
+    console.log(
+      `[pot] boot check: running: ${BIN_PATH} --plugin-dirs ${PLUGINS_DIR} --no-warnings --no-check-certificates --no-update --socket-timeout 20 ` +
+      `--extractor-args "youtube:player_client=web,web_embedded" --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}" --print title -v ${probeUrl}`
+    );
+
     const before = potActivity;
     execFile(
     BIN_PATH,
@@ -396,6 +403,17 @@ function verifyPotWiring() {
       }
       if (err && !tokenRetrieved) {
         console.warn(`[pot] boot check: the probe extraction itself failed (${String(err.message || err).slice(0, 120)})`);
+      }
+      // When the probe did NOT use the HTTP provider, dump its verbose output
+      // tail — the decisive evidence for WHY (e.g. HTTP 403 on the webpage,
+      // plugin "Error reaching GET .../ping", "failed to get token", or a
+      // "Sign in to confirm you're not a bot" page from the datacenter IP).
+      if (!httpProviderUsed || err) {
+        const probeLines = String(out).trim().split(/\r?\n/).filter(Boolean);
+        console.log(`[pot] boot check: yt-dlp probe output tail (last ${Math.min(15, probeLines.length)} of ${probeLines.length} lines):`);
+        for (const line of probeLines.slice(-15)) {
+          console.log(`[pot]   | ${line.slice(0, 220)}`);
+        }
       }
     }
   );

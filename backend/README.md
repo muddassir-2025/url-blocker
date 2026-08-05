@@ -110,6 +110,12 @@ end-to-end`. Two log patterns are easy to misread:
 - `direct /get_pot probe -> HTTP 200 in Ns`: if `N > 20`, real downloads will
   fail anyway — the bgutil plugin's own solve timeout is 20 s, so a slow solve
   means yt-dlp runs without a token and gets bot-blocked.
+- If the verdict says `bgutil HTTP provider loaded but NO token generation was
+  observed`, the boot check dumps the yt-dlp probe's output tail. That dump is
+  the decisive clue: look for `Error reaching GET .../ping` (plugin can't reach
+  the provider), `HTTP Error 403` / `Sign in to confirm you're not a bot`
+  (YouTube blocking the requests before a token was attached), or
+  `failed to get token` (solve too slow).
 
 ### Setting up cookies (optional, on top of the PO token)
 
