@@ -107,8 +107,14 @@ let potReady = false;
 const SERVER_START = Date.now();
 const STARTUP_WINDOW_MS = 180 * 1000;
 const RESTART_WINDOW_MS = 60 * 1000;
+// Boot check runs AFTER the provider is ready: direct /get_pot probe (cold
+// solve, up to 45 s) + yt-dlp probe (up to 60 s). Until it finishes, the
+// provider may not yet have a warm minter under the key real requests use, so
+// requests are 503-gated for this window too (time-capped like the others).
+const BOOT_WINDOW_MS = 240 * 1000;
 let potEverReady = false;
 let potDownAt = null;
+let potBootCheckDone = false;
 const PROVIDER_BUILT = fs.existsSync(
   path.join(__dirname, 'pot-provider', 'server', 'build', 'main.js')
 );
@@ -264,6 +270,9 @@ function verifyPotWiring() {
   // NOTE: the plugin's own solve timeout is 20 s — if the probe 200s in, say,
   // 25–45 s, real requests will still fail. The logged duration makes the
   // verdict interpretable ("200 in 2 s" = fine; "200 in 38 s" = too slow).
+  // Guard: runYtDlpProbe (declared below) must run exactly once, after this
+  // probe has completed (or failed/timeout) — never concurrently with it.
+  let ytDlpProbeStarted = false;
   const probeStartedAt = Date.now();
   const getPotProbe = http.request(
     {
@@ -285,8 +294,13 @@ function verifyPotWiring() {
           // a token and run WITHOUT one (then get bot-blocked on datacenter IPs),
           // so a slow-but-successful solve here still means broken downloads.
           if (ms / 1000 > 20) {
+            // The cold BotGuard solve is a one-time cost: the provider caches
+            // the solved session (minter) for ~12h, and this probe IS the
+            // warmup, so later /get_pot calls mint tokens fast. The warning
+            // still matters — while this solve was running, any concurrent
+            // request would have hit the plugin's 20s timeout.
             console.warn(
-              `[pot] direct /get_pot probe -> HTTP 200 in ${(ms / 1000).toFixed(1)}s — TOO SLOW: the plugin's solve timeout is 20s, real requests will fail to get a token`
+              `[pot] direct /get_pot probe -> HTTP 200 in ${(ms / 1000).toFixed(1)}s — cold solve exceeded the plugin's 20s timeout; this probe WARMS the provider, so later token requests should be fast (see the yt-dlp probe verdicts below)`
             );
           } else {
             console.log(
@@ -298,24 +312,38 @@ function verifyPotWiring() {
             `[pot] direct /get_pot probe -> HTTP ${res.statusCode} after ${(ms / 1000).toFixed(1)}s — ${String(body).slice(0, 200)} (provider solve is the suspect)`
           );
         }
+        runYtDlpProbe();
       });
     }
   );
-  getPotProbe.on('error', (e) =>
-    console.warn(`[pot] direct /get_pot probe FAILED: ${e.message}`)
-  );
+  getPotProbe.on('error', (e) => {
+    // Probe failed, but the provider may still serve real requests — run the
+    // yt-dlp probe anyway; its own verdicts show what actually happens.
+    console.warn(`[pot] direct /get_pot probe FAILED: ${e.message}`);
+    runYtDlpProbe();
+  });
   getPotProbe.setTimeout(45000, () => {
     getPotProbe.destroy();
     console.warn('[pot] direct /get_pot probe timed out after 45s');
+    runYtDlpProbe();
   });
   getPotProbe.write('{}');
   getPotProbe.end();
 
   // 4) Full extraction through the plugin, then report whether the provider
   //    actually generated a token during it (potActivity delta). This turns
-  //    the boot log into a complete end-to-end verdict.
-  const before = potActivity;
-  execFile(
+  //    the boot log into a complete end-to-end verdict. It runs only AFTER the
+  //    /get_pot probe above has finished (runYtDlpProbe) so that (a) it benefits
+  //    from the probe's warm minter, and (b) the potActivity delta is
+  //    unambiguous — the probe's own token generation can no longer be counted
+  //    as the yt-dlp run's (they used to run concurrently, which made the
+  //    verdict unreliable).
+  function runYtDlpProbe() {
+    if (ytDlpProbeStarted) return;
+    ytDlpProbeStarted = true;
+
+    const before = potActivity;
+    execFile(
     BIN_PATH,
     [
       '--plugin-dirs', PLUGINS_DIR,
@@ -335,6 +363,9 @@ function verifyPotWiring() {
     ],
     { timeout: 60000, encoding: 'utf8' },
     (err, stdout, stderr) => {
+      // Set first so a stray exception in the verdict code below can never leave
+      // the 503 boot-window gate closed past its time cap.
+      potBootCheckDone = true;
       const out = `${stdout || ''}\n${stderr || ''}`;
       const potLines = potActivity - before;
       // The HTTP provider is genuinely used only when it logs a token
@@ -363,14 +394,21 @@ function verifyPotWiring() {
       if (tokenRetrieved) {
         console.log('[pot] boot check: yt-dlp RETRIEVED at least one PO token from the provider');
       }
+      if (err && !tokenRetrieved) {
+        console.warn(`[pot] boot check: the probe extraction itself failed (${String(err.message || err).slice(0, 120)})`);
+      }
     }
   );
+  }
 }
 
 async function runBootCheck() {
   const ready = await waitForPotReady(90 * 1000);
   if (!ready) {
     console.warn('[pot] boot check skipped: provider did not become ready within 90 s');
+    // Open the request gate so users aren't 503'd for the whole boot window on
+    // top of the startup window when there is no provider to warm anyway.
+    potBootCheckDone = true;
     return;
   }
   verifyPotWiring();
@@ -699,6 +737,14 @@ app.get('/api/audio', async (req, res) => {
   const inRestartWindow = potEverReady && potDownAt !== null && Date.now() - potDownAt < RESTART_WINDOW_MS;
   if (PROVIDER_BUILT && !potReady && (inStartupWindow || inRestartWindow)) {
     return res.status(503).json({ error: 'Audio service is warming up — retry in a moment' });
+  }
+  // Provider is up, but the boot check hasn't finished yet: its yt-dlp probe is
+  // what warms the provider's minter under the SAME cache key real requests
+  // use. A request now could pay the slow cold BotGuard solve (20-40 s on
+  // Render) and hit the plugin's hardcoded 20 s solve timeout — 503 instead.
+  const inBootCheckWindow = !potBootCheckDone && Date.now() - SERVER_START < BOOT_WINDOW_MS;
+  if (PROVIDER_BUILT && inBootCheckWindow) {
+    return res.status(503).json({ error: 'Audio service is warming up — PO-token boot check in progress, retry in a moment' });
   }
 
   if (activeStreams >= MAX_CONCURRENT) {
