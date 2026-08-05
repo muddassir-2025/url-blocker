@@ -4,6 +4,7 @@ import android.text.format.DateUtils
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -12,6 +13,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -471,7 +474,6 @@ fun MediaTab(
                                             AudioDownloads.download(video, AudioDownloads.sourceFor(video))
                                         },
                                         onCancelDownload = { AudioDownloads.cancel(video.videoId) },
-                                        onPlayOffline = { onPlayOffline(video) },
                                         onDeleteDownload = { AudioDownloads.delete(video.videoId) },
                                         onToggleBookmark = {
                                             libraryStore.toggleBookmark(video)
@@ -511,7 +513,6 @@ fun MediaTab(
                                     AudioDownloads.download(video, AudioDownloads.sourceFor(video))
                                 },
                                 onCancelDownload = { AudioDownloads.cancel(video.videoId) },
-                                onPlayOffline = { onPlayOffline(video) },
                                 onDeleteDownload = { AudioDownloads.delete(video.videoId) },
                                 onToggleBookmark = {
                                     libraryStore.toggleBookmark(video)
@@ -818,7 +819,6 @@ private fun ShortCard(
     onClick: () -> Unit,
     onDownload: () -> Unit,
     onCancelDownload: () -> Unit,
-    onPlayOffline: () -> Unit,
     onDeleteDownload: () -> Unit,
     onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
@@ -886,7 +886,7 @@ private fun ShortCard(
                         )
                     }
                 }
-            } else if (fraction != null && fraction > 0.02f && !live) {
+            } else if (downloadStatus == null && fraction != null && fraction > 0.02f && !live) {
                 Surface(
                     modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
                     shape = RoundedCornerShape(5.dp),
@@ -929,27 +929,20 @@ private fun ShortCard(
                 onHide = onHide,
                 onRemoveManual = onRemoveManual
             )
-            // Bottom-end stack: download action + status pills + duration pill.
+            // Download progress: an animated bar pinned to the bottom of the
+            // thumbnail while the audio downloads (pulsing while the server
+            // prepares, a real % once bytes flow, red if it failed — the ⋮
+            // menu then offers Retry). The download icon itself lives in the
+            // ⋮ menu and the video player's control panel.
+            downloadStatus?.let { status ->
+                DownloadProgressOverlay(status, Modifier.align(Alignment.BottomStart))
+            }
+            // Bottom-end stack: status pills + duration pill.
             Column(
                 modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                if (!video.isLive) {
-                    DownloadCardAction(
-                        status = downloadStatus,
-                        isOffline = isOffline,
-                        onClick = {
-                            when {
-                                isOffline -> onPlayOffline()
-                                downloadStatus == null -> onDownload()
-                                downloadStatus is DownloadStatus.Preparing ||
-                                    downloadStatus is DownloadStatus.Downloading -> onCancelDownload()
-                                else -> onDownload() // failed → retry
-                            }
-                        }
-                    )
-                }
                 if (isOffline) {
                     Surface(
                         shape = RoundedCornerShape(5.dp),
@@ -1025,7 +1018,6 @@ private fun LongVideoCard(
     onClick: () -> Unit,
     onDownload: () -> Unit,
     onCancelDownload: () -> Unit,
-    onPlayOffline: () -> Unit,
     onDeleteDownload: () -> Unit,
     onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
@@ -1103,56 +1095,46 @@ private fun LongVideoCard(
                     onHide = onHide,
                     onRemoveManual = onRemoveManual
                 )
-                // Bottom-end stack: download action + status pills + duration
-                // pill. Everything sits above the watch-progress bar.
-                Column(
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
-                    horizontalAlignment = Alignment.End,
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    if (!video.isLive) {
-                        DownloadCardAction(
-                            status = downloadStatus,
-                            isOffline = isOffline,
-                            onClick = {
-                                when {
-                                    isOffline -> onPlayOffline()
-                                    downloadStatus == null -> onDownload()
-                                    downloadStatus is DownloadStatus.Preparing ||
-                                        downloadStatus is DownloadStatus.Downloading -> onCancelDownload()
-                                    else -> onDownload() // failed → retry
-                                }
-                            }
+            // Download progress: an animated bar pinned to the bottom of the
+            // thumbnail while the audio downloads (see ShortCard for details).
+            downloadStatus?.let { status ->
+                DownloadProgressOverlay(status, Modifier.align(Alignment.BottomStart))
+            }
+            // Bottom-end stack: status pills + duration pill. Everything sits
+            // above the watch-progress bar.
+            Column(
+                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (isOffline) {
+                    Surface(
+                        shape = RoundedCornerShape(5.dp),
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+                    ) {
+                        Text(
+                            text = "Offline",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                         )
                     }
-                    if (isOffline) {
-                        Surface(
-                            shape = RoundedCornerShape(5.dp),
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
-                        ) {
-                            Text(
-                                text = "Offline",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                            )
-                        }
-                    }
-                    if (isManual) {
-                        Surface(
-                            shape = RoundedCornerShape(5.dp),
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
-                        ) {
-                            Text(
-                                text = "Manually added",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                            )
-                        }
-                    }
-                    DurationBadge(seconds = video.durationSeconds)
                 }
+                if (isManual) {
+                    Surface(
+                        shape = RoundedCornerShape(5.dp),
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+                    ) {
+                        Text(
+                            text = "Manually added",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                        )
+                    }
+                }
+                DurationBadge(seconds = video.durationSeconds)
+            }
                 if (watched) {
                     // Watched badge (the dim is already applied above).
                     Surface(
@@ -1180,7 +1162,7 @@ private fun LongVideoCard(
                             )
                         }
                     }
-                } else if (fraction != null && fraction > 0.02f && !live) {
+                } else if (downloadStatus == null && fraction != null && fraction > 0.02f && !live) {
                     // In-progress: YouTube-style thin progress bar + a small
                     // "NN%" pill (top-right) so the watched amount is visible
                     // at a glance.
@@ -1796,6 +1778,88 @@ private fun formatClock(seconds: Long): String {
     val m = (s % 3600) / 60
     val sec = s % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%02d:%02d".format(m, sec)
+}
+
+/**
+ * The animated download bar pinned to the bottom of a feed-card thumbnail.
+ * Replaces the old corner download icon: while the audio is being fetched the
+ * bar sweeps (Preparing — the server may be cold-starting), then fills with
+ * real progress once bytes flow (Downloading), and turns red if it failed
+ * (the ⋮ menu then offers "Retry download").
+ */
+@Composable
+private fun DownloadProgressOverlay(
+    status: DownloadStatus,
+    modifier: Modifier = Modifier
+) {
+    when (status) {
+        is DownloadStatus.Preparing -> DownloadSweepBar(modifier)
+        is DownloadStatus.Downloading -> {
+            if (status.progress >= 0f) {
+                // Smoothly filled as bytes land.
+                val animated by animateFloatAsState(
+                    targetValue = status.progress.coerceIn(0f, 1f),
+                    animationSpec = tween(400),
+                    label = "download-progress"
+                )
+                Box(
+                    modifier = modifier
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .background(Color.Black.copy(alpha = 0.5f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(animated)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
+            } else {
+                // Total size unknown yet — sweep instead of looking stuck.
+                DownloadSweepBar(modifier)
+            }
+        }
+        is DownloadStatus.Error -> {
+            // Failed: a static red bar signals the download didn't complete.
+            Box(
+                modifier = modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .background(MaterialTheme.colorScheme.error)
+            )
+        }
+    }
+}
+
+/** A pulsing bar that sweeps across the thumbnail (Preparing / unknown size). */
+@Composable
+private fun DownloadSweepBar(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "download-sweep")
+    val sweep by transition.animateFloat(
+        initialValue = -1f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "download-sweep-offset"
+    )
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .background(Color.Black.copy(alpha = 0.5f))
+    ) {
+        val bar = maxWidth * 0.35f
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(bar)
+                .offset(x = (maxWidth + bar) * sweep - bar)
+                .background(MaterialTheme.colorScheme.primary)
+        )
+    }
 }
 
 /**

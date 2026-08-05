@@ -72,8 +72,12 @@ object AudioDownloader {
                     )
                 }
                 if (status != HttpURLConnection.HTTP_OK) {
+                    // 5xx (e.g. the backend's "could not fetch audio" while
+                    // YouTube is being finicky) are often transient — retry
+                    // them automatically instead of failing on first try.
                     throw DownloadException(
-                        readError(conn.errorStream) ?: "Server error ($status)"
+                        readError(conn.errorStream) ?: "Server error ($status)",
+                        retryable = status >= 500
                     )
                 }
                 val total = conn.contentLengthLong
