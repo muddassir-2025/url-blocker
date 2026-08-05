@@ -12,8 +12,12 @@
  *      audio-only format (M4A preferred, then Opus/WebM — highest bitrate).
  *      The binary is fetched at BUILD time (scripts/fetch-ytdlp.js, run by
  *      `npm install`), so a request never waits on a lazy binary download.
- *      It retries a few bot-resistant client chains (mobile innertube clients
- *      first) and passes cookies when COOKIES_B64 / cookies.txt is present.
+ *      It retries a few bot-resistant client chains — MOBILE innertube clients
+ *      first (android_vr / android / ios / web_safari: direct signed URLs, no
+ *      PO token needed — yt-dlp's own default client set since 2026.07.04),
+ *      then the `web` client with a PO token from the bundled provider (for
+ *      videos mobile clients refuse), then the default chain — and passes
+ *      cookies when COOKIES_B64 / cookies.txt is present.
  *   2. The chosen format's direct URL is piped back to the client with
  *      Content-Type / Content-Length when known.
  *   3. If every yt-dlp client fails, the server falls back to
@@ -114,7 +118,10 @@ const RESTART_WINDOW_MS = 60 * 1000;
 // NOTE: the plugin's solve timeout is patched to 45 s at build time
 // (scripts/fetch-pot-provider.js), which is what makes 20-45 s cold solves
 // survivable for real yt-dlp requests.
-const BOOT_WINDOW_MS = 240 * 1000;
+// Two sequential yt-dlp probes (mobile + web+PO) after the /get_pot probe:
+// worst case ≈ 90 s ready-wait + 45 s /get_pot + 60 s + 60 s probes ≈ 255 s,
+// so the gate stays aligned at ~280 s. It self-opens regardless (time cap).
+const BOOT_WINDOW_MS = 280 * 1000;
 let potEverReady = false;
 let potDownAt = null;
 let potBootCheckDone = false;
@@ -334,96 +341,127 @@ function verifyPotWiring() {
   getPotProbe.write('{}');
   getPotProbe.end();
 
-  // 4) Full extraction through the plugin, then report whether the provider
-  //    actually generated a token during it (potActivity delta). This turns
-  //    the boot log into a complete end-to-end verdict. It runs only AFTER the
-  //    /get_pot probe above has finished (runYtDlpProbe) so that (a) it benefits
-  //    from the probe's warm minter, and (b) the potActivity delta is
-  //    unambiguous — the probe's own token generation can no longer be counted
-  //    as the yt-dlp run's (they used to run concurrently, which made the
-  //    verdict unreliable).
+  // 4) Two yt-dlp extraction probes, run SEQUENTIALLY after the /get_pot probe
+  //    above (runYtDlpProbe) so they benefit from its warm minter and the
+  //    potActivity delta is unambiguous.
+  //    Probe A — the PRIMARY chain (mobile innertube clients): what real
+  //      requests try first. Needs NO PO token; if this succeeds, downloads
+  //      work regardless of the provider. Verdict = "mobile chain OK".
+  //    Probe B — the FALLBACK web + PO-token chain: verifies the bgutil
+  //      provider is wired end-to-end (plugin loads, provider is asked for a
+  //      player/gvs token, token is attached).
   function runYtDlpProbe() {
     if (ytDlpProbeStarted) return;
     ytDlpProbeStarted = true;
 
-    // Log the exact command so the Render logs prove which args reached
-    // yt-dlp — both extractor-args flags must be present (player_client+
-    // fetch_pot in the youtube: flag, base_url in the plugin flag).
-    console.log(
-      `[pot] boot check: running: ${BIN_PATH} --plugin-dirs ${PLUGINS_DIR} --no-warnings --no-check-certificates --no-update --socket-timeout 20 ` +
-      `--extractor-args "youtube:player_client=web,web_embedded;fetch_pot=always" --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}" --print title -v ${probeUrl}`
+    const MOBILE_ARGS = 'youtube:player_client=android_vr,android,ios,web_safari,web_music';
+
+    // ---- Probe A: PRIMARY mobile chain (no plugin, no provider needed) ----
+    console.log(`[pot] boot check: probe A (PRIMARY mobile chain): ${BIN_PATH} --no-warnings --no-check-certificates --no-update --socket-timeout 20 --extractor-args "${MOBILE_ARGS}" --print title ${probeUrl}`);
+    execFile(
+      BIN_PATH,
+      [
+        '--no-warnings', '--no-check-certificates', '--no-update',
+        '--socket-timeout', '20',
+        '--extractor-args', MOBILE_ARGS,
+        '--print', 'title',
+        probeUrl,
+      ],
+      { timeout: 60000, encoding: 'utf8' },
+      (errA, stdoutA) => {
+        const titleA = String(stdoutA || '').trim();
+        if (!errA && titleA) {
+          console.log(`[pot] boot check: PRIMARY mobile chain extraction OK — "${titleA.slice(0, 60)}" (direct URLs, no PO token needed)`);
+        } else {
+          console.warn(
+            `[pot] boot check: PRIMARY mobile chain extraction FAILED (${String(errA && errA.message || 'no title').slice(0, 120)}) — real requests will fall back to the web+PO chain`
+          );
+        }
+        runWebPoProbe();
+      }
     );
 
-    const before = potActivity;
-    execFile(
-    BIN_PATH,
-    [
-      '--plugin-dirs', PLUGINS_DIR,
-      '--no-warnings', '--no-check-certificates', '--no-update',
-      '--socket-timeout', '20',
-      // IMPORTANT: keep the plugin base_url in its OWN flag (different
-      // extractor key: youtubepot-bgutilhttp:). player_client + fetch_pot must
-      // share the youtube: flag (joined with ';') — a separate second
-      // `youtube:` flag would silently override player_client (only the last
-      // flag per extractor key survives), and a single flag mixing
-      // "youtube:...;youtubepot-bgutilhttp:..." swallows the base_url
-      // (yt-dlp parses ';' within one extractor key only; verified against
-      // yt-dlp 2026.07.04 + plugin 1.3.1).
-      '--extractor-args', 'youtube:player_client=web,web_embedded;fetch_pot=always',
-      '--extractor-args', `youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
-      '--print', 'title',
-      '-v',
-      probeUrl,
-    ],
-    { timeout: 60000, encoding: 'utf8' },
-    (err, stdout, stderr) => {
-      // Set first so a stray exception in the verdict code below can never leave
-      // the 503 boot-window gate closed past its time cap.
-      potBootCheckDone = true;
-      const out = `${stdout || ''}\n${stderr || ''}`;
-      const potLines = potActivity - before;
-      // The HTTP provider is genuinely used only when it logs a token
-      // generation line. The script-node / script-deno "Script path doesn't
-      // exist" lines are EXPECTED noise from yt-dlp's availability checks and
-      // appear even in fully working runs — they do NOT mean the HTTP provider
-      // was skipped.
-      const httpProviderUsed = /\[pot:bgutil:http\]\s+Generating a .*PO Token for/.test(out);
-      const tokenRetrieved = /Retrieved a .*PO Token/.test(out);
-      if (httpProviderUsed) {
-        console.log('[pot] boot check: bgutil HTTP provider WAS USED to generate PO tokens');
-      } else if (/bgutil:http/.test(out)) {
-        // NB: the plugin's registration line ("PO Token Providers: bgutil:http-1.3.1
-        // (external), ...") always contains bgutil:http, so this branch means the
-        // plugin loaded but no token generation was observed (e.g. the extraction
-        // failed before a token was requested) — not that it was skipped.
-        console.warn('[pot] boot check: bgutil HTTP provider loaded but NO token generation was observed during the probe');
-      } else {
-        console.warn('[pot] boot check: bgutil NOT detected in yt-dlp verbose output — PO tokens will not be attached');
-      }
+    // ---- Probe B: FALLBACK web + PO-token chain (validates the provider) ----
+    function runWebPoProbe() {
+      // Log the exact command so the Render logs prove which args reached
+      // yt-dlp — both extractor-args flags must be present (player_client+
+      // fetch_pot in the youtube: flag, base_url in the plugin flag).
       console.log(
-        potLines > 0
-          ? `[pot] boot check: provider GENERATED ${potLines} token generation(s) during the probe — PO pipeline works end-to-end`
-          : '[pot] boot check: provider saw NO token request during the probe — the plugin did not reach it (or the token was served from the provider cache)'
+        `[pot] boot check: probe B (FALLBACK web+PO chain): ${BIN_PATH} --plugin-dirs ${PLUGINS_DIR} --no-warnings --no-check-certificates --no-update --socket-timeout 20 ` +
+        `--extractor-args "youtube:player_client=web,web_embedded;fetch_pot=always" --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}" --print title -v ${probeUrl}`
       );
-      if (tokenRetrieved) {
-        console.log('[pot] boot check: yt-dlp RETRIEVED at least one PO token from the provider');
-      }
-      if (err && !tokenRetrieved) {
-        console.warn(`[pot] boot check: the probe extraction itself failed (${String(err.message || err).slice(0, 120)})`);
-      }
-      // When the probe did NOT use the HTTP provider, dump its verbose output
-      // tail — the decisive evidence for WHY (e.g. HTTP 403 on the webpage,
-      // plugin "Error reaching GET .../ping", "failed to get token", or a
-      // "Sign in to confirm you're not a bot" page from the datacenter IP).
-      if (!httpProviderUsed || err) {
-        const probeLines = String(out).trim().split(/\r?\n/).filter(Boolean);
-        console.log(`[pot] boot check: yt-dlp probe output tail (last ${Math.min(15, probeLines.length)} of ${probeLines.length} lines):`);
-        for (const line of probeLines.slice(-15)) {
-          console.log(`[pot]   | ${line.slice(0, 220)}`);
+
+      const before = potActivity;
+      execFile(
+        BIN_PATH,
+        [
+          '--plugin-dirs', PLUGINS_DIR,
+          '--no-warnings', '--no-check-certificates', '--no-update',
+          '--socket-timeout', '20',
+          // IMPORTANT: keep the plugin base_url in its OWN flag (different
+          // extractor key: youtubepot-bgutilhttp:). player_client + fetch_pot must
+          // share the youtube: flag (joined with ';') — a separate second
+          // `youtube:` flag would silently override player_client (only the last
+          // flag per extractor key survives), and a single flag mixing
+          // "youtube:...;youtubepot-bgutilhttp:..." swallows the base_url
+          // (yt-dlp parses ';' within one extractor key only; verified against
+          // yt-dlp 2026.07.04 + plugin 1.3.1).
+          '--extractor-args', 'youtube:player_client=web,web_embedded;fetch_pot=always',
+          '--extractor-args', `youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
+          '--print', 'title',
+          '-v',
+          probeUrl,
+        ],
+        { timeout: 60000, encoding: 'utf8' },
+        (err, stdout, stderr) => {
+          // Set first so a stray exception in the verdict code below can never
+          // leave the 503 boot-window gate closed past its time cap.
+          potBootCheckDone = true;
+          const out = `${stdout || ''}\n${stderr || ''}`;
+          const potLines = potActivity - before;
+          // The HTTP provider is genuinely used only when it logs a token
+          // generation line. The script-node / script-deno "Script path doesn't
+          // exist" lines are EXPECTED noise from yt-dlp's availability checks and
+          // appear even in fully working runs — they do NOT mean the HTTP provider
+          // was skipped.
+          const httpProviderUsed = /\[pot:bgutil:http\]\s+Generating a .*PO Token for/.test(out);
+          const tokenRetrieved = /Retrieved a .*PO Token/.test(out);
+          if (httpProviderUsed) {
+            console.log('[pot] boot check: bgutil HTTP provider WAS USED to generate PO tokens');
+          } else if (/bgutil:http/.test(out)) {
+            // NB: the plugin's registration line ("PO Token Providers: bgutil:http-1.3.1
+            // (external), ...") always contains bgutil:http, so this branch means the
+            // plugin loaded but no token generation was observed (e.g. the extraction
+            // failed before a token was requested) — not that it was skipped.
+            console.warn('[pot] boot check: bgutil HTTP provider loaded but NO token generation was observed during the probe');
+          } else {
+            console.warn('[pot] boot check: bgutil NOT detected in yt-dlp verbose output — PO tokens will not be attached');
+          }
+          console.log(
+            potLines > 0
+              ? `[pot] boot check: provider GENERATED ${potLines} token generation(s) during the probe — PO pipeline works end-to-end`
+              : '[pot] boot check: provider saw NO token request during the probe — the plugin did not reach it (or the token was served from the provider cache)'
+          );
+          if (tokenRetrieved) {
+            console.log('[pot] boot check: yt-dlp RETRIEVED at least one PO token from the provider');
+          }
+          if (err && !tokenRetrieved) {
+            console.warn(`[pot] boot check: the probe extraction itself failed (${String(err.message || err).slice(0, 120)})`);
+          }
+          // When the probe did NOT use the HTTP provider, dump its verbose output
+          // tail — the decisive evidence for WHY (e.g. HTTP 403 on the webpage,
+          // plugin "Error reaching GET .../ping", "failed to get token", or a
+          // "Sign in to confirm you're not a bot" page from the datacenter IP).
+          if (!httpProviderUsed || err) {
+            const probeLines = String(out).trim().split(/\r?\n/).filter(Boolean);
+            console.log(`[pot] boot check: yt-dlp probe output tail (last ${Math.min(15, probeLines.length)} of ${probeLines.length} lines):`);
+            for (const line of probeLines.slice(-15)) {
+              console.log(`[pot]   | ${line.slice(0, 220)}`);
+            }
+          }
         }
-      }
+      );
     }
-  );
   }
 }
 
@@ -555,35 +593,41 @@ function pipeDirect(url, videoId, ext, size, req, res, source) {
 
 // Client strategies. On datacenter IPs YouTube bot-blocks the plain `web`
 // client ("Sign in to confirm you're not a bot"), so:
-//   - WITH the PO-token provider: the `web` client + BotGuard token goes
-//     first — this is the combination that works from flagged IPs.
+//   - MOBILE innertube clients (android_vr / android / ios / web_safari) go
+//     FIRST: they return direct signed googlevideo URLs with NO PO token
+//     needed, and are far less bot-flagged than the web clients. This is also
+//     yt-dlp's own default client set (2026.07.04: ('android_vr',
+//     'web_safari')) — the maintainers abandoned web/web_embedded as defaults.
+//     Verified locally: format 140 (m4a) from android_vr streams HTTP 200.
+//   - The `web` + PO-token chain is the FALLBACK for videos mobile clients
+//     refuse (age-gated, etc.). NB: even a valid PO token does NOT unblock the
+//     web clients on hard-flagged datacenter IPs (player response still
+//     LOGIN_REQUIRED) — so web-first would waste 30-60 s per request there.
 //   - Else WITH cookies: the yt-dlp default (which uses the cookies) first.
-//   - Otherwise: mobile innertube clients (android_vr / android / ios) first.
 // Each entry is tried until one returns a playable URL.
 function clientChains() {
   if (potReady) {
     return [
-      // web + web_embedded with the PO token — the combo that beats the
-      // datacenter-IP bot check (plain `web` alone returns unplayable formats).
-      //
-      // fetch_pot=always is REQUIRED, not optional: it forces yt-dlp to mint a
-      // PLAYER PO token and attach it to the player API request itself
-      // (serviceIntegrityDimensions.poToken), BEFORE the request is sent.
-      // Without it, yt-dlp only fetches the GVS token lazily AFTER a successful
-      // player response — but from a flagged datacenter IP the tokenless player
-      // request is bot-blocked (HTTP 403 / LOGIN_REQUIRED / "Sign in to confirm
-      // you're not a bot"), so formats are never processed and the provider is
-      // NEVER asked for a token ("provider saw NO token request during the
-      // probe"). Verified end-to-end on yt-dlp 2026.07.04 + plugin 1.3.1: with
-      // fetch_pot=always the provider is asked for player + gvs tokens and
-      // extraction succeeds.
-      //
+      // PRIMARY: mobile innertube clients — direct URLs, no PO token, no
+      // provider round-trip. fetch_pot is intentionally NOT set here: these
+      // clients aren't in the plugin's WEBPO_CLIENTS, so a token fetch would
+      // just add latency for nothing.
+      'youtube:player_client=android_vr,android,ios,web_safari,web_music',
+      // FALLBACK: web + web_embedded with the PO token — for videos the mobile
+      // clients refuse. fetch_pot=always is REQUIRED, not optional: it forces
+      // yt-dlp to mint a PLAYER PO token and attach it to the player API
+      // request itself (serviceIntegrityDimensions.poToken), BEFORE the request
+      // is sent. Without it, yt-dlp only fetches the GVS token lazily AFTER a
+      // successful player response — so if the tokenless player request is
+      // bot-blocked, formats are never processed and the provider is NEVER
+      // asked for a token. Verified end-to-end on yt-dlp 2026.07.04 + plugin
+      // 1.3.1: with fetch_pot=always the provider is asked for player + gvs
+      // tokens and extraction succeeds.
       // NB: player_client and fetch_pot must live in the SAME youtube: flag
       // (separated by ';') — a second `youtube:` --extractor-args flag would
       // OVERRIDE the first (only the last flag per extractor key survives).
       'youtube:player_client=web,web_embedded;fetch_pot=always',
       'youtube:player_client=default,-web',
-      'youtube:player_client=android_vr,android,ios,web_safari,web_music',
     ];
   }
   if (cookiesPath) {
@@ -616,8 +660,13 @@ async function streamWithYtDlp(url, videoId, req, res) {
       socketTimeout: 30,
     };
     if (chain) opts.extractorArgs = chain;
-    if (potReady) {
-      // Load the PO-token plugin and point it at the local provider.
+    // The PO-token plugin is loaded ONLY for the chain that actually uses it
+    // (the web+PO fallback, identified by its fetch_pot=always arg). The
+    // mobile chain (primary) must stay fully provider-independent: it returns
+    // direct URLs with no token, so attaching the plugin/base_url there would
+    // only add startup cost and couple it to the provider's health.
+    const isPoChain = potReady && !!chain && chain.includes('fetch_pot=always');
+    if (isPoChain) {
       opts.pluginDirs = PLUGINS_DIR;
       opts.extractorArgs = [
         ...(Array.isArray(opts.extractorArgs) ? opts.extractorArgs : opts.extractorArgs ? [opts.extractorArgs] : []),
@@ -625,29 +674,30 @@ async function streamWithYtDlp(url, videoId, req, res) {
       ];
       // NOTE: player_skip=webpage was tried and REVERTED — it reduces token
       // generation (1 vs 2 contexts), risking a tokenless player request.
-      // IMPORTANT: do NOT attach the account cookies on the PO chains — this
-      // account is challenged from datacenter IPs ("Sign in to confirm you're
-      // not a bot"), and the pure PO-token path is the documented bgutil flow.
-      // Cookies stay on the non-PO fallback chains below.
-    } else if (cookiesPath) {
-      opts.cookies = cookiesPath;
+      // This account is challenged from datacenter IPs ("Sign in to confirm
+      // you're not a bot"), and the pure PO-token path is the documented
+      // bgutil flow — so the PO chain stays cookie-less.
     }
+    // Cookies go on every NON-PO chain (whether or not the provider is up),
+    // e.g. web_safari in the mobile chain supports them.
+    if (cookiesPath && !isPoChain) opts.cookies = cookiesPath;
 
-    // DEBUG instrumentation (temporary, kept minimal): on the first chain we
-    // (a) print the EXACT command line youtube-dl-exec will spawn, and
-    // (b) run yt-dlp with --verbose so its debug output shows whether the
-    //     bgutil PO-token provider is registered, contacted, and returning a
-    //     token (look for "PO Token Providers:", "Getting POT", "Generating POT",
-    //     and the provider's own [pot] lines in the server log).
-    if (idx === 0) {
+    // DEBUG instrumentation (temporary, kept minimal): print the EXACT command
+    // line youtube-dl-exec will spawn for the first chain, and run yt-dlp with
+    // --verbose on the first chain that can involve the PO-token plugin (idx 1
+    // when the provider is up — the web+PO fallback — else idx 0) so its debug
+    // output shows whether the bgutil provider is registered, contacted, and
+    // returning a token (look for "PO Token Providers:", "Getting POT",
+    // "Generating POT", and the provider's own [pot] lines in the server log).
+    if (idx === 0 || (potReady && idx === 1)) {
       try {
         const argv = [url].concat(buildArgs(opts));
         console.log(`[yt-dlp] FULL COMMAND: ${BIN_PATH} ${argv.join(' ')}`);
       } catch (e) {
         console.warn(`[yt-dlp] could not build command line: ${e.message}`);
       }
-      opts.verbose = true;
     }
+    if (potReady ? idx === 1 : idx === 0) opts.verbose = true;
 
     try {
       const info = await ytDlp(url, opts);
