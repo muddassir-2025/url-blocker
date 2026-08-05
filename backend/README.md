@@ -6,9 +6,16 @@ piped straight through to the phone.
 
 - **Primary engine:** [`youtube-dl-exec`](https://www.npmjs.com/package/youtube-dl-exec)
   (yt-dlp). Actively maintained and works against current YouTube.
+- **Bot-detection defense:** YouTube bot-blocks the plain `web` client on
+  datacenter IPs (Render free tier) with *"Sign in to confirm you're not a
+  bot"*. The server automatically retries with the mobile innertube clients
+  (`android_vr` → `android` → `ios` → `web_safari`) before falling back to
+  the default chain — most requests succeed without any setup.
+- **Guaranteed fix:** add signed-in YouTube **cookies** (see below) when even
+  the mobile clients are blocked.
 - **Automatic fallback:** [`@distube/ytdl-core`](https://www.npmjs.com/package/@distube/ytdl-core).
-  If yt-dlp fails because YouTube changed its internals, the server falls back
-  to ytdl-core automatically — no app update needed.
+  If every yt-dlp client fails, the server falls back to ytdl-core — no app
+  update needed.
 - The **yt-dlp binary is downloaded at install time** (`scripts/fetch-ytdlp.js`,
   hooked into `postinstall`) so a request never waits on a lazy binary download.
 
@@ -45,6 +52,10 @@ curl "http://localhost:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%
    - `YTDLP_FORCE=1` — forces the postinstall script to re-download the
      yt-dlp binary even if one already exists (use if a build cache carried
      an older binary over and downloads start failing).
+   - `COOKIES_B64` — base64 of a Netscape-format `cookies.txt` (see below).
+     The server writes it to a temp file at boot and passes it to yt-dlp.
+     This is the **reliable fix** if downloads still say *"Sign in to confirm
+     you're not a bot"* after the client-chain retries.
 5. Deploy. **Important:** after pushing this commit, open the Render dashboard
    and trigger a new deploy (the changed build step must run to fetch the
    yt-dlp binary). Copy the URL (`https://<your-app>.onrender.com`) and paste it
@@ -64,5 +75,24 @@ curl "http://localhost:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%
 - A short in-memory info cache avoids re-fetching video metadata for repeat downloads.
 - If you hit "Could not fetch this audio right now", trigger a **Manual Deploy**
   from the Render dashboard — it re-runs `npm install` and refreshes the yt-dlp
-  binary. Optionally drop an exported `cookies.json` (EditThisCookie format) next
-  to `server.js` for even better reliability.
+  binary.
+
+### Setting up cookies (only needed if downloads are bot-blocked)
+
+1. On your computer (desktop Chrome), install the **"Get cookies.txt LOCALLY"**
+   extension. Open an **incognito window**, go to https://www.youtube.com and
+   **sign in** to your Google account, then click the extension icon and
+   **Export** — save the file (it's in Netscape format).
+2. Convert it to base64 and paste into Render as the `COOKIES_B64` env var:
+
+   ```bash
+   base64 -w0 cookies.txt   # Linux/Mac  → copy the output
+   # Windows PowerShell:
+   # [Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.txt"))
+   ```
+
+3. Render → your service → **Environment** → add `COOKIES_B64` with that value
+   → **Deploy** (env changes restart the service).
+
+   Cookie files expire; re-export and update `COOKIES_B64` when downloads stop
+   working again. Keep the file private — it grants access to your account.
