@@ -5,8 +5,8 @@
   "main": "server.js",
   "private": true,
   "scripts": {
-    "start": "node scripts/fetch-ytdlp.js && node server.js",
-    "postinstall": "node scripts/fetch-ytdlp.js"
+    "start": "node scripts/fetch-ytdlp.js && node scripts/fetch-pot-provider.js && node server.js",
+    "postinstall": "node scripts/fetch-ytdlp.js && node scripts/fetch-pot-provider.js"
   },
   "engines": {
     "node": ">=18"

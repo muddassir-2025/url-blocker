@@ -47,7 +47,9 @@ app.disable('x-powered-by');
 
 const PORT = process.env.PORT || 3000;
 const TOKEN = process.env.AUDIO_TOKEN || '';
-const MAX_CONCURRENT = 3;
+// Kept at 2 to leave headroom for the PO-token provider's BotGuard process
+// on free-tier instances (512 MB).
+const MAX_CONCURRENT = 2;
 const INFO_CACHE_MS = 10 * 60 * 1000;
 
 const UA =
@@ -83,6 +85,94 @@ if (ytDlp === youtubeDl) {
 } else {
   console.log(`[server] using pinned yt-dlp binary at ${BIN_PATH}`);
 }
+
+// ── PO-token provider (bgutil-ytdlp-pot-provider) ─────────────────────────
+// A local HTTP server that solves YouTube's BotGuard attestation on the
+// server's own IP and hands yt-dlp a proof-of-origin (PO) token. This is what
+// unblocks downloads from flagged datacenter IPs ("Sign in to confirm you're
+// not a bot") where even signed-in cookies get challenged. Built at deploy
+// time by scripts/fetch-pot-provider.js; spawned here as a child process.
+const POT_PORT = Number(process.env.POT_PORT || 4416);
+const PLUGINS_DIR = path.join(__dirname, 'plugins');
+let potReady = false;
+
+function startPotProvider() {
+  const main = path.join(__dirname, 'pot-provider', 'server', 'build', 'main.js');
+  if (!fs.existsSync(main)) {
+    console.warn('[pot] provider not built (scripts/fetch-pot-provider.js did not run or failed) — no PO tokens');
+    return;
+  }
+  const { spawn } = require('child_process');
+  const logChild = (prefix, d) => {
+    const line = String(d).trim();
+    if (line) console.log(`${prefix} ${line.slice(0, 300)}`);
+  };
+
+  const MAX_RESTARTS = 5;
+  let restarts = 0;
+
+  const launch = () => {
+    console.log(`[pot] starting provider (${main})`);
+    const child = spawn(process.execPath, [main, '--port', String(POT_PORT)], {
+      cwd: path.dirname(main),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (d) => logChild('[pot]', d));
+    child.stderr.on('data', (d) => logChild('[pot]', d));
+    child.on('error', (e) => {
+      // A failed spawn without a listener would crash the whole server.
+      potReady = false;
+      console.warn(`[pot] provider spawn failed: ${e.message}`);
+    });
+    child.on('exit', (code, signal) => {
+      potReady = false;
+      const willRestart = restarts < MAX_RESTARTS;
+      console.warn(
+        `[pot] provider exited (code ${code}${signal ? ', signal ' + signal : ''})` +
+          (willRestart ? ` — restarting in ${(restarts + 1) * 5}s` : ' — giving up until next boot')
+      );
+      if (willRestart) {
+        restarts++;
+        // Backoff: 5s, 10s, 15s… — covers OOM-kills on free tier.
+        setTimeout(() => {
+          launch();
+          probeUntilReady(60 * 1000);
+        }, restarts * 5000);
+      }
+    });
+  };
+
+  const probeUntilReady = (deadlineMs) => {
+    const deadline = Date.now() + deadlineMs;
+    const tick = () => {
+      const req = http.get({ host: '127.0.0.1', port: POT_PORT, path: '/' }, (res) => {
+        res.resume();
+        if (!potReady) {
+          potReady = true;
+          console.log(`[pot] PO-token provider ready on port ${POT_PORT}`);
+        }
+      });
+      req.on('error', () => {
+        if (Date.now() < deadline) setTimeout(tick, 1000);
+      });
+      req.setTimeout(2000, () => req.destroy());
+    };
+    tick();
+  };
+
+  // Reuse a provider left over from a previous local run; otherwise spawn one.
+  const pre = http.get({ host: '127.0.0.1', port: POT_PORT, path: '/' }, (res) => {
+    res.resume();
+    potReady = true;
+    console.log(`[pot] reusing already-running provider on port ${POT_PORT}`);
+  });
+  pre.on('error', () => {
+    launch();
+    probeUntilReady(60 * 1000);
+  });
+  pre.setTimeout(2000, () => pre.destroy());
+}
+startPotProvider();
 
 // ── YouTube cookies (best defense against bot detection) ─────────────────
 // Priority: COOKIES_B64 env var (base64 of a Netscape-format cookies.txt,
@@ -197,27 +287,40 @@ function pipeDirect(url, videoId, ext, size, req, res, source) {
 
 // ── yt-dlp (primary) ─────────────────────────────────────────────────────
 
-// Client strategies. Without cookies, YouTube bot-blocks the plain `web`
-// client on datacenter IPs ("Sign in to confirm you're not a bot"), so the
-// mobile innertube clients (android_vr / android / ios) go first. WITH
-// cookies (COOKIES_B64 / cookies.txt), the default chain — which actually
-// uses the cookies — is the most reliable, so it moves to the front. Each
-// entry is tried until one returns a playable URL.
-const CLIENT_CHAINS = cookiesPath
-  ? [
+// Client strategies. On datacenter IPs YouTube bot-blocks the plain `web`
+// client ("Sign in to confirm you're not a bot"), so:
+//   - WITH the PO-token provider: the `web` client + BotGuard token goes
+//     first — this is the combination that works from flagged IPs.
+//   - Else WITH cookies: the yt-dlp default (which uses the cookies) first.
+//   - Otherwise: mobile innertube clients (android_vr / android / ios) first.
+// Each entry is tried until one returns a playable URL.
+function clientChains() {
+  if (potReady) {
+    return [
+      // web + web_embedded with the PO token — the combo that beats the
+      // datacenter-IP bot check (plain `web` alone returns unplayable formats).
+      'youtube:player_client=web,web_embedded',
+      'youtube:player_client=default,-web',
+      'youtube:player_client=android_vr,android,ios,web_safari,web_music',
+    ];
+  }
+  if (cookiesPath) {
+    return [
       null, // yt-dlp default (incl. web) — uses the cookies
       'youtube:player_client=default,-web',
       'youtube:player_client=android_vr,android,ios,web_safari,web_music',
-    ]
-  : [
-      'youtube:player_client=android_vr,android,ios,web_safari,web_music',
-      'youtube:player_client=default,-web',
-      null, // yt-dlp default
     ];
+  }
+  return [
+    'youtube:player_client=android_vr,android,ios,web_safari,web_music',
+    'youtube:player_client=default,-web',
+    null, // yt-dlp default
+  ];
+}
 
 async function streamWithYtDlp(url, videoId, req, res) {
   let lastError = null;
-  for (const chain of CLIENT_CHAINS) {
+  for (const chain of clientChains()) {
     const opts = {
       dumpSingleJson: true,
       format: 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
@@ -230,6 +333,14 @@ async function streamWithYtDlp(url, videoId, req, res) {
       socketTimeout: 30,
     };
     if (chain) opts.extractorArgs = chain;
+    if (potReady) {
+      // Load the PO-token plugin and point it at the local provider.
+      opts.pluginDirs = PLUGINS_DIR;
+      opts.extractorArgs = [
+        ...(Array.isArray(opts.extractorArgs) ? opts.extractorArgs : opts.extractorArgs ? [opts.extractorArgs] : []),
+        `youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
+      ];
+    }
     if (cookiesPath) opts.cookies = cookiesPath;
     try {
       const info = await ytDlp(url, opts);

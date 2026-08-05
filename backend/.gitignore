@@ -1,5 +1,7 @@
 node_modules/
 bin/
+pot-provider/
+plugins/
 cookies.json
 cookies.txt
 *.log
