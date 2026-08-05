@@ -5,7 +5,8 @@
   "main": "server.js",
   "private": true,
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "node scripts/fetch-ytdlp.js"
   },
   "engines": {
     "node": ">=18"

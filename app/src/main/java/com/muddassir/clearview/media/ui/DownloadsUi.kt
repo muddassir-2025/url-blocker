@@ -23,13 +23,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -174,7 +171,7 @@ fun DownloadsSection(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "No downloads yet.\nTap the download button on any video to save its audio offline.",
+                    text = "No downloads yet.\nOpen any video's ⋮ menu and tap \"Download audio\" to save it offline.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp)
@@ -322,13 +319,19 @@ private fun StorageCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                // Server settings (gear) — where the Render URL lives.
-                IconButton(onClick = onServer, modifier = Modifier.size(28.dp)) {
+                // Server settings — where the audio backend URL lives.
+                TextButton(onClick = onServer) {
                     Icon(
                         Icons.Filled.Settings,
-                        contentDescription = "Audio server settings",
+                        contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        "Server",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -606,73 +609,6 @@ fun OfflineThumbnail(item: DownloadItem, modifier: Modifier = Modifier) {
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp)
-                )
-            }
-        }
-    }
-}
-
-/**
- * The compact download control for feed cards: an animated icon button in the
- * corner of the thumbnail showing the four states, and the entry point for
- * the Download → Preparing → Downloading → Downloaded flow on every card.
- */
-@Composable
-fun DownloadCardAction(
-    status: DownloadStatus?,
-    isOffline: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    Surface(
-        modifier = modifier
-            .size(26.dp)
-            .clip(CircleShape)
-            .clickable(onClick = onClick),
-        shape = CircleShape,
-        color = Color.Black.copy(alpha = 0.45f)
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            when {
-                isOffline -> Icon(
-                    Icons.Filled.CheckCircle,
-                    contentDescription = "Play offline",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(16.dp)
-                )
-                status is DownloadStatus.Preparing -> CircularProgressIndicator(
-                    modifier = Modifier.size(14.dp),
-                    strokeWidth = 2.dp,
-                    color = Color.White
-                )
-                status is DownloadStatus.Downloading -> {
-                    if (status.progress >= 0f) {
-                        CircularProgressIndicator(
-                            progress = { status.progress.coerceIn(0f, 1f) },
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                            color = Color.White
-                        )
-                    } else {
-                        // Unknown total size — animate rather than look stuck at 0.
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                            color = Color.White
-                        )
-                    }
-                }
-                status is DownloadStatus.Error -> Icon(
-                    Icons.Filled.Refresh,
-                    contentDescription = "Retry download",
-                    tint = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(15.dp)
-                )
-                else -> Icon(
-                    Icons.Filled.FileDownload,
-                    contentDescription = "Download audio",
-                    tint = Color.White,
-                    modifier = Modifier.size(15.dp)
                 )
             }
         }

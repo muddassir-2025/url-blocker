@@ -223,9 +223,9 @@ class AudioDownloadStore(context: Context) {
         const val KEY_SERVER_TOKEN = "server_token"
         const val KEY_STORAGE_LIMIT = "storage_limit"
 
-        // Placeholder the user replaces with their deployed Render URL
-        // (editable in the Downloads section → Server settings).
-        const val DEFAULT_SERVER_URL = "https://YOUR-RENDER-APP.onrender.com"
+        // The ClearView audio backend. Built-in so downloads work out of the
+        // box for every install; overridable in Downloads → Server settings.
+        const val DEFAULT_SERVER_URL = "https://clearview-app-6db1.onrender.com"
 
         const val STALE_PART_MS = 24L * 60 * 60 * 1000
     }

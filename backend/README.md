@@ -4,10 +4,13 @@ Streams the **best audio-only** stream of a YouTube video to the ClearView Andro
 ("Download audio" / offline listening). Nothing is stored on the server — audio bytes are
 piped straight through to the phone.
 
-- **Primary engine:** [`@distube/ytdl-core`](https://www.npmjs.com/package/@distube/ytdl-core)
-- **Automatic fallback:** [`youtube-dl-exec`](https://www.npmjs.com/package/youtube-dl-exec)
-  (yt-dlp). If ytdl-core fails because YouTube changed its internals, the server falls back
-  to yt-dlp automatically — no app update needed.
+- **Primary engine:** [`youtube-dl-exec`](https://www.npmjs.com/package/youtube-dl-exec)
+  (yt-dlp). Actively maintained and works against current YouTube.
+- **Automatic fallback:** [`@distube/ytdl-core`](https://www.npmjs.com/package/@distube/ytdl-core).
+  If yt-dlp fails because YouTube changed its internals, the server falls back
+  to ytdl-core automatically — no app update needed.
+- The **yt-dlp binary is downloaded at install time** (`scripts/fetch-ytdlp.js`,
+  hooked into `postinstall`) so a request never waits on a lazy binary download.
 
 ## Run locally
 
@@ -30,15 +33,22 @@ curl "http://localhost:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%
 2. Render → **New → Web Service** → connect the repo.
 3. Settings:
    - **Root Directory:** `backend`
-   - **Build Command:** `npm install`
+   - **Build Command:** `npm install` (also fetches the pinned yt-dlp binary
+     via the postinstall script)
    - **Start Command:** `npm start`
    - **Instance Type:** Free
 4. Optional **Environment Variables**:
    - `AUDIO_TOKEN` — a shared secret. When set, the app must send it
      (`X-Audio-Token` header); protects your free-tier bandwidth from strangers.
-   - `YTDL_NO_UPDATE=1` — skips yt-dlp's periodic update check.
-5. Deploy. Copy the URL (`https://<your-app>.onrender.com`) and paste it into the app:
-   **Media → Downloads → ⚙ Server settings** (plus the token if you set one).
+   - `YTDL_NO_UPDATE=1` — skips yt-dlp's periodic update check (recommended;
+     the pinned binary is refreshed on every fresh deploy).
+   - `YTDLP_FORCE=1` — forces the postinstall script to re-download the
+     yt-dlp binary even if one already exists (use if a build cache carried
+     an older binary over and downloads start failing).
+5. Deploy. **Important:** after pushing this commit, open the Render dashboard
+   and trigger a new deploy (the changed build step must run to fetch the
+   yt-dlp binary). Copy the URL (`https://<your-app>.onrender.com`) and paste it
+   into the app: **Media → Downloads → Server settings**.
 
 ### Free-tier behaviour
 
@@ -51,7 +61,8 @@ curl "http://localhost:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%
 ## Notes
 
 - M4A (AAC) is preferred, then Opus/WebM — both play natively on Android (API 21+).
-- A short in-memory cache avoids re-fetching video info for repeat downloads.
-- Optionally drop an exported `cookies.json` (EditThisCookie format) next to `server.js`
-  and set `COOKIES_FILE=cookies.json` to improve ytdl-core reliability — the yt-dlp
-  fallback already covers most breakage without it.
+- A short in-memory info cache avoids re-fetching video metadata for repeat downloads.
+- If you hit "Could not fetch this audio right now", trigger a **Manual Deploy**
+  from the Render dashboard — it re-runs `npm install` and refreshes the yt-dlp
+  binary. Optionally drop an exported `cookies.json` (EditThisCookie format) next
+  to `server.js` for even better reliability.
