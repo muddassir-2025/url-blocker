@@ -29,6 +29,10 @@ const PROVIDER_DIR = path.join(ROOT, 'pot-provider');
 const PROVIDER_MAIN = path.join(PROVIDER_DIR, 'server', 'build', 'main.js');
 const PLUGINS_DIR = path.join(ROOT, 'plugins');
 const PLUGIN_ZIP = path.join(PLUGINS_DIR, 'bgutil-ytdlp-pot-provider.zip');
+// NOTE: keep the plugin as the original ZIP — verified on both the Windows exe
+// and the Linux zipapp that this exact zip is what registers the provider
+// ("PO Token Providers: bgutil:http-1.3.1 (external)"). Repackaging it or
+// extracting it to a directory breaks loading.
 const MIN_ZIP_SIZE = 1 * 1024; // plugin zip is tiny (~8 KB) — only reject empty/HTML files
 
 function log(msg) {

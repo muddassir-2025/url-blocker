@@ -381,7 +381,10 @@ async function streamWithYtDlp(url, videoId, req, res) {
       return;
     } catch (e) {
       lastError = e;
-      console.warn(`[yt-dlp] chain "${chain || 'default'}" failed: ${String(e.message || e).slice(0, 300)}`);
+      // Log the full stderr — POT-plugin warnings ("failed to get token", etc.)
+      // live there but never reach the thrown message.
+      const detail = String(e.stderr || e.message || e).slice(0, 600);
+      console.warn(`[yt-dlp] chain "${chain || 'default'}" failed: ${detail}`);
     }
   }
   throw lastError || new Error('yt-dlp failed');
