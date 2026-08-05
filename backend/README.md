@@ -87,6 +87,11 @@ curl "http://localhost:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%
 - At build time (`npm install`) `scripts/fetch-pot-provider.js` clones
   `bgutil-ytdlp-pot-provider` (pinned tag `1.3.1`), installs it, and downloads
   the matching yt-dlp plugin zip into `plugins/`.
+- The script then **rebuilds the plugin zip with a raised solve timeout**
+  (`_GETPOT_TIMEOUT` 20 s → 45 s, pure JS zip writer, no external tools):
+  cold BotGuard solves on Render's free tier can take 20-45 s, and at 20 s the
+  plugin gave up early, leaving yt-dlp tokenless and bot-blocked
+  ("Sign in to confirm you're not a bot").
 - At boot, `server.js` spawns the provider on `127.0.0.1:4416` (a child
   process, ~100–150 MB). The Render log will show
   `[pot] PO-token provider ready on port 4416`.
@@ -107,9 +112,11 @@ end-to-end`. Two log patterns are easy to misread:
   working runs and do **not** mean the HTTP provider was skipped.
 - The line that proves the HTTP provider is being used is
   `[pot:bgutil:http] Generating a ... PO Token for ... via bgutil HTTP server`.
-- `direct /get_pot probe -> HTTP 200 in Ns`: if `N > 20`, real downloads will
-  fail anyway — the bgutil plugin's own solve timeout is 20 s, so a slow solve
-  means yt-dlp runs without a token and gets bot-blocked.
+- `direct /get_pot probe -> HTTP 200 in Ns`: cold BotGuard solves on Render
+  take 10-45 s. The plugin's solve timeout is patched to 45 s at build time
+  (`scripts/fetch-pot-provider.js` rebuilds the plugin zip with
+  `_GETPOT_TIMEOUT = 45.0`), so solves up to ~40 s are fine; only a solve
+  near the 45 s cap (or a probe timeout) is a problem.
 - If the verdict says `bgutil HTTP provider loaded but NO token generation was
   observed`, the boot check dumps the yt-dlp probe's output tail. That dump is
   the decisive clue: look for `Error reaching GET .../ping` (plugin can't reach

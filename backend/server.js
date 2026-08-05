@@ -111,6 +111,9 @@ const RESTART_WINDOW_MS = 60 * 1000;
 // solve, up to 45 s) + yt-dlp probe (up to 60 s). Until it finishes, the
 // provider may not yet have a warm minter under the key real requests use, so
 // requests are 503-gated for this window too (time-capped like the others).
+// NOTE: the plugin's solve timeout is patched to 45 s at build time
+// (scripts/fetch-pot-provider.js), which is what makes 20-45 s cold solves
+// survivable for real yt-dlp requests.
 const BOOT_WINDOW_MS = 240 * 1000;
 let potEverReady = false;
 let potDownAt = null;
@@ -289,18 +292,17 @@ function verifyPotWiring() {
         const ok = res.statusCode === 200;
         const ms = Date.now() - probeStartedAt;
         if (ok) {
-          // The bgutil plugin's own /get_pot timeout is hardcoded at 20 s. If
-          // the provider needs longer, real yt-dlp requests give up waiting for
-          // a token and run WITHOUT one (then get bot-blocked on datacenter IPs),
-          // so a slow-but-successful solve here still means broken downloads.
-          if (ms / 1000 > 20) {
+          // The plugin's /get_pot solve timeout is patched to 45 s at build
+          // time (scripts/fetch-pot-provider.js rebuilds the plugin zip with
+          // _GETPOT_TIMEOUT = 45.0). The probe's own timeout is also 45 s, so
+          // only solves above ~40 s are cutting it close.
+          if (ms / 1000 > 40) {
             // The cold BotGuard solve is a one-time cost: the provider caches
             // the solved session (minter) for ~12h, and this probe IS the
             // warmup, so later /get_pot calls mint tokens fast. The warning
-            // still matters — while this solve was running, any concurrent
-            // request would have hit the plugin's 20s timeout.
+            // still matters — a solve this slow is right at the 45 s cap.
             console.warn(
-              `[pot] direct /get_pot probe -> HTTP 200 in ${(ms / 1000).toFixed(1)}s — cold solve exceeded the plugin's 20s timeout; this probe WARMS the provider, so later token requests should be fast (see the yt-dlp probe verdicts below)`
+              `[pot] direct /get_pot probe -> HTTP 200 in ${(ms / 1000).toFixed(1)}s — solve is very slow (near the 45s plugin/probe timeout); this probe WARMS the provider, so later token requests should be fast (see the yt-dlp probe verdicts below)`
             );
           } else {
             console.log(
@@ -638,10 +640,12 @@ async function streamWithYtDlp(url, videoId, req, res) {
       lastError = e;
       // Log the full stderr — POT-plugin warnings ("failed to get token", etc.)
       // live there but never reach the thrown message.
-      const detail = String(e.stderr || e.message || e).slice(0, 600);
+      // The real error is at the END of stderr (the --verbose debug header
+      // eats the first ~1.5 KB), so log the TAIL, not the head.
+      const detail = String(e.stderr || e.message || e).slice(-600);
       console.warn(`[yt-dlp] chain "${chain || 'default'}" failed: ${detail}`);
       if (e && e.stderr) {
-        console.warn(`[yt-dlp] chain "${chain || 'default'}" FULL STDERR:\n${String(e.stderr).slice(0, 1500)}`);
+        console.warn(`[yt-dlp] chain "${chain || 'default'}" STDERR TAIL:\n${String(e.stderr).slice(-2000)}`);
       }
     }
   }
@@ -758,8 +762,8 @@ app.get('/api/audio', async (req, res) => {
   }
   // Provider is up, but the boot check hasn't finished yet: its yt-dlp probe is
   // what warms the provider's minter under the SAME cache key real requests
-  // use. A request now could pay the slow cold BotGuard solve (20-40 s on
-  // Render) and hit the plugin's hardcoded 20 s solve timeout — 503 instead.
+  // use. A request now could pay the slow cold BotGuard solve (20-45 s on
+  // Render) and hit the plugin's solve timeout — 503 instead.
   const inBootCheckWindow = !potBootCheckDone && Date.now() - SERVER_START < BOOT_WINDOW_MS;
   if (PROVIDER_BUILT && inBootCheckWindow) {
     return res.status(503).json({ error: 'Audio service is warming up — PO-token boot check in progress, retry in a moment' });

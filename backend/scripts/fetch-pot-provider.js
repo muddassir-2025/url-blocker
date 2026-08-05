@@ -163,11 +163,131 @@ async function ensurePlugin() {
   throw lastErr || new Error('no plugin download source worked');
 }
 
+// ── Plugin timeout patch ──────────────────────────────────────────────────
+// The plugin's /get_pot solve timeout is hardcoded at 20 s (`_GETPOT_TIMEOUT`
+// in getpot_bgutil_http.py). Cold BotGuard solves on Render's free tier
+// routinely take 20-45 s, so the plugin gives up at 20 s and yt-dlp runs
+// tokenless (then gets bot-blocked: "Sign in to confirm you're not a bot").
+// This rebuilds the plugin zip from the cloned repo sources with the timeout
+// raised to 45 s (matching the server's own boot-check probe timeout). Pure
+// JS (deflate via node:zlib) — no external unzip/zip tools needed, works on
+// any platform. Idempotent: only rebuilds when the source still has 20.0.
+const PATCHED_SOLVE_TIMEOUT = 45.0;
+
+let CRC_TABLE;
+function crc32(buf) {
+  if (!CRC_TABLE) {
+    CRC_TABLE = new Int32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      CRC_TABLE[n] = c;
+    }
+  }
+  let crc = -1;
+  for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ buf[i]) & 0xff];
+  return (crc ^ -1) >>> 0;
+}
+
+// Builds a valid ZIP (deflate method) from { name, data } entries — exactly
+// what yt-dlp's plugin loader expects (yt_dlp_plugins/... at the zip root).
+function buildPluginZip(entries) {
+  const { deflateRawSync } = require('zlib');
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const { name: rawName, data } of entries) {
+    const name = Buffer.from(rawName, 'utf8');
+    const crc = crc32(data);
+    const compressed = deflateRawSync(data);
+
+    const lfh = Buffer.alloc(30);
+    lfh.writeUInt32LE(0x04034b50, 0);
+    lfh.writeUInt16LE(20, 4);
+    lfh.writeUInt16LE(0x0800, 6); // UTF-8 flag
+    lfh.writeUInt16LE(8, 8); // deflate
+    lfh.writeUInt16LE(0, 10);
+    lfh.writeUInt16LE(0, 12);
+    lfh.writeUInt32LE(crc, 14);
+    lfh.writeUInt32LE(compressed.length, 18);
+    lfh.writeUInt32LE(data.length, 22);
+    lfh.writeUInt16LE(name.length, 26);
+    lfh.writeUInt16LE(0, 28);
+    localParts.push(lfh, name, compressed);
+
+    const ch = Buffer.alloc(46);
+    ch.writeUInt32LE(0x02014b50, 0);
+    ch.writeUInt16LE(20, 4);
+    ch.writeUInt16LE(20, 6);
+    ch.writeUInt16LE(0x0800, 8);
+    ch.writeUInt16LE(8, 10);
+    ch.writeUInt16LE(0, 12);
+    ch.writeUInt16LE(0, 14);
+    ch.writeUInt32LE(crc, 16);
+    ch.writeUInt32LE(compressed.length, 20);
+    ch.writeUInt32LE(data.length, 24);
+    ch.writeUInt16LE(name.length, 28);
+    ch.writeUInt16LE(0, 30);
+    ch.writeUInt16LE(0, 32);
+    ch.writeUInt16LE(0, 34);
+    ch.writeUInt16LE(0, 36);
+    ch.writeUInt32LE(0, 38);
+    ch.writeUInt32LE(offset, 42);
+    centralParts.push(ch, name);
+
+    offset += lfh.length + name.length + compressed.length;
+  }
+
+  const centralStart = offset;
+  const centralSize = centralParts.reduce((a, p) => a + p.length, 0);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralSize, 12);
+  eocd.writeUInt32LE(centralStart, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, ...centralParts, eocd]);
+}
+
+function patchPluginZip() {
+  // _GETPOT_TIMEOUT lives in the base class getpot_bgutil.py — both HTTP and
+  // script providers inherit it.
+  const extractorDir = path.join(PROVIDER_DIR, 'plugin', 'yt_dlp_plugins', 'extractor');
+  const baseSrcPath = path.join(extractorDir, 'getpot_bgutil.py');
+  if (!fs.existsSync(baseSrcPath)) {
+    log('plugin sources missing (provider clone incomplete) — skipping timeout patch');
+    return;
+  }
+  const baseSrc = fs.readFileSync(baseSrcPath, 'utf8');
+  if (!/_GETPOT_TIMEOUT = 20\.0/.test(baseSrc)) {
+    log('plugin sources already patched or unrecognized — skipping');
+    return;
+  }
+  const patched = baseSrc.replace(
+    '_GETPOT_TIMEOUT = 20.0',
+    `_GETPOT_TIMEOUT = ${PATCHED_SOLVE_TIMEOUT}`,
+  );
+  const read = (p) => fs.readFileSync(path.join(extractorDir, p));
+  const zip = buildPluginZip([
+    { name: 'yt_dlp_plugins/', data: Buffer.alloc(0) },
+    { name: 'yt_dlp_plugins/extractor/', data: Buffer.alloc(0) },
+    { name: 'yt_dlp_plugins/extractor/getpot_bgutil.py', data: Buffer.from(patched, 'utf8') },
+    { name: 'yt_dlp_plugins/extractor/getpot_bgutil_http.py', data: read('getpot_bgutil_http.py') },
+    { name: 'yt_dlp_plugins/extractor/getpot_bgutil_script.py', data: read('getpot_bgutil_script.py') },
+  ]);
+  fs.writeFileSync(PLUGIN_ZIP, zip);
+  log(`plugin zip rebuilt with _GETPOT_TIMEOUT = ${PATCHED_SOLVE_TIMEOUT}s (${(zip.length / 1024).toFixed(0)} KB)`);
+}
+
 (async () => {
   try {
     fs.mkdirSync(PLUGINS_DIR, { recursive: true });
     await ensureProvider();
     await ensurePlugin();
+    // Always run after the zip is in place; no-ops when already patched.
+    patchPluginZip();
   } catch (e) {
     try { if (fs.existsSync(PLUGIN_ZIP)) fs.unlinkSync(PLUGIN_ZIP); } catch (_) { /* ignore */ }
     warn(`could not set up PO-token provider: ${e.message}`);
