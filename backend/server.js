@@ -186,6 +186,9 @@ function verifyPotWiring() {
       '--plugin-dirs', PLUGINS_DIR,
       '--no-warnings', '--no-check-certificates', '--no-update',
       '--socket-timeout', '20',
+      // Also exercise the provider: if a PO token is generated, the provider's
+      // "[pot] Generating POT" lines appear in the server log right after this.
+      '--extractor-args', `youtube:player_client=web,web_embedded;youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
       '--print', 'title',
       '-v',
       probeUrl,
@@ -194,7 +197,7 @@ function verifyPotWiring() {
     (err, stdout, stderr) => {
       const out = `${stdout || ''}\n${stderr || ''}`;
       if (/bgutil/.test(out)) {
-        console.log('[pot] boot check: yt-dlp loads the bgutil PO-token plugin OK');
+        console.log('[pot] boot check: yt-dlp loads the bgutil PO-token plugin OK (watch for Generating POT lines)');
       } else {
         console.warn('[pot] boot check: bgutil NOT detected in yt-dlp verbose output — PO tokens will not be attached');
       }
@@ -369,8 +372,15 @@ async function streamWithYtDlp(url, videoId, req, res) {
         ...(Array.isArray(opts.extractorArgs) ? opts.extractorArgs : opts.extractorArgs ? [opts.extractorArgs] : []),
         `youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
       ];
+      // NOTE: player_skip=webpage was tried and REVERTED — it reduces token
+      // generation (1 vs 2 contexts), risking a tokenless player request.
+      // IMPORTANT: do NOT attach the account cookies on the PO chains — this
+      // account is challenged from datacenter IPs ("Sign in to confirm you're
+      // not a bot"), and the pure PO-token path is the documented bgutil flow.
+      // Cookies stay on the non-PO fallback chains below.
+    } else if (cookiesPath) {
+      opts.cookies = cookiesPath;
     }
-    if (cookiesPath) opts.cookies = cookiesPath;
     try {
       const info = await ytDlp(url, opts);
       const direct = info.url;
@@ -385,6 +395,9 @@ async function streamWithYtDlp(url, videoId, req, res) {
       // live there but never reach the thrown message.
       const detail = String(e.stderr || e.message || e).slice(0, 600);
       console.warn(`[yt-dlp] chain "${chain || 'default'}" failed: ${detail}`);
+      if (e && e.stderr) {
+        console.warn(`[yt-dlp] chain "${chain || 'default'}" FULL STDERR:\n${String(e.stderr).slice(0, 1500)}`);
+      }
     }
   }
   throw lastError || new Error('yt-dlp failed');
