@@ -279,11 +279,25 @@ function verifyPotWiring() {
       res.on('end', () => {
         const ok = res.statusCode === 200;
         const ms = Date.now() - probeStartedAt;
-        console.log(
-          ok
-            ? `[pot] direct /get_pot probe -> HTTP 200 in ${ms / 1000}s — provider CAN solve BotGuard on this IP (plugin wiring is the suspect)`
-            : `[pot] direct /get_pot probe -> HTTP ${res.statusCode} after ${ms / 1000}s — ${String(body).slice(0, 200)} (provider solve is the suspect)`
-        );
+        if (ok) {
+          // The bgutil plugin's own /get_pot timeout is hardcoded at 20 s. If
+          // the provider needs longer, real yt-dlp requests give up waiting for
+          // a token and run WITHOUT one (then get bot-blocked on datacenter IPs),
+          // so a slow-but-successful solve here still means broken downloads.
+          if (ms / 1000 > 20) {
+            console.warn(
+              `[pot] direct /get_pot probe -> HTTP 200 in ${(ms / 1000).toFixed(1)}s — TOO SLOW: the plugin's solve timeout is 20s, real requests will fail to get a token`
+            );
+          } else {
+            console.log(
+              `[pot] direct /get_pot probe -> HTTP 200 in ${(ms / 1000).toFixed(1)}s — provider CAN solve BotGuard on this IP`
+            );
+          }
+        } else {
+          console.warn(
+            `[pot] direct /get_pot probe -> HTTP ${res.statusCode} after ${(ms / 1000).toFixed(1)}s — ${String(body).slice(0, 200)} (provider solve is the suspect)`
+          );
+        }
       });
     }
   );
@@ -307,7 +321,14 @@ function verifyPotWiring() {
       '--plugin-dirs', PLUGINS_DIR,
       '--no-warnings', '--no-check-certificates', '--no-update',
       '--socket-timeout', '20',
-      '--extractor-args', `youtube:player_client=web,web_embedded;youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
+      // IMPORTANT: pass TWO SEPARATE --extractor-args flags. yt-dlp parses ';'
+      // as a separator for arguments WITHIN one extractor key, so a single
+      // "youtube:...;youtubepot-bgutilhttp:base_url=..." flag silently swallows
+      // the base_url (verified against yt-dlp 2026.07.04 + plugin 1.3.1 — the
+      // plugin then falls back to its 127.0.0.1:4416 default, which only works
+      // while POT_PORT is 4416). Repeated flags merge correctly.
+      '--extractor-args', 'youtube:player_client=web,web_embedded',
+      '--extractor-args', `youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
       '--print', 'title',
       '-v',
       probeUrl,
@@ -316,16 +337,32 @@ function verifyPotWiring() {
     (err, stdout, stderr) => {
       const out = `${stdout || ''}\n${stderr || ''}`;
       const potLines = potActivity - before;
-      if (/bgutil/.test(out)) {
-        console.log('[pot] boot check: yt-dlp loads the bgutil PO-token plugin OK');
+      // The HTTP provider is genuinely used only when it logs a token
+      // generation line. The script-node / script-deno "Script path doesn't
+      // exist" lines are EXPECTED noise from yt-dlp's availability checks and
+      // appear even in fully working runs — they do NOT mean the HTTP provider
+      // was skipped.
+      const httpProviderUsed = /\[pot:bgutil:http\]\s+Generating a .*PO Token for/.test(out);
+      const tokenRetrieved = /Retrieved a .*PO Token/.test(out);
+      if (httpProviderUsed) {
+        console.log('[pot] boot check: bgutil HTTP provider WAS USED to generate PO tokens');
+      } else if (/bgutil:http/.test(out)) {
+        // NB: the plugin's registration line ("PO Token Providers: bgutil:http-1.3.1
+        // (external), ...") always contains bgutil:http, so this branch means the
+        // plugin loaded but no token generation was observed (e.g. the extraction
+        // failed before a token was requested) — not that it was skipped.
+        console.warn('[pot] boot check: bgutil HTTP provider loaded but NO token generation was observed during the probe');
       } else {
         console.warn('[pot] boot check: bgutil NOT detected in yt-dlp verbose output — PO tokens will not be attached');
       }
       console.log(
         potLines > 0
           ? `[pot] boot check: provider GENERATED ${potLines} token generation(s) during the probe — PO pipeline works end-to-end`
-          : '[pot] boot check: provider saw NO token request during the probe — the plugin did not reach it (see the /ping line above)'
+          : '[pot] boot check: provider saw NO token request during the probe — the plugin did not reach it (or the token was served from the provider cache)'
       );
+      if (tokenRetrieved) {
+        console.log('[pot] boot check: yt-dlp RETRIEVED at least one PO token from the provider');
+      }
     }
   );
 }
