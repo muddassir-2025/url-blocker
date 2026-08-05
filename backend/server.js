@@ -270,9 +270,11 @@ function verifyPotWiring() {
   // failure on the provider's solve path rather than the yt-dlp plugin wiring.
   // The probe also acts as a WARMUP: it seeds the provider's session cache, so
   // the first real request doesn't pay the slow cold solve.
-  // NOTE: the plugin's own solve timeout is 20 s — if the probe 200s in, say,
-  // 25–45 s, real requests will still fail. The logged duration makes the
-  // verdict interpretable ("200 in 2 s" = fine; "200 in 38 s" = too slow).
+  // NOTE: the plugin's own solve timeout is patched to 45 s at build time
+  // (scripts/fetch-pot-provider.js), so a cold solve up to ~40 s survives real
+  // requests; the logged duration makes the verdict interpretable
+  // ("200 in 2 s" = fine; "200 in 44 s" = right at the cap, real requests risk
+  // timing out until the warm minter kicks in).
   // Guard: runYtDlpProbe (declared below) must run exactly once, after this
   // probe has completed (or failed/timeout) — never concurrently with it.
   let ytDlpProbeStarted = false;
@@ -345,10 +347,11 @@ function verifyPotWiring() {
     ytDlpProbeStarted = true;
 
     // Log the exact command so the Render logs prove which args reached
-    // yt-dlp — both --extractor-args flags must be present.
+    // yt-dlp — both extractor-args flags must be present (player_client+
+    // fetch_pot in the youtube: flag, base_url in the plugin flag).
     console.log(
       `[pot] boot check: running: ${BIN_PATH} --plugin-dirs ${PLUGINS_DIR} --no-warnings --no-check-certificates --no-update --socket-timeout 20 ` +
-      `--extractor-args "youtube:player_client=web,web_embedded" --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}" --print title -v ${probeUrl}`
+      `--extractor-args "youtube:player_client=web,web_embedded;fetch_pot=always" --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}" --print title -v ${probeUrl}`
     );
 
     const before = potActivity;
@@ -358,13 +361,15 @@ function verifyPotWiring() {
       '--plugin-dirs', PLUGINS_DIR,
       '--no-warnings', '--no-check-certificates', '--no-update',
       '--socket-timeout', '20',
-      // IMPORTANT: pass TWO SEPARATE --extractor-args flags. yt-dlp parses ';'
-      // as a separator for arguments WITHIN one extractor key, so a single
-      // "youtube:...;youtubepot-bgutilhttp:base_url=..." flag silently swallows
-      // the base_url (verified against yt-dlp 2026.07.04 + plugin 1.3.1 — the
-      // plugin then falls back to its 127.0.0.1:4416 default, which only works
-      // while POT_PORT is 4416). Repeated flags merge correctly.
-      '--extractor-args', 'youtube:player_client=web,web_embedded',
+      // IMPORTANT: keep the plugin base_url in its OWN flag (different
+      // extractor key: youtubepot-bgutilhttp:). player_client + fetch_pot must
+      // share the youtube: flag (joined with ';') — a separate second
+      // `youtube:` flag would silently override player_client (only the last
+      // flag per extractor key survives), and a single flag mixing
+      // "youtube:...;youtubepot-bgutilhttp:..." swallows the base_url
+      // (yt-dlp parses ';' within one extractor key only; verified against
+      // yt-dlp 2026.07.04 + plugin 1.3.1).
+      '--extractor-args', 'youtube:player_client=web,web_embedded;fetch_pot=always',
       '--extractor-args', `youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
       '--print', 'title',
       '-v',
@@ -560,7 +565,23 @@ function clientChains() {
     return [
       // web + web_embedded with the PO token — the combo that beats the
       // datacenter-IP bot check (plain `web` alone returns unplayable formats).
-      'youtube:player_client=web,web_embedded',
+      //
+      // fetch_pot=always is REQUIRED, not optional: it forces yt-dlp to mint a
+      // PLAYER PO token and attach it to the player API request itself
+      // (serviceIntegrityDimensions.poToken), BEFORE the request is sent.
+      // Without it, yt-dlp only fetches the GVS token lazily AFTER a successful
+      // player response — but from a flagged datacenter IP the tokenless player
+      // request is bot-blocked (HTTP 403 / LOGIN_REQUIRED / "Sign in to confirm
+      // you're not a bot"), so formats are never processed and the provider is
+      // NEVER asked for a token ("provider saw NO token request during the
+      // probe"). Verified end-to-end on yt-dlp 2026.07.04 + plugin 1.3.1: with
+      // fetch_pot=always the provider is asked for player + gvs tokens and
+      // extraction succeeds.
+      //
+      // NB: player_client and fetch_pot must live in the SAME youtube: flag
+      // (separated by ';') — a second `youtube:` --extractor-args flag would
+      // OVERRIDE the first (only the last flag per extractor key survives).
+      'youtube:player_client=web,web_embedded;fetch_pot=always',
       'youtube:player_client=default,-web',
       'youtube:player_client=android_vr,android,ios,web_safari,web_music',
     ];

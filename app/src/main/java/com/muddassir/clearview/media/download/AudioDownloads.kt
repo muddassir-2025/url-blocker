@@ -114,11 +114,19 @@ object AudioDownloads {
 
     // ── Downloading ────────────────────────────────────────────────
 
-    /** Starts (or retries) the audio download for [video]; no-op when done/active. */
+    /**
+     * Starts (or retries) the audio download for [video]. No-op when the video
+     * is already downloaded or a download is still running — but a FAILED
+     * download (status [DownloadStatus.Error]) is always restartable: the UI
+     * keeps the Error entry in [active] to show the failure and offer Retry,
+     * and tapping Retry re-enters here.
+     */
     fun download(video: MediaVideo, source: String) {
         val s = storeOrThrow()
         val id = video.videoId
-        if (isDownloaded(id) || active.containsKey(id)) return
+        if (isDownloaded(id)) return
+        val current = active[id]
+        if (current != null && current !is DownloadStatus.Error) return
         cancelRequested[id] = false
         pendingVideos[id] = video
         scope.launch {
