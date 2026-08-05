@@ -174,6 +174,35 @@ function startPotProvider() {
 }
 startPotProvider();
 
+// Boot-time self-check: run one real extraction with the plugin and confirm
+// yt-dlp sees the bgutil PO-token provider (its verbose output lists it). This
+// makes a wiring regression visible in the logs instead of silent bot-check 500s.
+function verifyPotWiring() {
+  const { execFile } = require('child_process');
+  const probeUrl = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
+  execFile(
+    BIN_PATH,
+    [
+      '--plugin-dirs', PLUGINS_DIR,
+      '--no-warnings', '--no-check-certificates', '--no-update',
+      '--socket-timeout', '20',
+      '--print', 'title',
+      '-v',
+      probeUrl,
+    ],
+    { timeout: 45000, encoding: 'utf8' },
+    (err, stdout, stderr) => {
+      const out = `${stdout || ''}\n${stderr || ''}`;
+      if (/bgutil/.test(out)) {
+        console.log('[pot] boot check: yt-dlp loads the bgutil PO-token plugin OK');
+      } else {
+        console.warn('[pot] boot check: bgutil NOT detected in yt-dlp verbose output — PO tokens will not be attached');
+      }
+    }
+  );
+}
+setTimeout(verifyPotWiring, 8000);
+
 // ── YouTube cookies (best defense against bot detection) ─────────────────
 // Priority: COOKIES_B64 env var (base64 of a Netscape-format cookies.txt,
 // exported from a logged-in browser) → a cookies.txt file next to server.js.
