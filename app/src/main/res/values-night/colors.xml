@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Quran Reminder Widget (dark) -->
-    <color name="widget_bg">#1D211E</color>
-    <color name="widget_stroke">#343A35</color>
-    <color name="widget_title">#9DBCA9</color>
-    <color name="widget_verse_text">#E9E6DF</color>
-    <color name="widget_ref">#9AA29C</color>
+    <!-- Quran Reminder Widget (dark — same as day so the card is always dark) -->
+    <color name="widget_bg">#D91A1A1A</color>
+    <color name="widget_stroke">#2E2E2E</color>
+    <color name="widget_title">#8FBC8F</color>
+    <color name="widget_verse_text">#FFFFFF</color>
+    <color name="widget_ref">#9E9E9E</color>
+    <color name="widget_button_bg">#1FFFFFFF</color>
+    <color name="widget_icon">#B3FFFFFF</color>
 </resources>

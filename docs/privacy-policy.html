@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClearView — Privacy Policy</title>
+<!--
+  HOW TO USE THIS PAGE
+  --------------------
+  1. Replace the three placeholders below:
+       [DEVELOPER NAME]        → your name or company name
+       [CONTACT EMAIL]         → an email you check (privacy questions go here)
+       [Effective date]        → today's date (e.g. 3 August 2026)
+  2. Host the file anywhere public and permanent, e.g.:
+       - GitHub Pages (free):  https://pages.github.com/
+       - Netlify Drop (free):  https://app.netlify.com/drop
+       - Cloudflare Pages (free)
+  3. Paste the resulting URL into Play Console → App content → Privacy policy.
+  This page has no external dependencies — it works offline and on any device.
+-->
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #34d399;
+    --border: #262b36;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    padding: 24px 16px 64px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  header { padding: 24px 0 8px; }
+  h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.5px; }
+  .tagline { color: var(--accent); font-weight: 600; margin-top: 4px; font-size: 14px; }
+  .meta { color: var(--muted); font-size: 14px; margin-top: 8px; }
+  section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px 22px;
+    margin-top: 16px;
+  }
+  h2 { font-size: 17px; font-weight: 700; margin-bottom: 10px; }
+  p { color: var(--text); font-size: 15px; }
+  ul { margin: 8px 0 0 20px; }
+  li { font-size: 15px; margin: 6px 0; color: var(--text); }
+  strong { color: #fff; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .highlight {
+    background: rgba(52, 211, 153, 0.08);
+    border: 1px solid rgba(52, 211, 153, 0.35);
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  footer { color: var(--muted); font-size: 13px; margin-top: 28px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>ClearView — Privacy Policy</h1>
+    <div class="tagline">Your data stays on your device. Always.</div>
+    <div class="meta">Last updated: <strong>[Effective date]</strong> &nbsp;·&nbsp; App: ClearView (package <code>com.muddassir.clearview</code>)</div>
+  </header>
+
+  <section>
+    <h2>1. Overview</h2>
+    <p>
+      ClearView is a parental-control app that blocks adult content, user-set keywords and websites,
+      and incognito browsing inside Chrome and the Google app. It also includes a Quran reader,
+      a media player for YouTube content, and live-stream viewing.
+    </p>
+    <p style="margin-top:10px">
+      <strong>We do not collect, store, transmit, or sell any personal data.</strong> There are no
+      accounts, no sign-ups, no analytics, no advertising SDKs, and no cloud sync. Everything the
+      app does happens on your device.
+    </p>
+  </section>
+
+  <section>
+    <h2>2. Information We Do NOT Collect</h2>
+    <ul>
+      <li><strong>No personal information</strong> — no name, email, phone number, address, or date of birth is requested or collected.</li>
+      <li><strong>No browsing history</strong> — pages you visit are never logged or uploaded.</li>
+      <li><strong>No location data</strong> — the app does not access your location.</li>
+      <li><strong>No device identifiers</strong> — no advertising ID, IMEI, or similar identifiers are read or transmitted.</li>
+      <li><strong>No analytics or crash reports</strong> — the app contains no tracking or analytics libraries.</li>
+      <li><strong>No contact list, photos, or files</strong> — the app never accesses your contacts, media library, or documents.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>3. Accessibility Service &amp; Screen Content</h2>
+    <p>
+      ClearView uses Android's Accessibility Service to read the text of the screen currently shown in
+      Chrome or the Google app. This is done <strong>in real time and entirely on your device</strong>,
+      for one purpose only: to detect adult content, blocked keywords or websites, and incognito mode,
+      so the app can block them.
+    </p>
+    <ul>
+      <li>Screen text is processed instantly in memory and is <strong>never stored</strong>.</li>
+      <li>Screen text is <strong>never transmitted</strong> anywhere.</li>
+      <li>Accessibility access can be revoked at any time in Settings → Accessibility.</li>
+    </ul>
+    <p style="margin-top:10px">
+      Thumbnail images are screened by an <strong>on-device machine-learning model</strong>
+      (a TFLite NSFW classifier). Images are analyzed on the device and are never uploaded.
+    </p>
+  </section>
+
+  <section>
+    <h2>4. Permissions We Use</h2>
+    <ul>
+      <li><strong>Accessibility service</strong> — required for content blocking (see Section 3).</li>
+      <li><strong>Notifications</strong> — used only to show local notifications when a saved YouTube channel uploads a new video (a feature you can turn off).</li>
+      <li><strong>Internet</strong> — used only to fetch content you request: the Quran translation text, and video metadata/streams/thumbnails from YouTube.</li>
+      <li><strong>Device admin</strong> — optional; used only to add uninstall protection when you enable it.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>5. Data Stored on Your Device</h2>
+    <p>All settings and data live in the app's private storage on your device:</p>
+    <ul>
+      <li>Your blocked keywords and blocked websites lists.</li>
+      <li>App settings (protection toggles, refresh intervals, notification preference).</li>
+      <li>Your Block-tab password, stored only as a <strong>SHA-256 hash</strong> (never in plain text).</li>
+      <li>Saved YouTube channels, video feed caches, and watch progress.</li>
+      <li>Quran bookmarks and the cached Quran translation text.</li>
+    </ul>
+    <p style="margin-top:10px">
+      None of this leaves your device. <strong>Uninstalling the app deletes all of it</strong> —
+      there is no server copy, because no server exists.
+    </p>
+  </section>
+
+  <section>
+    <h2>6. Third-Party Services</h2>
+    <p>ClearView makes standard internet requests to third parties only when you use a related feature:</p>
+    <ul>
+      <li><strong>AlQuran.Cloud</strong> — the Quran translation text is downloaded once from this public API and cached locally.</li>
+      <li><strong>YouTube / Google</strong> — video metadata (RSS feeds), thumbnails, and playback via YouTube's official embedded player when you view or play videos.</li>
+    </ul>
+    <p style="margin-top:10px">
+      As with any internet use, these services may see your IP address and standard request metadata.
+      ClearView does not send them any account information or personal data, and it does not control
+      their privacy practices — please review their policies as well. Playback of YouTube content is
+      subject to YouTube's Terms of Service.
+    </p>
+  </section>
+
+  <section>
+    <h2>7. Children's Privacy</h2>
+    <p>
+      ClearView is a parental-control tool designed to be set up and managed by an adult. It does not
+      collect personal information from anyone, including children. Because all processing is
+      on-device and no data is transmitted, there is nothing to store about a child using the device.
+    </p>
+  </section>
+
+  <section>
+    <h2>8. Security</h2>
+    <p>
+      Your data is protected by design: it is stored only in the app's private, sandboxed storage on
+      your device; your Block-tab password is hashed with SHA-256; and no data ever leaves your
+      device, so there is nothing for third parties to intercept or for us to lose.
+    </p>
+  </section>
+
+  <section>
+    <h2>9. Data Retention &amp; Deletion</h2>
+    <p>
+      Because no data is collected or transmitted, there is nothing to retain on our side. You can
+      delete all local data at any time by uninstalling the app, or by clearing the app's storage in
+      your device's Settings.
+    </p>
+  </section>
+
+  <section>
+    <h2>10. Changes to This Policy</h2>
+    <p>
+      If this policy ever changes, the updated version will be posted on this page with a new
+      "Last updated" date. Since ClearView currently has no data collection, future changes would
+      only reflect new features or legal requirements.
+    </p>
+  </section>
+
+  <section>
+    <h2>11. Contact Us</h2>
+    <p>
+      Questions or concerns about this policy or your privacy? Contact us at:
+      <br><a href="mailto:[CONTACT EMAIL]">[CONTACT EMAIL]</a>
+    </p>
+    <div class="highlight" style="margin-top:12px">
+      © [Effective date year] [DEVELOPER NAME]. All rights reserved.
+    </div>
+  </section>
+
+  <footer>ClearView · Privacy-first parental control</footer>
+
+</div>
+</body>
+</html>

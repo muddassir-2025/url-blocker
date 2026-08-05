@@ -1,20 +1,119 @@
 <resources>
-    <string name="app_name">URL Blocker</string>
-    <string name="accessibility_service_label">URL Blocker Service</string>
+    <string name="app_name">ClearView</string>
+    <string name="accessibility_service_label">ClearView Service</string>
     <string name="accessibility_service_description">Monitors Chrome and Google app to block adult content, blocked keywords/websites, and incognito browsing. All data stays on your device. No accounts, no cloud sync, no analytics.</string>
-    <string name="protection_notification_channel_name">Protection Status</string>
-    <string name="protection_notification_channel_desc">Shows whether URL blocking protection is active</string>
 
     <!-- Quran Reminder Widget -->
     <string name="widget_quran_reminder_title">Quran Reminder</string>
     <string name="widget_quran_reminder_description">A daily English Quran verse to encourage reflection</string>
     <string name="widget_quran_loading">Loading a verse…</string>
     <string name="widget_quran_tap_to_load">Open the app once to download verses</string>
+    <string name="widget_quran_copy">Copy</string>
+    <string name="widget_quran_refresh">Refresh</string>
+    <string name="widget_quran_copied">Verse copied to clipboard</string>
+    <string name="widget_quran_refreshing">Picking a new verse…</string>
     <string name="quran_verse_header">Quran Reminder</string>
     <string name="quran_verse_loading">Loading verse…</string>
     <string name="quran_verse_unavailable">Verses are being downloaded. Check back in a moment.</string>
+    <string name="quran_tab">Quran</string>
+    <string name="media_tab">Media</string>
+    <string name="live_tab">Live</string>
+    <string name="quran_share">Share verse</string>
+    <string name="quran_share_via">Share verse via</string>
+    <string name="quran_bookmark">Bookmark</string>
+    <string name="quran_bookmarked">Verse bookmarked</string>
+    <string name="quran_bookmark_removed">Bookmark removed</string>
     <string name="quran_verse_new">New Verse</string>
+    <string name="quran_verse_copy">Copy verse</string>
+    <string name="quran_verse_previous">Previous</string>
+    <string name="quran_verse_next">Next</string>
+    <string name="quran_verse_copied">Verse copied to clipboard</string>
+    <string name="media_notifications">Media Notifications</string>
+    <string name="media_notifications_note">Get a notification when your saved channels upload new videos</string>
+    <string name="media_notification_permission_denied">Notifications are blocked. Allow them in Settings to get channel updates.</string>
+    <string name="media_latest_updates">Latest Updates</string>
+    <string name="media_has_update">%1$s has an update</string>
+    <string name="media_update_dismiss">Dismiss update</string>
+    <string name="media_no_updates_yet">No updates yet. New videos from your saved channels will appear here.</string>
+    <string name="media_notification_channel">Channel updates</string>
+    <string name="media_notification_channel_desc">New videos from your saved channels</string>
+    <plurals name="media_channels_updated">
+        <item quantity="one">%1$d channel has updates</item>
+        <item quantity="other">%1$d channels have updates</item>
+    </plurals>
+    <string name="quran_verse_refresh_frequency">New verse every</string>
+    <string name="quran_verse_hour_short">%1$d hr</string>
     <string name="quran_verse_surah">Surah %1$s</string>
     <string name="quran_verse_reference">Quran %1$d:%2$d</string>
-    <string name="quran_verse_refresh_note">Refreshes automatically every 6 hours · works offline</string>
+    <string name="quran_settings">Settings</string>
+    <string name="quran_settings_title">Settings</string>
+    <string name="quran_notifications_title">Notifications</string>
+    <string name="quran_notifications">Quran notifications</string>
+    <string name="quran_notifications_note">Get a notification when a new verse is chosen</string>
+    <string name="quran_notification_channel">Quran reminders</string>
+    <string name="quran_notification_channel_desc">New verse notifications</string>
+    <string name="quran_new_verse_notification_title">New verse · %1$s</string>
+    <string name="media_updates_checking">Checking for updates…</string>
+
+    <!-- Quran search (top-bar search icon + search sheet) -->
+    <string name="quran_search">Search Quran</string>
+    <string name="quran_search_back">Back</string>
+    <string name="quran_search_hint">Search by word or verse (e.g. mercy, 2:255)</string>
+    <string name="quran_search_clear">Clear search</string>
+    <string name="quran_search_idle">Type above to search the Quran</string>
+    <string name="quran_search_no_results">No verses found</string>
+    <string name="quran_search_loading">Searching…</string>
+    <string name="quran_search_mode_search">Search</string>
+    <string name="quran_search_mode_surah">Surah</string>
+    <string name="quran_bookmarks_loading">Loading bookmarks…</string>
+    <plurals name="quran_search_results_count">
+        <item quantity="one">%1$d result</item>
+        <item quantity="other">%1$d results</item>
+    </plurals>
+
+    <!-- Quran bookmarks manager (opened from the settings sheet) -->
+    <string name="quran_bookmarks_title">Bookmarks</string>
+    <string name="quran_bookmarks_view">View bookmarks</string>
+    <string name="quran_bookmarks_search_hint">Filter bookmarks</string>
+    <string name="quran_bookmarks_empty">No bookmarks yet. Tap the bookmark icon on a verse to save it here.</string>
+    <string name="quran_bookmarks_no_match">No bookmarks match your filter</string>
+    <string name="quran_bookmarks_remove">Remove bookmark</string>
+    <string name="quran_bookmarks_remove_confirm_title">Remove bookmark?</string>
+    <string name="quran_bookmarks_remove_confirm_text">This verse will be removed from your bookmarks.</string>
+    <string name="quran_bookmarks_remove_confirm">Remove</string>
+    <string name="quran_cancel">Cancel</string>
+    <plurals name="quran_bookmarks_note">
+        <item quantity="one">%1$d verse saved</item>
+        <item quantity="other">%1$d verses saved</item>
+    </plurals>
+    <plurals name="quran_bookmarks_count">
+        <item quantity="one">%1$d bookmarked verse</item>
+        <item quantity="other">%1$d bookmarked verses</item>
+    </plurals>
+
+    <!-- In-app media player (YouTube IFrame API) -->
+    <string name="media_player_buffering">Loading video…</string>
+    <string name="media_player_tap_to_play">Tap to play</string>
+    <string name="media_player_error_not_found">This video is unavailable or was removed.</string>
+    <string name="media_player_error_embed_restricted">This video can\'t be embedded. The uploader has disabled embedding, so YouTube blocks in-app playback.</string>
+    <string name="media_player_error_playback">This video can\'t be played in the in-app player. Try a different video.</string>
+    <string name="media_player_error_unavailable">Video unavailable
+
+This video cannot be played inside the app.</string>
+    <string name="media_player_timeout">The video player is taking too long to load. Check your connection and try again.</string>
+    <string name="media_player_retry">Retry</string>
+    <string name="media_player_open_youtube">Open in YouTube app</string>
+    <string name="live_tab_connecting">Connecting to live stream…</string>
+    <string name="live_tab_live_label">Live broadcast · in-app player</string>
+    <string name="live_tab_playing">Live · playing inside the app</string>
+    <string name="live_tab_error">Live stream currently unavailable. Please try again later.</string>
+
+    <plurals name="quran_verse_interval_set">
+        <item quantity="one">New verse every %1$d hour</item>
+        <item quantity="other">New verse every %1$d hours</item>
+    </plurals>
+    <plurals name="quran_verse_refresh_note_hours">
+        <item quantity="one">Refreshes automatically every %1$d hour · works offline</item>
+        <item quantity="other">Refreshes automatically every %1$d hours · works offline</item>
+    </plurals>
 </resources>

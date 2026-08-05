@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Circular action-button chip for the widget's copy/refresh icons. Oval
+     shape = a perfect circle at any size (20dp buttons). Subtle 12% white
+     fill keeps the buttons visible on the dark card without weight. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="@color/widget_button_bg" />
+</shape>

@@ -3,10 +3,12 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 
-    <!-- Quran Reminder Widget (light) -->
-    <color name="widget_bg">#F7F5F0</color>
-    <color name="widget_stroke">#E3DCCB</color>
-    <color name="widget_title">#4C6B58</color>
-    <color name="widget_verse_text">#2E2A24</color>
-    <color name="widget_ref">#6B6A66</color>
+    <!-- Quran Reminder Widget (always-dark card; identical in values-night) -->
+    <color name="widget_bg">#D91A1A1A</color>
+    <color name="widget_stroke">#2E2E2E</color>
+    <color name="widget_title">#8FBC8F</color>
+    <color name="widget_verse_text">#FFFFFF</color>
+    <color name="widget_ref">#9E9E9E</color>
+    <color name="widget_button_bg">#1FFFFFFF</color>
+    <color name="widget_icon">#B3FFFFFF</color>
 </resources>

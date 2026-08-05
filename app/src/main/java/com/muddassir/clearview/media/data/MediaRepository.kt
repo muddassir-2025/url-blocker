@@ -1,0 +1,667 @@
+package com.muddassir.clearview.media.data
+
+import android.content.Context
+import android.util.Log
+import com.muddassir.clearview.media.model.FeedFilter
+import com.muddassir.clearview.media.model.MediaChannelUpdate
+import com.muddassir.clearview.media.model.MediaVideo
+import com.muddassir.clearview.media.model.SavedChannel
+import com.muddassir.clearview.media.util.MediaUpdates
+import com.muddassir.clearview.media.util.decodeFeedFilter
+import com.muddassir.clearview.media.util.encodeFeedFilter
+import com.muddassir.clearview.media.util.extractYouTubeVideoId
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+
+/**
+ * Repository for the Media tab: manages saved channels (add/remove/select,
+ * persisted in SharedPreferences) and the latest-videos feed (YouTube RSS,
+ * cached to a file per channel so the tab loads instantly offline).
+ *
+ * All IO happens on [Dispatchers.IO]; the channel list reads are SharedPreferences
+ * reads (safe on any thread).
+ */
+class MediaRepository(context: Context) {
+
+    private val appContext = context.applicationContext
+    private val prefs =
+        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    init {
+        // Preload the duration resolver's on-disk cache so resolved durations
+        // survive restarts (no watch-page re-fetch on the first refresh).
+        VideoDurationResolver.init(appContext)
+    }
+
+    // ── Saved channels ──────────────────────────────────────────────
+
+    /**
+     * Saved channels, oldest first. A new install is seeded with the default
+     * channel (Safina Society) so the Media tab isn't empty — but ONLY on the
+     * very first read (KEY_CHANNELS never written). If the user later removes
+     * every channel, the empty list is respected: the default must NOT come
+     * back.
+     */
+    fun getSavedChannels(): List<SavedChannel> {
+        val json = prefs.getString(KEY_CHANNELS, null)
+        if (json == null) {
+            saveChannels(listOf(DEFAULT_CHANNEL))
+            return listOf(DEFAULT_CHANNEL)
+        }
+        return parseChannels(json)
+    }
+
+    /** Result of adding a channel: success (with the channel) or an error message. */
+    sealed class AddChannelResult {
+        data class Success(val channel: SavedChannel) : AddChannelResult()
+        data class Error(val message: String) : AddChannelResult()
+    }
+
+    /**
+     * Resolves [input] (bare id, channel URL or @handle) and saves the channel.
+     * Network resolution of handles runs on a background dispatcher. The
+     * avatar is NOT fetched here (it would block the add dialog on a page
+     * fetch) — [fillMissingAvatars] picks it up right after, triggered by the
+     * Media tab's channel-change effect; until then the UI shows initials.
+     */
+    suspend fun addChannel(input: String): AddChannelResult = withContext(Dispatchers.IO) {
+        val trimmed = input.trim()
+        if (trimmed.isEmpty()) {
+            return@withContext AddChannelResult.Error("Enter a channel id, URL or @handle")
+        }
+        val channelId = ChannelIdResolver.resolve(trimmed)
+        if (channelId == null) {
+            return@withContext AddChannelResult.Error(
+                "Couldn't find that channel. Check the handle or paste the channel URL."
+            )
+        }
+        val existing = getSavedChannels()
+        if (existing.any { it.channelId == channelId }) {
+            return@withContext AddChannelResult.Error("That channel is already saved")
+        }
+        val channel = SavedChannel(
+            channelId = channelId,
+            displayName = trimmed.removePrefix("@"),
+            sourceRef = trimmed
+        )
+        saveChannels(existing + channel)
+        // Notification baseline: fetch the new channel's feed immediately and
+        // mark EVERY existing video as already-notified, so the background
+        // worker never notifies about pre-existing uploads (the "added a
+        // channel → notification spam of old videos" bug). The feed is also
+        // cached here, so the Media tab shows the content right away.
+        runCatching {
+            refreshVideos(channelId)?.let { fresh ->
+                if (fresh.isNotEmpty()) {
+                    markVideosNotified(getNotifiedVideoIds() + fresh.map { it.videoId })
+                }
+            }
+        }
+        AddChannelResult.Success(channel)
+    }
+
+    fun removeChannel(channelId: String) {
+        val channels = getSavedChannels().filterNot { it.channelId == channelId }
+        saveChannels(channels)
+        if (getSelectedChannelId() == channelId) {
+            setSelectedChannel(channels.firstOrNull()?.channelId)
+        }
+    }
+
+    fun getSelectedChannelId(): String? =
+        prefs.getString(KEY_SELECTED_CHANNEL, null)
+
+    fun setSelectedChannel(channelId: String?) {
+        prefs.edit().putString(KEY_SELECTED_CHANNEL, channelId).apply()
+    }
+
+    private fun saveChannels(channels: List<SavedChannel>) {
+        val arr = JSONArray()
+        channels.forEach { c ->
+            arr.put(
+                JSONObject()
+                    .put("channelId", c.channelId)
+                    .put("displayName", c.displayName)
+                    .put("sourceRef", c.sourceRef)
+                    .put("avatarUrl", c.avatarUrl ?: "")
+            )
+        }
+        prefs.edit().putString(KEY_CHANNELS, arr.toString()).apply()
+    }
+
+    private fun parseChannels(json: String): List<SavedChannel> {
+        return try {
+            val arr = JSONArray(json)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.getJSONObject(i)
+                SavedChannel(
+                    channelId = o.getString("channelId"),
+                    displayName = o.optString("displayName", o.getString("channelId")),
+                    sourceRef = o.optString("sourceRef", o.getString("channelId")),
+                    avatarUrl = o.optString("avatarUrl", "").ifBlank { null }
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Fetches missing channel avatars (best-effort) and persists the updated
+     * channel list. Returns the updated list when anything changed, else null.
+     */
+    suspend fun fillMissingAvatars(channels: List<SavedChannel>): List<SavedChannel>? {
+        if (channels.none { it.avatarUrl == null }) return null
+        var changed = false
+        val updated = channels.map { c ->
+            if (c.avatarUrl == null) {
+                val url = ChannelAvatarResolver.fetchAvatar(c.channelId)
+                if (url != null) {
+                    changed = true
+                    c.copy(avatarUrl = url)
+                } else {
+                    c
+                }
+            } else {
+                c
+            }
+        }
+        if (!changed) return null
+        saveChannels(updated)
+        return updated
+    }
+
+    // ── Manual videos (added by URL) ───────────────────────────────
+
+    /** Result of resolving a pasted video URL into a [MediaVideo]. */
+    sealed class ResolveVideoResult {
+        /** Resolved metadata; the caller should save it as a manual video. */
+        data class Success(val video: MediaVideo) : ResolveVideoResult()
+
+        /** The video is already part of [channel]'s feed (no need to add). */
+        data class AlreadyExists(val video: MediaVideo) : ResolveVideoResult()
+
+        data class Error(val message: String) : ResolveVideoResult()
+    }
+
+    /**
+     * Resolves a user-pasted YouTube URL for [fallbackChannel] (the channel
+     * whose feed the user is adding into). Verifies the video against the
+     * channel's cached/fresh RSS first (best-effort); when it isn't there,
+     * fetches metadata via YouTube's public oEmbed endpoint (title, channel
+     * name, thumbnail — no duration, no description). Publication time stays
+     * 0 (unknown) so the video is never presented as newly published.
+     */
+    suspend fun resolveVideoByUrl(
+        input: String,
+        fallbackChannel: SavedChannel?
+    ): ResolveVideoResult = withContext(Dispatchers.IO) {
+        val videoId = extractYouTubeVideoId(input)
+            ?: return@withContext ResolveVideoResult.Error(
+                "That doesn't look like a YouTube video URL."
+            )
+        // Already in this channel's cache? Reuse the RSS metadata.
+        fallbackChannel?.let { channel ->
+            getCachedVideos(channel.channelId)
+                ?.first?.firstOrNull { it.videoId == videoId }
+                ?.let { return@withContext ResolveVideoResult.AlreadyExists(it) }
+        }
+        // Already in the channel's LIVE feed (cache stale)? Same.
+        fallbackChannel?.let { channel ->
+            fetchFeedVideos(channel.channelId)
+                ?.firstOrNull { it.videoId == videoId }
+                ?.let { return@withContext ResolveVideoResult.AlreadyExists(it) }
+        }
+        // Not in the feed — fetch metadata from oEmbed (no API key needed).
+        val meta = fetchOEmbedMetadata(videoId)
+            ?: return@withContext ResolveVideoResult.Error(
+                "Couldn't load video info. Check the URL and your connection."
+            )
+        ResolveVideoResult.Success(
+            MediaVideo(
+                videoId = videoId,
+                title = meta.title,
+                channelId = fallbackChannel?.channelId ?: "",
+                channelName = fallbackChannel?.displayName ?: meta.authorName,
+                publishedAtEpochMillis = 0L, // unknown date — never pretend it's new
+                thumbnailUrl = meta.thumbnailUrl,
+                viewCount = 0L,
+                isShort = false,
+                // Same live-thumbnail signal as the RSS parser.
+                isLive = meta.thumbnailUrl.contains("_live.", ignoreCase = true),
+                // oEmbed omits duration, so resolve it from the watch page too
+                // (best-effort; the card just shows no time badge on failure).
+                durationSeconds = runCatching {
+                    VideoDurationResolver.fetchDuration(videoId)
+                }.getOrNull() ?: 0L
+            )
+        )
+    }
+
+    private data class OEmbedMeta(
+        val title: String,
+        val authorName: String,
+        val thumbnailUrl: String
+    )
+
+    /** Fetches title / author / thumbnail via YouTube's public oEmbed endpoint. */
+    private fun fetchOEmbedMetadata(videoId: String): OEmbedMeta? {
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        val apiUrl = "https://www.youtube.com/oembed?url=" +
+            URLEncoder.encode(watchUrl, "UTF-8") + "&format=json"
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val o = JSONObject(body)
+            OEmbedMeta(
+                title = o.optString("title", ""),
+                authorName = o.optString("author_name", ""),
+                thumbnailUrl = o.optString("thumbnail_url", "")
+            )
+        } catch (e: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    // ── Latest videos (RSS + cache) ─────────────────────────────────
+
+    /**
+     * Reads the cached videos for [channelId] (never network). Returns null
+     * when nothing is cached yet. Also surfaces the cache age so the UI can
+     * show a "cached" hint.
+     */
+    fun getCachedVideos(channelId: String): Pair<List<MediaVideo>, Long>? {
+        val file = cacheFile(channelId)
+        if (!file.exists()) return null
+        return try {
+            val obj = JSONObject(file.readText(Charsets.UTF_8))
+            val savedAt = obj.optLong("savedAt", 0L)
+            val videos = parseVideos(obj.optJSONArray("videos"))
+            if (videos.isEmpty()) null else videos to savedAt
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Fetches the channel's RSS feed, parses the latest videos, updates the
+     * local cache and returns them. Returns null on any network/parse failure
+     * so the UI can fall back to the cache and show an error hint.
+     */
+    suspend fun refreshVideos(channelId: String): List<MediaVideo>? = withContext(Dispatchers.IO) {
+        val url = "https://www.youtube.com/feeds/videos.xml?channel_id=$channelId"
+        var connection: HttpURLConnection? = null
+        try {
+            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/atom+xml")
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return@withContext null
+            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            // Classify Shorts from the channel's /shorts tab (many Shorts omit
+            // the #shorts hashtag, so title-only detection misses most of them).
+            // Best-effort: an empty set degrades to hashtag detection.
+            val shortsIds = ShortsIdResolver.fetchShortsIds(channelId)
+            val fresh = YouTubeRssParser.parse(body, shortsIds)
+            // Carry over already-resolved durations from the cache so a refresh
+            // never re-fetches watch pages for videos we've enriched before
+            // (the RSS feed itself carries no duration field).
+            val knownDurations = getCachedVideos(channelId)?.first
+                ?.associate { it.videoId to it.durationSeconds }
+                ?.filterValues { it > 0L } ?: emptyMap()
+            val withKnown = fresh.map { v ->
+                val known = knownDurations[v.videoId]
+                if (known != null) v.copy(durationSeconds = known) else v
+            }
+            // Then enrich the newest still-unknown videos with their duration
+            // (best-effort: a failure just leaves the badge off).
+            val videos = enrichDurations(withKnown)
+            // Trace every feed item straight from the parsed RSS so we can
+            // confirm the videoId handed to the embedded player belongs to
+            // this exact RSS entry (no stale/mixed/hardcoded ids).
+            videos.forEach { v ->
+                Log.d(
+                    TAG,
+                    "RSS_VIDEO channelId=$channelId videoId=${v.videoId} " +
+                        "videoUrl=https://www.youtube.com/watch?v=${v.videoId} title=${v.title}"
+                )
+            }
+            // A manually added video is never "new" — even when it later shows
+            // up in RSS, it must not generate a notification (the user added it
+            // deliberately as old content). Baseline it alongside the RSS items.
+            val manualIds = MediaLibraryStore(appContext)
+                .getManuallyAddedVideos().map { it.videoId }.toSet()
+            val baseline = videos.filter { it.videoId in manualIds }.map { it.videoId }
+            if (baseline.isNotEmpty()) {
+                markVideosNotified(getNotifiedVideoIds() + baseline)
+            }
+            if (videos.isNotEmpty()) writeCache(channelId, videos)
+            videos
+        } catch (e: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    /**
+     * Best-effort enrichment: fills [MediaVideo.durationSeconds] for the newest
+     * [top] videos that don't have one yet. Fetching a watch page per video is
+     * expensive, so it's capped to the head of the feed — the values persist in
+     * the cache and are carried over on later refreshes. Never fails a refresh:
+     * any fetch error leaves that video's badge off.
+     *
+     * Fetches run with BOUNDED parallelism ([concurrency] watch-page requests
+     * in flight at once): a multi-channel refresh would otherwise stall on up
+     * to 10 sequential ~1–3s requests per channel. The batches are awaited in
+     * order so the result list keeps its original (newest-first) order.
+     */
+    private suspend fun enrichDurations(
+        videos: List<MediaVideo>,
+        top: Int = 10,
+        concurrency: Int = 4
+    ): List<MediaVideo> {
+        val missing = videos.filter { it.durationSeconds <= 0L }.take(top)
+        if (missing.isEmpty()) return videos
+        val byId = videos.associateBy { it.videoId }.toMutableMap()
+        missing.chunked(concurrency).forEach { batch ->
+            val results = coroutineScope {
+                batch.map { v ->
+                    async {
+                        v.videoId to runCatching {
+                            VideoDurationResolver.fetchDuration(v.videoId)
+                        }.getOrNull()
+                    }
+                }.awaitAll()
+            }
+            for ((videoId, seconds) in results) {
+                if (seconds != null && seconds > 0L) {
+                    byId[videoId]?.let { original ->
+                        byId[videoId] = original.copy(durationSeconds = seconds)
+                    }
+                }
+            }
+        }
+        return videos.map { byId[it.videoId] ?: it }
+    }
+
+    /**
+     * Fetches a channel's RSS and parses the latest videos WITHOUT the Shorts
+     * classification and WITHOUT touching the cache — the lightweight check
+     * used when resolving a user-pasted video URL (verifies membership in the
+     * channel's real feed). Null on any network/parse failure.
+     */
+    private fun fetchFeedVideos(channelId: String): List<MediaVideo>? {
+        val url = "https://www.youtube.com/feeds/videos.xml?channel_id=$channelId"
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/atom+xml")
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            YouTubeRssParser.parse(body, emptySet())
+        } catch (e: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    // ── Media notifications (channel updates) ───────────────────────
+
+    /**
+     * Whether the app posts a notification when a saved channel uploads a new
+     * video. Default ON; the toggle lives on the home (Quran) tab.
+     */
+    fun isMediaNotificationsEnabled(): Boolean =
+        prefs.getBoolean(KEY_MEDIA_NOTIFICATIONS_ENABLED, DEFAULT_MEDIA_NOTIFICATIONS_ENABLED)
+
+    /** Persists the media-notifications toggle state. */
+    fun setMediaNotificationsEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_MEDIA_NOTIFICATIONS_ENABLED, enabled).apply()
+    }
+
+    /** Video ids already notified about (dedup — never re-notify the same video). */
+    fun getNotifiedVideoIds(): Set<String> =
+        prefs.getStringSet(KEY_NOTIFIED_VIDEOS, emptySet()) ?: emptySet()
+
+    /** Persists the notified-video id set (capped so it can't grow unbounded). */
+    fun markVideosNotified(ids: Set<String>) {
+        val capped = ids.toList().takeLast(MAX_NOTIFIED_VIDEOS).toSet()
+        prefs.edit().putStringSet(KEY_NOTIFIED_VIDEOS, capped).apply()
+    }
+
+    /**
+     * Builds the home-page "Latest Updates" feed: the newest video per saved
+     * channel (from cached feeds — never network), newest first. Empty when
+     * nothing is cached yet.
+     */
+    fun buildChannelUpdates(videos: List<MediaVideo>): List<MediaChannelUpdate> =
+        videos
+            .groupBy { it.channelId }
+            .map { (channelId, vs) ->
+                val newest = vs.maxByOrNull { it.publishedAtEpochMillis }!!
+                MediaChannelUpdate(
+                    channelId = channelId,
+                    channelName = newest.channelName.ifBlank { channelId },
+                    latestVideoId = newest.videoId,
+                    latestVideoTitle = newest.title,
+                    publishedAtEpochMillis = newest.publishedAtEpochMillis
+                )
+            }
+            .sortedByDescending { it.publishedAtEpochMillis }
+
+    // ── Latest Updates feed (persisted history) ─────────────────────
+
+    /**
+     * The home tab's "Latest Updates" feed: the newest [MediaUpdates.MAX]
+     * channel updates recorded by the background worker. Each entry matches a
+     * notification the user received; dismissing one removes it permanently.
+     */
+    fun getUpdatesHistory(): List<MediaChannelUpdate> =
+        MediaUpdates.decode(prefs.getString(KEY_UPDATES_HISTORY, null)).take(MediaUpdates.MAX)
+
+    /**
+     * Records freshly detected updates (called by the worker right after
+     * notifying), merged into the existing history — deduped by video id,
+     * newest first, capped at [MediaUpdates.MAX].
+     */
+    fun recordChannelUpdates(updates: List<MediaChannelUpdate>) {
+        if (updates.isEmpty()) return
+        val merged = MediaUpdates.merge(getUpdatesHistory(), updates)
+        prefs.edit().putString(KEY_UPDATES_HISTORY, MediaUpdates.encode(merged)).apply()
+    }
+
+    /** Removes one update from the feed permanently (it won't re-appear). */
+    fun dismissUpdate(latestVideoId: String) {
+        val remaining = getUpdatesHistory().filterNot { it.latestVideoId == latestVideoId }
+        prefs.edit().putString(KEY_UPDATES_HISTORY, MediaUpdates.encode(remaining)).apply()
+    }
+
+    /**
+     * How many of [updates] the user hasn't seen yet (drives the Media-tab
+     * badge). An update is "unread" until its id is in the seen set.
+     */
+    fun countUnreadUpdates(updates: List<MediaChannelUpdate>): Int =
+        updates.count { it.latestVideoId !in getSeenUpdateIds() }
+
+    /** Marks the given update ids as seen; returns how many were newly marked. */
+    fun markUpdatesSeen(videoIds: List<String>): Int {
+        if (videoIds.isEmpty()) return 0
+        val seen = getSeenUpdateIds()
+        val newly = videoIds.filter { it !in seen }.toSet()
+        if (newly.isEmpty()) return 0
+        val merged = (seen + newly).toList().takeLast(MAX_NOTIFIED_VIDEOS).toSet()
+        prefs.edit().putStringSet(KEY_SEEN_UPDATE_IDS, merged).apply()
+        return newly.size
+    }
+
+    private fun getSeenUpdateIds(): Set<String> =
+        prefs.getStringSet(KEY_SEEN_UPDATE_IDS, emptySet()) ?: emptySet()
+
+    // ── Feed filters (persisted across restarts, per context) ──────
+
+    /**
+     * The saved feed filter for [channelId], or the All Feed filter when
+     * [channelId] is null. Every channel keeps its OWN filter, separate from
+     * the All Feed one. Defaults when never set or corrupt.
+     */
+    fun getFeedFilter(channelId: String? = null): FeedFilter =
+        decodeFeedFilter(prefs.getString(feedFilterKey(channelId), null)) ?: FeedFilter()
+
+    /** Persists the feed filter for [channelId] (null = All Feed). */
+    fun setFeedFilter(filter: FeedFilter, channelId: String? = null) {
+        prefs.edit().putString(feedFilterKey(channelId), encodeFeedFilter(filter)).apply()
+    }
+
+    /** Per-context storage key: the All Feed key, or a per-channel key. */
+    private fun feedFilterKey(channelId: String?): String =
+        if (channelId == null) KEY_FEED_FILTER
+        else KEY_FEED_FILTER + "_channel_" + channelId
+
+    /**
+     * One-time seed for a fresh install (or the first run after this feature
+     * arrived): pre-fills the history from the cached feeds so the feed isn't
+     * empty before the first background check. Only runs when the history key
+     * has NEVER been written, so updates the user later dismisses can never be
+     * resurrected by another seed.
+     */
+    fun ensureUpdatesHistorySeeded(channels: List<SavedChannel>) {
+        if (prefs.contains(KEY_UPDATES_HISTORY)) return
+        val seeded = buildChannelUpdates(
+            channels.mapNotNull { getCachedVideos(it.channelId)?.first }.flatten()
+        )
+        if (seeded.isNotEmpty()) {
+            prefs.edit()
+                .putString(KEY_UPDATES_HISTORY, MediaUpdates.encode(seeded.take(MediaUpdates.MAX)))
+                .apply()
+        }
+    }
+
+    // ── Aggregate feed (Subscriptions-style: every saved channel) ──
+
+    /**
+     * Merges the cached videos of ALL [channels] (never network), newest
+     * first. Used for the instant first paint of the Media tab.
+     */
+    fun getAllCachedVideos(channels: List<SavedChannel>): List<MediaVideo> =
+        channels
+            .mapNotNull { getCachedVideos(it.channelId)?.first }
+            .flatten()
+            .sortedByDescending { it.publishedAtEpochMillis }
+
+    /**
+     * Refreshes EVERY channel's RSS feed and merges the results, newest
+     * first. Returns null only when every channel failed (the UI falls back to
+     * the cache and shows an error hint); partial failures keep the feeds that
+     * succeeded.
+     */
+    suspend fun refreshAllVideos(channels: List<SavedChannel>): List<MediaVideo>? {
+        var anySucceeded = false
+        val merged = ArrayList<MediaVideo>()
+        for (channel in channels) {
+            val fresh = refreshVideos(channel.channelId)
+            if (fresh != null) {
+                anySucceeded = true
+                merged.addAll(fresh)
+            }
+        }
+        if (!anySucceeded) return null
+        return merged.sortedByDescending { it.publishedAtEpochMillis }
+    }
+
+    private fun cacheFile(channelId: String): File =
+        File(appContext.filesDir, "media_videos_$channelId.json")
+
+    private fun writeCache(channelId: String, videos: List<MediaVideo>) {
+        val arr = JSONArray()
+        videos.forEach { v ->
+            arr.put(
+                JSONObject()
+                    .put("videoId", v.videoId)
+                    .put("title", v.title)
+                    .put("channelId", v.channelId)
+                    .put("channelName", v.channelName)
+                    .put("publishedAt", v.publishedAtEpochMillis)
+                    .put("thumbnailUrl", v.thumbnailUrl)
+                    .put("viewCount", v.viewCount)
+                    .put("isShort", v.isShort)
+                    .put("isLive", v.isLive)
+                    .put("durationSeconds", v.durationSeconds)
+            )
+        }
+        val obj = JSONObject()
+            .put("savedAt", System.currentTimeMillis())
+            .put("videos", arr)
+        cacheFile(channelId).writeText(obj.toString(), Charsets.UTF_8)
+    }
+
+    private fun parseVideos(arr: JSONArray?): List<MediaVideo> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            try {
+                val o = arr.getJSONObject(i)
+                MediaVideo(
+                    videoId = o.getString("videoId"),
+                    title = o.optString("title", ""),
+                    channelId = o.optString("channelId", ""),
+                    channelName = o.optString("channelName", ""),
+                    publishedAtEpochMillis = o.optLong("publishedAt", 0L),
+                    thumbnailUrl = o.optString("thumbnailUrl", ""),
+                    viewCount = o.optLong("viewCount", 0L),
+                    isShort = o.optBoolean("isShort", false),
+                    isLive = o.optBoolean("isLive", false),
+                    durationSeconds = o.optLong("durationSeconds", 0L)
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    private companion object {
+        const val TAG = "MediaRepository"
+        const val PREFS_NAME = "media_prefs"
+        const val KEY_CHANNELS = "saved_channels"
+        const val KEY_SELECTED_CHANNEL = "selected_channel"
+        const val KEY_MEDIA_NOTIFICATIONS_ENABLED = "media_notifications_enabled"
+        const val KEY_NOTIFIED_VIDEOS = "notified_video_ids"
+        const val KEY_UPDATES_HISTORY = "updates_history"
+        const val KEY_SEEN_UPDATE_IDS = "seen_update_ids"
+        const val KEY_FEED_FILTER = "feed_filter"
+        const val MAX_NOTIFIED_VIDEOS = 200
+        const val DEFAULT_MEDIA_NOTIFICATIONS_ENABLED = true
+
+        val DEFAULT_CHANNEL = SavedChannel(
+            channelId = "UC2cX3SmsdWsrRS8t_5zvzEw", // Safina Society (@SafinaSociety)
+            displayName = "Safina Society",
+            sourceRef = "@SafinaSociety"
+        )
+    }
+}
