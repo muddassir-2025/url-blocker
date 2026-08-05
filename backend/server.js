@@ -169,16 +169,23 @@ function pipeDirect(url, videoId, ext, size, req, res, source) {
 
 // ── yt-dlp (primary) ─────────────────────────────────────────────────────
 
-// Client strategies, most bot-resistant first. YouTube bot-blocks the plain
-// `web` client on datacenter IPs ("Sign in to confirm you're not a bot"); the
-// mobile innertube clients (android_vr / android / ios) usually slip through
-// without cookies. Each entry is tried until one returns a playable URL;
-// `default` (yt-dlp's own chain incl. web) is the last resort.
-const CLIENT_CHAINS = [
-  'youtube:player_client=android_vr,android,ios,web_safari',
-  'youtube:player_client=default,-web',
-  null, // yt-dlp default
-];
+// Client strategies. Without cookies, YouTube bot-blocks the plain `web`
+// client on datacenter IPs ("Sign in to confirm you're not a bot"), so the
+// mobile innertube clients (android_vr / android / ios) go first. WITH
+// cookies (COOKIES_B64 / cookies.txt), the default chain — which actually
+// uses the cookies — is the most reliable, so it moves to the front. Each
+// entry is tried until one returns a playable URL.
+const CLIENT_CHAINS = cookiesPath
+  ? [
+      null, // yt-dlp default (incl. web) — uses the cookies
+      'youtube:player_client=default,-web',
+      'youtube:player_client=android_vr,android,ios,web_safari,web_music',
+    ]
+  : [
+      'youtube:player_client=android_vr,android,ios,web_safari,web_music',
+      'youtube:player_client=default,-web',
+      null, // yt-dlp default
+    ];
 
 async function streamWithYtDlp(url, videoId, req, res) {
   let lastError = null;
@@ -331,9 +338,14 @@ app.get('/api/audio', async (req, res) => {
     } catch (err2) {
       console.error('[ytdl-core] fallback failed:', err2.message);
       if (!res.headersSent) {
+        // Include the underlying reason so the app (and support) can see the
+        // real cause — usually YouTube's bot check on datacenter IPs.
+        // Keep it short — the app shows the body as-is, capped at 300 chars.
+        const detail = String((err && err.message) || err || 'yt-dlp and ytdl-core both failed').slice(0, 150);
         res.status(500).json({
           error:
-            'Could not fetch this audio right now. YouTube changes its internals often — try again in a few minutes.',
+            'Could not fetch this audio right now. YouTube changes its internals often — try again in a few minutes. ' +
+            `(Reason: ${detail})`,
         });
       }
     }
