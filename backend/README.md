@@ -8,15 +8,22 @@ piped straight through to the phone.
   (yt-dlp). Actively maintained and works against current YouTube.
 - **Bot-detection defense:** YouTube bot-blocks datacenter IPs (Render free
   tier) with *"Sign in to confirm you're not a bot"* — even with valid signed-in
-  cookies, because the block is IP-level. The reliable fix is the bundled
-  **PO-token provider** ([bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)):
-  a local HTTP server that solves YouTube's BotGuard attestation **on the
-  server's own IP** and hands yt-dlp a proof-of-origin (PO) token. When the
-  provider is up, the server tries the `web` client + PO token first; no
-  cookies needed, so every user can download.
-- **Client-chain retries:** if the provider is unavailable, the server retries
-  the mobile innertube clients (`android_vr` → `android` → `ios` → `web_safari`)
-  and the default chain, and uses signed-in cookies if `COOKIES_B64` is set.
+  cookies, because the block is IP-level. The strongest defenses, in order:
+  1. **Mobile innertube clients** (`android_vr` → `android` → `ios` →
+     `web_safari`) are tried FIRST: they return direct signed googlevideo URLs
+     with no PO token needed, are far less bot-flagged than web clients, and
+     are yt-dlp's own default client set (2026.07.04: `('android_vr',
+     'web_safari')`).
+  2. **PO-token provider** ([bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)):
+     a local HTTP server that solves YouTube's BotGuard attestation **on the
+     server's own IP** and hands yt-dlp a proof-of-origin (PO) token. The
+     `web` client + PO token is the FALLBACK chain for videos the mobile
+     clients refuse (age-gated etc.). NB: even a valid PO token does NOT
+     unblock web clients on hard-flagged IPs (player response still answers
+     `LOGIN_REQUIRED`), so mobile-first is required.
+- **Client-chain retries:** each request walks the chain list until one returns
+  a playable URL; signed-in cookies are used on the non-PO chains when
+  `COOKIES_B64` is set.
 - **Automatic fallback:** [`@distube/ytdl-core`](https://www.npmjs.com/package/@distube/ytdl-core).
   If every yt-dlp client fails, the server falls back to ytdl-core — no app
   update needed.
@@ -95,17 +102,23 @@ curl "http://localhost:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%
 - At boot, `server.js` spawns the provider on `127.0.0.1:4416` (a child
   process, ~100–150 MB). The Render log will show
   `[pot] PO-token provider ready on port 4416`.
-- Every yt-dlp call then runs the `web` client with a fresh PO token — this
-  bypasses the datacenter-IP bot check. Cookies (if set) are still passed too.
-- The `web`/`web_embedded` chains pass `youtube:fetch_pot=always` alongside
+- Every yt-dlp call walks the client chain list: **mobile clients first**
+  (`android_vr,android,ios,web_safari,web_music` — direct signed URLs, no PO
+  token, no provider round-trip), then the `web`/`web_embedded` chain with a
+  fresh PO token, then the default chain. Cookies (if set) are still passed on
+  the non-PO chains.
+- The `web`/`web_embedded` chain passes `youtube:fetch_pot=always` alongside
   `player_client=web,web_embedded` (same extractor-args flag, joined with
-  `;`). This is required: it forces yt-dlp to mint a **player** PO token and
-  attach it to the player API request itself. Without it, yt-dlp only fetches
-  the **gvs** token lazily after a successful player response — but on a
-  flagged datacenter IP the tokenless player request is bot-blocked (HTTP 403
-  / LOGIN_REQUIRED / "Sign in to confirm you're not a bot"), so formats are
-  never processed, the gvs token is never requested, and the boot check logs
-  "provider saw NO token request during the probe".
+  `;`). This is required for that chain: it forces yt-dlp to mint a **player**
+  PO token and attach it to the player API request itself. Without it, yt-dlp
+  only fetches the **gvs** token lazily after a successful player response —
+  but on a flagged datacenter IP the tokenless player request is bot-blocked
+  (HTTP 403 / LOGIN_REQUIRED / "Sign in to confirm you're not a bot"), so
+  formats are never processed, the gvs token is never requested, and the boot
+  check logs "provider saw NO token request during the probe".
+  IMPORTANT: player_client and fetch_pot must share the SAME `youtube:` flag
+  (joined with `;`) — a separate second `youtube:` flag would override the
+  first (only the last flag per extractor key survives).
 - If the provider fails to build or start, the server logs a warning and runs
   without PO tokens (client chains + ytdl-core), exactly like before.
 
