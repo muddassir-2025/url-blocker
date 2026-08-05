@@ -5,3 +5,5 @@ plugins/
 cookies.json
 cookies.txt
 *.log
+# ytdl-core debug dumps written when watch.html parsing fails
+*-watch.html
