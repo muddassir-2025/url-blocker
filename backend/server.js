@@ -99,6 +99,19 @@ if (ytDlp === youtubeDl) {
 const POT_PORT = Number(process.env.POT_PORT || 4416);
 const PLUGINS_DIR = path.join(__dirname, 'plugins');
 let potReady = false;
+// Provider boot window: on Render's cold free tier the provider process takes
+// 10–25 s to start listening. Requests inside that window must NOT attempt a
+// tokenless download (it always bot-checks from the datacenter IP) — they get
+// a 503 and the app retries a few seconds later. Crash-restarts are gated with
+// a shorter window of their own; both ceilings keep the service from deadlocking.
+const SERVER_START = Date.now();
+const STARTUP_WINDOW_MS = 180 * 1000;
+const RESTART_WINDOW_MS = 60 * 1000;
+let potEverReady = false;
+let potDownAt = null;
+const PROVIDER_BUILT = fs.existsSync(
+  path.join(__dirname, 'pot-provider', 'server', 'build', 'main.js')
+);
 // Counts provider-side token generations (each "Generating POT" line logged
 // by the child provider process = one real token generation). Lets the boot
 // check and request logs definitively report whether the PO-token plugin
@@ -140,6 +153,7 @@ function startPotProvider() {
     });
     child.on('exit', (code, signal) => {
       potReady = false;
+      potDownAt = Date.now();
       const willRestart = restarts < MAX_RESTARTS;
       console.warn(
         `[pot] provider exited (code ${code}${signal ? ', signal ' + signal : ''})` +
@@ -163,6 +177,8 @@ function startPotProvider() {
         res.resume();
         if (!potReady) {
           potReady = true;
+          potEverReady = true;
+          potDownAt = null;
           console.log(`[pot] PO-token provider ready on port ${POT_PORT}`);
         }
       });
@@ -178,6 +194,8 @@ function startPotProvider() {
   const pre = http.get({ host: '127.0.0.1', port: POT_PORT, path: '/' }, (res) => {
     res.resume();
     potReady = true;
+    potEverReady = true;
+    potDownAt = null;
     console.log(`[pot] reusing already-running provider on port ${POT_PORT}`);
   });
   pre.on('error', () => {
@@ -188,20 +206,36 @@ function startPotProvider() {
 }
 startPotProvider();
 
+function waitForPotReady(maxMs) {
+  return new Promise((resolve) => {
+    if (potReady) return resolve(true);
+    const deadline = Date.now() + maxMs;
+    const tick = () => {
+      if (potReady) return resolve(true);
+      if (Date.now() > deadline) return resolve(false);
+      setTimeout(tick, 1000);
+    };
+    tick();
+  });
+}
+
 // Boot-time self-check: run one real extraction with the plugin and confirm
 // yt-dlp sees the bgutil PO-token provider (its verbose output lists it). This
 // makes a wiring regression visible in the logs instead of silent bot-check 500s.
+// IMPORTANT: it only runs AFTER the provider is actually listening — earlier
+// deploys probed too early and logged bogus ECONNREFUSED verdicts.
 function verifyPotWiring() {
   const { execFile } = require('child_process');
   const probeUrl = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
 
   // 1) Exact yt-dlp version — version drift between the local binary and the
   //    build-cached binary on Render has caused silent PO-token differences
-  //    before; pin the comparison in the logs.
+  //    before; pin the comparison in the logs. (30 s timeout: the Linux
+  //    zipapp's first run on a cold instance exceeds 10 s.)
   execFile(
     BIN_PATH,
     ['--version'],
-    { timeout: 10000, encoding: 'utf8' },
+    { timeout: 30000, encoding: 'utf8' },
     (err, stdout) => {
       const ver = String(stdout || (err && err.message) || '?').trim().slice(0, 40);
       console.log(`[pot] yt-dlp version: ${ver}`);
@@ -225,6 +259,12 @@ function verifyPotWiring() {
   // independent of yt-dlp. A 200 proves the provider can generate tokens on
   // THIS IP (the decisive test for Render's datacenter IP); a 500 pins the
   // failure on the provider's solve path rather than the yt-dlp plugin wiring.
+  // The probe also acts as a WARMUP: it seeds the provider's session cache, so
+  // the first real request doesn't pay the slow cold solve.
+  // NOTE: the plugin's own solve timeout is 20 s — if the probe 200s in, say,
+  // 25–45 s, real requests will still fail. The logged duration makes the
+  // verdict interpretable ("200 in 2 s" = fine; "200 in 38 s" = too slow).
+  const probeStartedAt = Date.now();
   const getPotProbe = http.request(
     {
       host: '127.0.0.1',
@@ -238,10 +278,11 @@ function verifyPotWiring() {
       res.on('data', (d) => (body += d));
       res.on('end', () => {
         const ok = res.statusCode === 200;
+        const ms = Date.now() - probeStartedAt;
         console.log(
           ok
-            ? '[pot] direct /get_pot probe -> HTTP 200 — provider CAN solve BotGuard on this IP (plugin wiring is the suspect)'
-            : `[pot] direct /get_pot probe -> HTTP ${res.statusCode} — ${String(body).slice(0, 200)} (provider solve is the suspect)`
+            ? `[pot] direct /get_pot probe -> HTTP 200 in ${ms / 1000}s — provider CAN solve BotGuard on this IP (plugin wiring is the suspect)`
+            : `[pot] direct /get_pot probe -> HTTP ${res.statusCode} after ${ms / 1000}s — ${String(body).slice(0, 200)} (provider solve is the suspect)`
         );
       });
     }
@@ -256,7 +297,7 @@ function verifyPotWiring() {
   getPotProbe.write('{}');
   getPotProbe.end();
 
-  // 3) Full extraction through the plugin, then report whether the provider
+  // 4) Full extraction through the plugin, then report whether the provider
   //    actually generated a token during it (potActivity delta). This turns
   //    the boot log into a complete end-to-end verdict.
   const before = potActivity;
@@ -288,7 +329,16 @@ function verifyPotWiring() {
     }
   );
 }
-setTimeout(verifyPotWiring, 10000);
+
+async function runBootCheck() {
+  const ready = await waitForPotReady(90 * 1000);
+  if (!ready) {
+    console.warn('[pot] boot check skipped: provider did not become ready within 90 s');
+    return;
+  }
+  verifyPotWiring();
+}
+runBootCheck();
 
 // ── YouTube cookies (best defense against bot detection) ─────────────────
 // Priority: COOKIES_B64 env var (base64 of a Netscape-format cookies.txt,
@@ -601,6 +651,17 @@ app.get('/api/audio', async (req, res) => {
       given.length === TOKEN.length &&
       crypto.timingSafeEqual(Buffer.from(given), Buffer.from(TOKEN));
     if (!ok) return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // During the provider's startup window (or a crash-restart), answer 503 so
+  // the app retries in a few seconds instead of burning a doomed tokenless
+  // attempt (which always bot-checks on Render's datacenter IP). Both windows
+  // are time-capped so the service can never deadlock — after them the server
+  // falls back to the non-PO chains.
+  const inStartupWindow = Date.now() - SERVER_START < STARTUP_WINDOW_MS;
+  const inRestartWindow = potEverReady && potDownAt !== null && Date.now() - potDownAt < RESTART_WINDOW_MS;
+  if (PROVIDER_BUILT && !potReady && (inStartupWindow || inRestartWindow)) {
+    return res.status(503).json({ error: 'Audio service is warming up — retry in a moment' });
   }
 
   if (activeStreams >= MAX_CONCURRENT) {
