@@ -35,7 +35,10 @@
 
 const express = require('express');
 const ytdl = require('@distube/ytdl-core');
-const { youtubeDl, create } = require('youtube-dl-exec');
+// `args` is youtube-dl-exec's exported dargs builder — we use it to log the
+// EXACT command line that gets sent to yt-dlp (the user-visible proof of what
+// the integration passes, including the PO-token extractor args).
+const { youtubeDl, create, args: buildArgs } = require('youtube-dl-exec');
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
@@ -61,7 +64,8 @@ const UA =
 // skipped the postinstall) fall back to youtube-dl-exec's lazy auto-download
 // and kick a background fetch so the pinned binary is ready for later calls.
 const BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
-const BIN_PATH = path.join(__dirname, 'bin', BIN_NAME);
+// YTDLP_BIN overrides the yt-dlp binary (used for testing / debugging).
+const BIN_PATH = process.env.YTDLP_BIN || path.join(__dirname, 'bin', BIN_NAME);
 // Only trust a non-trivial binary (>= 1 MB) — a truncated fetch must never
 // be "used"; fall back to the lazy auto-download in that case. (yt-dlp's
 // Linux asset is now a ~3 MB zipapp, so 5 MB would wrongly reject it.)
@@ -95,6 +99,13 @@ if (ytDlp === youtubeDl) {
 const POT_PORT = Number(process.env.POT_PORT || 4416);
 const PLUGINS_DIR = path.join(__dirname, 'plugins');
 let potReady = false;
+// Counts provider-side token generations (each "Generating POT" line logged
+// by the child provider process = one real token generation). Lets the boot
+// check and request logs definitively report whether the PO-token plugin
+// actually REACHED the provider. Note: when an already-running provider is
+// REUSED ("reusing already-running provider") this counter can't see its
+// stdout and stays 0 — Render always spawns fresh, so it is accurate there.
+let potActivity = 0;
 
 function startPotProvider() {
   const main = path.join(__dirname, 'pot-provider', 'server', 'build', 'main.js');
@@ -105,7 +116,10 @@ function startPotProvider() {
   const { spawn } = require('child_process');
   const logChild = (prefix, d) => {
     const line = String(d).trim();
-    if (line) console.log(`${prefix} ${line.slice(0, 300)}`);
+    if (line) {
+      console.log(`${prefix} ${line.slice(0, 300)}`);
+      if (/Generating POT/.test(line)) potActivity++;
+    }
   };
 
   const MAX_RESTARTS = 5;
@@ -180,31 +194,66 @@ startPotProvider();
 function verifyPotWiring() {
   const { execFile } = require('child_process');
   const probeUrl = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
+
+  // 1) Exact yt-dlp version — version drift between the local binary and the
+  //    build-cached binary on Render has caused silent PO-token differences
+  //    before; pin the comparison in the logs.
+  execFile(
+    BIN_PATH,
+    ['--version'],
+    { timeout: 10000, encoding: 'utf8' },
+    (err, stdout) => {
+      const ver = String(stdout || (err && err.message) || '?').trim().slice(0, 40);
+      console.log(`[pot] yt-dlp version: ${ver}`);
+    }
+  );
+
+  // 2) Provider /ping from the server side — this is the EXACT endpoint the
+  //    bgutil plugin probes before requesting a token (cached 60 s). Proves
+  //    reachability independently of yt-dlp.
+  const ping = http.get({ host: '127.0.0.1', port: POT_PORT, path: '/ping' }, (res) => {
+    let body = '';
+    res.on('data', (d) => (body += d));
+    res.on('end', () => {
+      console.log(`[pot] provider /ping -> HTTP ${res.statusCode} ${String(body).trim().slice(0, 80)}`);
+    });
+  });
+  ping.on('error', (e) => console.warn(`[pot] provider /ping FAILED: ${e.message}`));
+  ping.setTimeout(5000, () => ping.destroy());
+
+  // 3) Full extraction through the plugin, then report whether the provider
+  //    actually generated a token during it (potActivity delta). This turns
+  //    the boot log into a complete end-to-end verdict.
+  const before = potActivity;
   execFile(
     BIN_PATH,
     [
       '--plugin-dirs', PLUGINS_DIR,
       '--no-warnings', '--no-check-certificates', '--no-update',
       '--socket-timeout', '20',
-      // Also exercise the provider: if a PO token is generated, the provider's
-      // "[pot] Generating POT" lines appear in the server log right after this.
       '--extractor-args', `youtube:player_client=web,web_embedded;youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
       '--print', 'title',
       '-v',
       probeUrl,
     ],
-    { timeout: 45000, encoding: 'utf8' },
+    { timeout: 60000, encoding: 'utf8' },
     (err, stdout, stderr) => {
       const out = `${stdout || ''}\n${stderr || ''}`;
+      const potLines = potActivity - before;
       if (/bgutil/.test(out)) {
-        console.log('[pot] boot check: yt-dlp loads the bgutil PO-token plugin OK (watch for Generating POT lines)');
+        console.log('[pot] boot check: yt-dlp loads the bgutil PO-token plugin OK');
       } else {
         console.warn('[pot] boot check: bgutil NOT detected in yt-dlp verbose output — PO tokens will not be attached');
       }
+      console.log(
+        potLines > 0
+          ? `[pot] boot check: provider GENERATED ${potLines} token generation(s) during the probe — PO pipeline works end-to-end`
+          : '[pot] boot check: provider saw NO token request during the probe — the plugin did not reach it (see the /ping line above)'
+      );
     }
   );
 }
-setTimeout(verifyPotWiring, 8000);
+setTimeout(verifyPotWiring, 10000);
 
 // ── YouTube cookies (best defense against bot detection) ─────────────────
 // Priority: COOKIES_B64 env var (base64 of a Netscape-format cookies.txt,
@@ -352,7 +401,8 @@ function clientChains() {
 
 async function streamWithYtDlp(url, videoId, req, res) {
   let lastError = null;
-  for (const chain of clientChains()) {
+  const chains = clientChains();
+  for (const [idx, chain] of chains.entries()) {
     const opts = {
       dumpSingleJson: true,
       format: 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
@@ -381,6 +431,23 @@ async function streamWithYtDlp(url, videoId, req, res) {
     } else if (cookiesPath) {
       opts.cookies = cookiesPath;
     }
+
+    // DEBUG instrumentation (temporary, kept minimal): on the first chain we
+    // (a) print the EXACT command line youtube-dl-exec will spawn, and
+    // (b) run yt-dlp with --verbose so its debug output shows whether the
+    //     bgutil PO-token provider is registered, contacted, and returning a
+    //     token (look for "PO Token Providers:", "Getting POT", "Generating POT",
+    //     and the provider's own [pot] lines in the server log).
+    if (idx === 0) {
+      try {
+        const argv = [url].concat(buildArgs(opts));
+        console.log(`[yt-dlp] FULL COMMAND: ${BIN_PATH} ${argv.join(' ')}`);
+      } catch (e) {
+        console.warn(`[yt-dlp] could not build command line: ${e.message}`);
+      }
+      opts.verbose = true;
+    }
+
     try {
       const info = await ytDlp(url, opts);
       const direct = info.url;
@@ -399,6 +466,9 @@ async function streamWithYtDlp(url, videoId, req, res) {
         console.warn(`[yt-dlp] chain "${chain || 'default'}" FULL STDERR:\n${String(e.stderr).slice(0, 1500)}`);
       }
     }
+  }
+  if (potReady) {
+    console.log(`[pot] request activity: ${potActivity} token generation(s) observed across the yt-dlp attempts`);
   }
   throw lastError || new Error('yt-dlp failed');
 }
