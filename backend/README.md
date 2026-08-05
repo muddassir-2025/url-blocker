@@ -97,6 +97,15 @@ curl "http://localhost:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%
   `[pot] PO-token provider ready on port 4416`.
 - Every yt-dlp call then runs the `web` client with a fresh PO token — this
   bypasses the datacenter-IP bot check. Cookies (if set) are still passed too.
+- The `web`/`web_embedded` chains pass `youtube:fetch_pot=always` alongside
+  `player_client=web,web_embedded` (same extractor-args flag, joined with
+  `;`). This is required: it forces yt-dlp to mint a **player** PO token and
+  attach it to the player API request itself. Without it, yt-dlp only fetches
+  the **gvs** token lazily after a successful player response — but on a
+  flagged datacenter IP the tokenless player request is bot-blocked (HTTP 403
+  / LOGIN_REQUIRED / "Sign in to confirm you're not a bot"), so formats are
+  never processed, the gvs token is never requested, and the boot check logs
+  "provider saw NO token request during the probe".
 - If the provider fails to build or start, the server logs a warning and runs
   without PO tokens (client chains + ytdl-core), exactly like before.
 
