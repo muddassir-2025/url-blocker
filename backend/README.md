@@ -95,6 +95,22 @@ curl "http://localhost:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%
 - If the provider fails to build or start, the server logs a warning and runs
   without PO tokens (client chains + ytdl-core), exactly like before.
 
+### Reading the boot check / PO-token logs
+
+During boot the server runs a self-check that ends with a verdict like
+`provider GENERATED N token generation(s) during the probe — PO pipeline works
+end-to-end`. Two log patterns are easy to misread:
+
+- `[pot:bgutil:script-node] No server_home...` / `Script path doesn't exist...`
+  are **expected noise**: yt-dlp checks every registered provider's availability,
+  including the script-based ones you're not using. They appear even in fully
+  working runs and do **not** mean the HTTP provider was skipped.
+- The line that proves the HTTP provider is being used is
+  `[pot:bgutil:http] Generating a ... PO Token for ... via bgutil HTTP server`.
+- `direct /get_pot probe -> HTTP 200 in Ns`: if `N > 20`, real downloads will
+  fail anyway — the bgutil plugin's own solve timeout is 20 s, so a slow solve
+  means yt-dlp runs without a token and gets bot-blocked.
+
 ### Setting up cookies (optional, on top of the PO token)
 
 1. On your computer (desktop Chrome), install the **"Get cookies.txt LOCALLY"**
