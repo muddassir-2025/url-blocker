@@ -75,8 +75,23 @@ function download(u, target) {
       return;
     }
 
-    log(`downloading ${url}`);
-    await download(url, dest);
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        log(`downloading ${url}`);
+        await download(url, dest);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < 3) {
+          const wait = attempt * 3000;
+          log(`attempt ${attempt} failed (${e.message}) — retrying in ${wait / 1000}s`);
+          await new Promise((r) => setTimeout(r, wait));
+        }
+      }
+    }
+    if (lastErr) throw lastErr;
 
     const size = fs.statSync(dest).size;
     if (size < MIN_SIZE) {

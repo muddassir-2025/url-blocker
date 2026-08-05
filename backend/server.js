@@ -12,10 +12,12 @@
  *      audio-only format (M4A preferred, then Opus/WebM — highest bitrate).
  *      The binary is fetched at BUILD time (scripts/fetch-ytdlp.js, run by
  *      `npm install`), so a request never waits on a lazy binary download.
+ *      It retries a few bot-resistant client chains (mobile innertube clients
+ *      first) and passes cookies when COOKIES_B64 / cookies.txt is present.
  *   2. The chosen format's direct URL is piped back to the client with
  *      Content-Type / Content-Length when known.
- *   3. If yt-dlp fails (YouTube changed internals, bot-blocked, …), the
- *      server falls back to @distube/ytdl-core and pipes that stream.
+ *   3. If every yt-dlp client fails, the server falls back to
+ *      @distube/ytdl-core and pipes that stream.
  *
  * Deployment (Render free tier):
  *   - Root directory: backend
@@ -53,8 +55,9 @@ const UA =
 
 // ── yt-dlp binary ────────────────────────────────────────────────────────
 // Prefer the binary fetched at build time (scripts/fetch-ytdlp.js); if that
-// is missing (e.g. GitHub was unreachable during install) fall back to
-// youtube-dl-exec's lazy auto-download so nothing regresses.
+// is missing (e.g. GitHub was unreachable during install, or the build cache
+// skipped the postinstall) fall back to youtube-dl-exec's lazy auto-download
+// and kick a background fetch so the pinned binary is ready for later calls.
 const BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
 const BIN_PATH = path.join(__dirname, 'bin', BIN_NAME);
 // Only trust a non-trivial binary (>= 5 MB) — a truncated fetch must never
@@ -65,8 +68,40 @@ const pinnedOk =
 const ytDlp = pinnedOk ? create(BIN_PATH) : youtubeDl;
 if (ytDlp === youtubeDl) {
   console.warn('[server] pinned yt-dlp binary missing or too small — using lazy auto-download');
+  // Best effort: fetch the pinned binary in the background for later requests.
+  try {
+    const { spawn } = require('child_process');
+    const child = spawn(process.execPath, [path.join(__dirname, 'scripts', 'fetch-ytdlp.js')], {
+      stdio: 'ignore',
+      detached: true,
+    });
+    child.unref();
+  } catch (e) {
+    console.warn('[server] could not start background binary fetch:', e.message);
+  }
 } else {
   console.log(`[server] using pinned yt-dlp binary at ${BIN_PATH}`);
+}
+
+// ── YouTube cookies (best defense against bot detection) ─────────────────
+// Priority: COOKIES_B64 env var (base64 of a Netscape-format cookies.txt,
+// exported from a logged-in browser) → a cookies.txt file next to server.js.
+// Passed to yt-dlp as --cookies so signed-in requests are treated as human.
+const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
+let cookiesPath = null;
+try {
+  if (process.env.COOKIES_B64) {
+    const tmp = path.join(require('os').tmpdir(), 'clearview-cookies.txt');
+    fs.writeFileSync(tmp, Buffer.from(process.env.COOKIES_B64, 'base64').toString('utf8'));
+    try { fs.chmodSync(tmp, 0o600); } catch (_) { /* best effort */ }
+    cookiesPath = tmp;
+    console.log('[server] using cookies from COOKIES_B64');
+  } else if (fs.existsSync(COOKIES_FILE)) {
+    cookiesPath = COOKIES_FILE;
+    console.log('[server] using cookies.txt for yt-dlp');
+  }
+} catch (e) {
+  console.warn('[server] could not load cookies:', e.message);
 }
 
 let activeStreams = 0;
@@ -134,21 +169,47 @@ function pipeDirect(url, videoId, ext, size, req, res, source) {
 
 // ── yt-dlp (primary) ─────────────────────────────────────────────────────
 
-async function streamWithYtDlp(url, videoId, req, res) {
-  const info = await ytDlp(url, {
-    dumpSingleJson: true,
-    format: 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
-    noPlaylist: true,
-    noWarnings: true,
-    noCheckCertificates: true,
-    noUpdate: true,
-  });
-  const direct = info.url;
-  if (!direct) throw new Error('yt-dlp returned no stream url');
+// Client strategies, most bot-resistant first. YouTube bot-blocks the plain
+// `web` client on datacenter IPs ("Sign in to confirm you're not a bot"); the
+// mobile innertube clients (android_vr / android / ios) usually slip through
+// without cookies. Each entry is tried until one returns a playable URL;
+// `default` (yt-dlp's own chain incl. web) is the last resort.
+const CLIENT_CHAINS = [
+  'youtube:player_client=android_vr,android,ios,web_safari',
+  'youtube:player_client=default,-web',
+  null, // yt-dlp default
+];
 
-  const ext = info.ext || 'm4a';
-  const size = info.filesize || info.filesize_approx || 0;
-  pipeDirect(direct, videoId, ext, size, req, res, 'yt-dlp');
+async function streamWithYtDlp(url, videoId, req, res) {
+  let lastError = null;
+  for (const chain of CLIENT_CHAINS) {
+    const opts = {
+      dumpSingleJson: true,
+      format: 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+      noPlaylist: true,
+      noWarnings: true,
+      noCheckCertificates: true,
+      noUpdate: true,
+      // Bound each attempt so a hung YouTube response can't hold the request
+      // (or an activeStreams slot) for the full app read timeout.
+      socketTimeout: 30,
+    };
+    if (chain) opts.extractorArgs = chain;
+    if (cookiesPath) opts.cookies = cookiesPath;
+    try {
+      const info = await ytDlp(url, opts);
+      const direct = info.url;
+      if (!direct) throw new Error('yt-dlp returned no stream url');
+      const ext = info.ext || 'm4a';
+      const size = info.filesize || info.filesize_approx || 0;
+      pipeDirect(direct, videoId, ext, size, req, res, 'yt-dlp');
+      return;
+    } catch (e) {
+      lastError = e;
+      console.warn(`[yt-dlp] chain "${chain || 'default'}" failed: ${String(e.message || e).slice(0, 300)}`);
+    }
+  }
+  throw lastError || new Error('yt-dlp failed');
 }
 
 // ── ytdl-core (fallback) ────────────────────────────────────────────────
