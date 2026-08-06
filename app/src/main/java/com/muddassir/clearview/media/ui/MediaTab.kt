@@ -208,6 +208,12 @@ fun MediaTab(
     var playlistRefreshedAt by remember { mutableStateOf(0L) }
     var showAddPlaylistDialog by remember { mutableStateOf(false) }
     var pendingPlaylistRemove by remember { mutableStateOf<SavedPlaylist?>(null) }
+    // Video awaiting "remove from playlist" confirmation — playlist + video
+    // captured at tap time so the dialog never depends on later state.
+    var pendingVideoRemove by remember { mutableStateOf<Pair<UserPlaylist, MediaVideo>?>(null) }
+    // A user playlist awaiting "delete playlist" confirmation (deletes the
+    // whole playlist, not just one video) — captured at tap time.
+    var pendingUserPlaylistDelete by remember { mutableStateOf<UserPlaylist?>(null) }
 
     // ── User-created playlists (local library) ────────────────────
     val userPlaylistStore = remember { UserPlaylistStore(context.applicationContext) }
@@ -733,15 +739,7 @@ fun MediaTab(
                                 // definition in it — offer removing it straight
                                 // from the card (the feed updates instantly).
                                 onRemoveFromPlaylist = {
-                                    selectedUserPlaylist?.let { p ->
-                                        userPlaylistStore.removeVideo(p.id, video.videoId)
-                                        saveUserPlaylists()
-                                        Toast.makeText(
-                                            context,
-                                            "Removed from ${p.name}",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                    }
+                                    selectedUserPlaylist?.let { p -> pendingVideoRemove = p to video }
                                 }
                             )
                         }
@@ -865,6 +863,30 @@ fun MediaTab(
         )
     }
 
+    // ── Remove video from playlist confirmation ─────────────────────
+    pendingVideoRemove?.let { (playlist, video) ->
+        AlertDialog(
+            onDismissRequest = { pendingVideoRemove = null },
+            title = { Text("Remove video?") },
+            text = { Text("Remove \"${video.title}\" from \"${playlist.name}\"?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    userPlaylistStore.removeVideo(playlist.id, video.videoId)
+                    saveUserPlaylists()
+                    pendingVideoRemove = null
+                    Toast.makeText(
+                        context,
+                        "Removed from ${playlist.name}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingVideoRemove = null }) { Text("Cancel") }
+            }
+        )
+    }
+
     // ── My playlists manager (user-created) ────────────────────────
     if (showPlaylistsSheet) {
         PlaylistsSheet(
@@ -887,12 +909,28 @@ fun MediaTab(
                 playlistNameTarget = p
                 showPlaylistNameDialog = true
             },
-            onDelete = { p ->
-                userPlaylistStore.deletePlaylist(p.id)
-                if (selectedUserPlaylistId == p.id) selectedUserPlaylistId = null
-                saveUserPlaylists()
-            },
+            onDelete = { p -> pendingUserPlaylistDelete = p },
             onDismiss = { showPlaylistsSheet = false }
+        )
+    }
+
+    // ── Delete user playlist confirmation ──────────────────────────
+    pendingUserPlaylistDelete?.let { playlist ->
+        AlertDialog(
+            onDismissRequest = { pendingUserPlaylistDelete = null },
+            title = { Text("Delete playlist?") },
+            text = { Text("Delete \"${playlist.name}\"? This removes it and all its videos.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    userPlaylistStore.deletePlaylist(playlist.id)
+                    if (selectedUserPlaylistId == playlist.id) selectedUserPlaylistId = null
+                    saveUserPlaylists()
+                    pendingUserPlaylistDelete = null
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingUserPlaylistDelete = null }) { Text("Cancel") }
+            }
         )
     }
 
@@ -937,9 +975,8 @@ fun MediaTab(
                 userPlaylistStore.moveVideo(selectedUserPlaylist!!.id, from, to)
                 saveUserPlaylists()
             },
-            onRemove = { videoId ->
-                userPlaylistStore.removeVideo(selectedUserPlaylist!!.id, videoId)
-                saveUserPlaylists()
+            onRemove = { video ->
+                selectedUserPlaylist?.let { p -> pendingVideoRemove = p to video }
             },
             onAddVideos = { showAddVideosPicker = true },
             onDismiss = { showPlaylistEditor = false }
@@ -3188,7 +3225,7 @@ internal fun PlaylistNameDialog(
 private fun PlaylistEditorSheet(
     playlist: UserPlaylist,
     onMove: (from: Int, to: Int) -> Unit,
-    onRemove: (videoId: String) -> Unit,
+    onRemove: (video: MediaVideo) -> Unit,
     onAddVideos: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -3233,7 +3270,7 @@ private fun PlaylistEditorSheet(
                             count = playlist.videos.size,
                             onMoveUp = { onMove(index, index - 1) },
                             onMoveDown = { onMove(index, index + 1) },
-                            onRemove = { onRemove(video.videoId) }
+                            onRemove = { onRemove(video) }
                         )
                     }
                 }

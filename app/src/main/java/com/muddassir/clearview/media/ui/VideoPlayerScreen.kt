@@ -147,14 +147,20 @@ fun VideoPlayerScreen(
     val context = LocalContext.current
     val activity = context as? Activity
 
-    var playerState by remember { mutableStateOf(YtState.UNSTARTED) }
-    var errorCode by remember { mutableStateOf<Int?>(null) }
-    var timedOut by remember { mutableStateOf(false) }
+    // All player state is keyed on the current videoId so it resets
+    // SYNCHRONOUSLY the moment the source changes (opening a video, swiping
+    // through Shorts). The blurred loading placeholder is gated on this state:
+    // a stale PLAYING/sourceStarted carried over from the previous video would
+    // leave a 1-frame gap where the embed's own grey play button flashes while
+    // the next video loads. Keying on the videoId closes that gap.
+    var playerState by remember(video.videoId) { mutableStateOf(YtState.UNSTARTED) }
+    var errorCode by remember(video.videoId) { mutableStateOf<Int?>(null) }
+    var timedOut by remember(video.videoId) { mutableStateOf(false) }
     var retryToken by remember { mutableStateOf(0) }
     // Whether the current source has EVER reached a ready/playing state. The
     // blurred loading placeholder shows only until that first start — buffering
     // caused by a forward/backward seek must NOT re-blur the video.
-    var sourceStarted by remember { mutableStateOf(false) }
+    var sourceStarted by remember(video.videoId) { mutableStateOf(false) }
 
     // ── Blurred-loading backdrop (smooth video transitions) ─────────
     // While a NEW source loads (opening a video, swiping through Shorts), the
@@ -195,6 +201,25 @@ fun VideoPlayerScreen(
             false
         }
         if (loaded) currentThumbnailReady = true
+    }
+    // Prefetch the NEIGHBORING Shorts' thumbnails while the current one is on
+    // screen, so swiping to the next/previous short lands on an already-warm
+    // cache: the blurred backdrop crossfades to that poster the instant the
+    // source changes instead of waiting on a fresh network fetch. A failed
+    // fetch is harmless — the previous video's blur stays up until playback
+    // starts. Re-keys on every swipe (and on a queue swap, so the new pair is
+    // always the one warmed).
+    LaunchedEffect(video.videoId, shortsQueue) {
+        if (shortsIndex !in shortsQueue.indices) return@LaunchedEffect
+        val neighbors = buildList {
+            if (shortsIndex + 1 in shortsQueue.indices) add(shortsQueue[shortsIndex + 1])
+            if (shortsIndex - 1 >= 0) add(shortsQueue[shortsIndex - 1])
+        }
+        withContext(Dispatchers.IO) {
+            neighbors.forEach { n ->
+                if (n.thumbnailUrl.isNotBlank()) ThumbnailCache.get(n.thumbnailUrl)
+            }
+        }
     }
     // The "Open in YouTube app" option appears only after an in-app Retry has
     // already failed (per spec: "if the error persists after retrying once").
@@ -627,20 +652,24 @@ fun VideoPlayerScreen(
 
             // ── Loading placeholder: a blurred thumbnail of the actual video
             // (or a plain dark box) that fades away when playback first starts.
-            // No icon, no spinner, no text — the video area stays clean. Shown
-            // ONLY until the source has started once (sourceStarted): a fresh
-            // video load gets the blur, but buffering during a forward/backward
-            // seek re-uses the real frames and must never be covered by it.
-            if (!sourceStarted) {
-                LoadingPlaceholderOverlay(
-                    visible = isBuffering,
-                    thumbnailUrl = placeholderThumbnail,
-                    onThumbnailLoaded = { if (video.thumbnailUrl == placeholderThumbnail) {
-                        currentThumbnailReady = true
-                    } },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
+            // No icon, no spinner, no text — the video area stays clean.
+            // ALWAYS composed (never disposed on source change) so the blur
+            // can't "pop" off the instant PLAYING fires: it fades OUT over
+            // 400ms, keeping the screen covered while the new video's first
+            // real frame renders — closing the 1-frame gap where the embed's
+            // own grey play button would flash during Shorts swipes (the JS
+            // #loading-cover in youtube_player.html backstops it too). Only
+            // visible until the source has started once (sourceStarted):
+            // buffering during a forward/backward seek re-uses the real
+            // frames and must never be covered by it.
+            LoadingPlaceholderOverlay(
+                visible = !sourceStarted && isBuffering,
+                thumbnailUrl = placeholderThumbnail,
+                onThumbnailLoaded = { if (video.thumbnailUrl == placeholderThumbnail) {
+                    currentThumbnailReady = true
+                } },
+                modifier = Modifier.fillMaxSize()
+            )
 
             // ── Ready-but-paused: a single centered play button (only shown
             // once the video is ready, so there's never a play graphic during
@@ -1303,6 +1332,13 @@ private fun VideoDownloadOverlay(
  * [thumbnailUrl] switches between the previous video's thumbnail (while the
  * new one loads) and the new one (once ready) — a [Crossfade] inside makes the
  * swap a smooth blur-to-blur transition instead of a blank/flashing frame.
+ *
+ * Enter is INSTANT: the moment a new source is opened or swiped to, the blur
+ * must be fully opaque on the very first frame — a fade-in window would let
+ * YouTube's grey play-button poster show through underneath. Exit stays slow
+ * (400ms): when PLAYING fires the video's first frame may not be composited
+ * for another frame or two, so the blur eases away and the transition lands
+ * on real video, never on the grey play button.
  */
 @Composable
 private fun LoadingPlaceholderOverlay(
@@ -1313,7 +1349,7 @@ private fun LoadingPlaceholderOverlay(
 ) {
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(),
+        enter = fadeIn(animationSpec = tween(0)),
         exit = fadeOut(animationSpec = tween(400)),
         modifier = modifier
     ) {

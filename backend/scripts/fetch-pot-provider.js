@@ -166,13 +166,14 @@ async function ensurePlugin() {
 // ── Plugin timeout patch ──────────────────────────────────────────────────
 // The plugin's /get_pot solve timeout is hardcoded at 20 s (`_GETPOT_TIMEOUT`
 // in getpot_bgutil_http.py). Cold BotGuard solves on Render's free tier
-// routinely take 20-45 s, so the plugin gives up at 20 s and yt-dlp runs
-// tokenless (then gets bot-blocked: "Sign in to confirm you're not a bot").
+// routinely take 20-70 s (anonymous/guest identities can be slower than
+// signed-in ones), so the plugin gives up at 20 s and yt-dlp runs tokenless
+// (then gets bot-blocked: "Sign in to confirm you're not a bot").
 // This rebuilds the plugin zip from the cloned repo sources with the timeout
-// raised to 45 s (matching the server's own boot-check probe timeout). Pure
+// raised to 70 s (matching the server's own boot-check probe timeout). Pure
 // JS (deflate via node:zlib) — no external unzip/zip tools needed, works on
 // any platform. Idempotent: only rebuilds when the source still has 20.0.
-const PATCHED_SOLVE_TIMEOUT = 45.0;
+const PATCHED_SOLVE_TIMEOUT = 70.0;
 
 let CRC_TABLE;
 function crc32(buf) {
