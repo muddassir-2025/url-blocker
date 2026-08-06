@@ -257,7 +257,17 @@ fun AudioPlayerScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Downloaded ${formatDownloadDate(item.downloadedAt)} · ${formatBytes(item.fileSize)}",
+                    text = buildString {
+                        // Real track length for imported device audio (from
+                        // MediaMetadataRetriever at import time).
+                        if (item.durationSeconds > 0L) {
+                            append(formatClock(item.durationSeconds)).append(" · ")
+                        }
+                        append("Downloaded ")
+                            .append(formatDownloadDate(item.downloadedAt))
+                            .append(" · ")
+                            .append(formatBytes(item.fileSize))
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

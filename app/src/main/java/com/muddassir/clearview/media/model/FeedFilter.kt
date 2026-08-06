@@ -36,6 +36,19 @@ enum class FeedSortOrder(val label: String) {
     OLDEST_FIRST("Oldest first")
 }
 
+/**
+ * Source filter for the All Feed — where each video came from:
+ * [BY_URL] videos the user added manually by URL, [SYSTEM] videos the app
+ * pulled automatically from saved channels (RSS), and [PLAYLIST] videos that
+ * appear in one of the user's own playlists.
+ */
+enum class FeedSourceFilter(val label: String) {
+    ALL("All"),
+    BY_URL("Added by URL"),
+    SYSTEM("From channels"),
+    PLAYLIST("In playlists")
+}
+
 /** Watch-status filter for the All Feed (combinable with the date filter). */
 enum class FeedWatchStatus(val label: String) {
     ALL("All"),
@@ -60,6 +73,8 @@ data class FeedFilter(
     // Unwatched by default: the feed leads with videos the user hasn't seen,
     // rather than everything mixed together.
     val watchStatus: FeedWatchStatus = FeedWatchStatus.UNWATCHED,
+    /** Where the videos come from (manual by-URL, channels, playlists). */
+    val source: FeedSourceFilter = FeedSourceFilter.ALL,
     val customStartEpochMillis: Long? = null,
     val customEndEpochMillis: Long? = null
 ) {
@@ -68,7 +83,8 @@ data class FeedFilter(
         get() = date != FeedDateFilter.ALL_TIME ||
             content != FeedContentFilter.ALL ||
             sort != FeedSortOrder.NEWEST_FIRST ||
-            watchStatus != FeedWatchStatus.UNWATCHED
+            watchStatus != FeedWatchStatus.UNWATCHED ||
+            source != FeedSourceFilter.ALL
 }
 
 /** Local start-of-day (midnight) for [epochMillis] in the device's time zone. */

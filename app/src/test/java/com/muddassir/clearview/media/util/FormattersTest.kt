@@ -68,4 +68,24 @@ class FormattersTest {
     fun formatsNegativeBytesAsZero() {
         assertEquals("0 B", formatBytes(-5))
     }
+
+    @Test
+    fun etaRemainingIsEmptyWhileUnknownOrTooEarly() {
+        assertEquals("", formatEtaRemaining(-1))
+        assertEquals("", formatEtaRemaining(0))
+        assertEquals("", formatEtaRemaining(1))
+    }
+
+    @Test
+    fun etaRemainingFormatsSeconds() {
+        assertEquals("~30s left", formatEtaRemaining(30))
+        assertEquals("~59s left", formatEtaRemaining(59))
+    }
+
+    @Test
+    fun etaRemainingFormatsMinutesAndHours() {
+        assertEquals("~2m 30s left", formatEtaRemaining(150))
+        assertEquals("~1h 0m left", formatEtaRemaining(3600))
+        assertEquals("~1h 5m left", formatEtaRemaining(3900))
+    }
 }

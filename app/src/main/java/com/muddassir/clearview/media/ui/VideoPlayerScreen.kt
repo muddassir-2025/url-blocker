@@ -99,6 +99,8 @@ import com.muddassir.clearview.media.data.WatchProgressStore
 import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.download.DownloadStatus
 import com.muddassir.clearview.media.model.MediaVideo
+import com.muddassir.clearview.media.model.UserPlaylist
+import com.muddassir.clearview.media.util.formatEtaRemaining
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -236,6 +238,12 @@ fun VideoPlayerScreen(
     LaunchedEffect(Unit) { AudioDownloads.initialize(context.applicationContext) }
     val downloadStatus = AudioDownloads.statusFor(video.videoId)
     val isOffline = AudioDownloads.isDownloaded(video.videoId)
+    // A manually added video can be removed from the library right here — the
+    // feed cards offer it too, so the player's ⋮ menu should match. Cached per
+    // video: the player recomposes rapidly during playback (progress ticks),
+    // and the lookup decodes the library prefs each time.
+    val isManual = remember(video.videoId) { libraryStore.isManuallyAdded(video.videoId) }
+    var confirmRemoveManual by remember(video.videoId) { mutableStateOf(false) }
     var lastProgressSavedAt by remember { mutableStateOf(0L) }
     // Runtime live signal: the IFrame API reports a NON-finite duration
     // (Infinity) for a live broadcast, and the JS bridge only forwards
@@ -339,6 +347,21 @@ fun VideoPlayerScreen(
     val playerPlaylists = remember(showPlaylistPicker) {
         if (showPlaylistPicker) userPlaylistStore.getPlaylists() else emptyList()
     }
+    // A user playlist containing the current video — when one exists, the ⋮
+    // menu offers removing the video from it (mirroring the Media tab's
+    // playlist-feed cards). Bumped after any playlist edit made here so the
+    // lookup stays fresh (a video added to a playlist from this screen gets
+    // its Remove entry immediately).
+    var playlistRevision by remember { mutableIntStateOf(0) }
+    val containingPlaylist = remember(userPlaylistStore, video.videoId, playlistRevision) {
+        userPlaylistStore.getPlaylists().firstOrNull { p ->
+            p.videos.any { it.videoId == video.videoId }
+        }
+    }
+    // A playlist awaiting "remove from playlist" confirmation — captured at
+    // menu-tap time (like MediaTab's pendingVideoRemove) so the dialog never
+    // depends on later state.
+    var pendingRemovePlaylist by remember(video.videoId) { mutableStateOf<UserPlaylist?>(null) }
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showHideConfirm by remember { mutableStateOf(false) }
     // The ⋮ menu's "Delete download" asks first (never deletes by accident).
@@ -819,11 +842,13 @@ fun VideoPlayerScreen(
                 showSpeedMenu = showSpeedMenu,
                 downloadStatus = downloadStatus,
                 isOffline = isOffline,
+                isManual = isManual,
                 onDownloadAudio = {
                     AudioDownloads.download(video, AudioDownloads.sourceFor(video))
                 },
                 onPlayOffline = onPlayOffline,
                 onDeleteDownload = { confirmDeleteDownload = true },
+                onRemoveManual = { confirmRemoveManual = true },
                 onDownloadMenuAction = {
                     if (downloadStatus is DownloadStatus.Preparing ||
                         downloadStatus is DownloadStatus.Downloading
@@ -834,6 +859,8 @@ fun VideoPlayerScreen(
                     }
                 },
                 onAddToPlaylist = { showPlaylistPicker = true },
+                onRemoveFromPlaylist = { pendingRemovePlaylist = containingPlaylist },
+                containingPlaylistName = containingPlaylist?.name,
                 onSpeedMenuToggle = { showSpeedMenu = !showSpeedMenu },
                 onSpeedSelect = { setPlaybackRate(it); showSpeedMenu = false },
                 onContinue = { requestSeek(resumeFromSeconds) },
@@ -869,6 +896,52 @@ fun VideoPlayerScreen(
         )
     }
 
+    // ── Remove manually added video confirmation (⋮ menu → Remove) ──
+    if (confirmRemoveManual) {
+        AlertDialog(
+            onDismissRequest = { confirmRemoveManual = false },
+            title = { Text("Remove this video?") },
+            text = { Text("\"${video.title}\" was added manually. Removing it deletes it from your library.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    libraryStore.removeManuallyAdded(video.videoId)
+                    confirmRemoveManual = false
+                    Toast.makeText(context, "Video removed", Toast.LENGTH_SHORT).show()
+                    onExit()
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemoveManual = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // ── Remove from playlist confirmation (⋮ menu → Remove from …) ──
+    // Removing a video from a playlist never touches the video itself, so the
+    // player stays open — the menu entry simply disappears afterwards.
+    pendingRemovePlaylist?.let { playlist ->
+        AlertDialog(
+            onDismissRequest = { pendingRemovePlaylist = null },
+            title = { Text("Remove video?") },
+            text = { Text("Remove \"${video.title}\" from \"${playlist.name}\"?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    userPlaylistStore.removeVideo(playlist.id, video.videoId)
+                    playlistRevision++
+                    pendingRemovePlaylist = null
+                    Toast.makeText(
+                        context,
+                        "Removed from ${playlist.name}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemovePlaylist = null }) { Text("Cancel") }
+            }
+        )
+    }
+
     // ── Delete offline audio confirmation (⋮ menu → Delete download) ──
     if (confirmDeleteDownload) {
         AlertDialog(
@@ -897,6 +970,7 @@ fun VideoPlayerScreen(
             playlists = playerPlaylists,
             onAdd = { playlist ->
                 userPlaylistStore.addVideos(playlist.id, listOf(video))
+                playlistRevision++
                 showPlaylistPicker = false
                 Toast.makeText(context, "Added to ${playlist.name}", Toast.LENGTH_SHORT).show()
             },
@@ -914,6 +988,7 @@ fun VideoPlayerScreen(
             confirmLabel = "Create",
             onSubmit = { name ->
                 userPlaylistStore.createPlaylist(name, listOf(video))
+                playlistRevision++
                 showCreatePlaylistDialog = false
                 Toast.makeText(
                     context,
@@ -944,18 +1019,26 @@ private fun PlayerControlPanel(
     showSpeedMenu: Boolean,
     downloadStatus: DownloadStatus?,
     isOffline: Boolean,
+    /** Whether this video was manually added by URL (its ⋮ menu offers Remove). */
+    isManual: Boolean,
     onDownloadAudio: () -> Unit,
     onPlayOffline: () -> Unit,
     onDeleteDownload: () -> Unit,
     /** ⋮ menu download entry: cancel while active, else start/retry. */
     onDownloadMenuAction: () -> Unit,
     onAddToPlaylist: () -> Unit,
+    /** ⋮ menu → Remove from playlist (only when [containingPlaylistName] is set). */
+    onRemoveFromPlaylist: () -> Unit,
+    /** Name of the user playlist holding this video, or null (no entry shown). */
+    containingPlaylistName: String?,
     onSpeedMenuToggle: () -> Unit,
     onSpeedSelect: (Double) -> Unit,
     onContinue: () -> Unit,
     onWatchAgain: () -> Unit,
     onShare: () -> Unit,
     onHide: () -> Unit,
+    /** ⋮ menu → Remove (manually added). */
+    onRemoveManual: () -> Unit,
     onMarkWatched: () -> Unit
 ) {
     var showMoreMenu by remember { mutableStateOf(false) }
@@ -1060,6 +1143,15 @@ private fun PlayerControlPanel(
                             onAddToPlaylist()
                         }
                     )
+                    if (containingPlaylistName != null) {
+                        DropdownMenuItem(
+                            text = { Text("Remove from \"$containingPlaylistName\"") },
+                            onClick = {
+                                showMoreMenu = false
+                                onRemoveFromPlaylist()
+                            }
+                        )
+                    }
                     if (isOffline) {
                         DropdownMenuItem(
                             text = { Text("Delete download") },
@@ -1079,6 +1171,15 @@ private fun PlayerControlPanel(
                             onClick = {
                                 showMoreMenu = false
                                 onDownloadMenuAction()
+                            }
+                        )
+                    }
+                    if (isManual) {
+                        DropdownMenuItem(
+                            text = { Text("Remove (manually added)") },
+                            onClick = {
+                                showMoreMenu = false
+                                onRemoveManual()
                             }
                         )
                     }
@@ -1186,6 +1287,19 @@ private fun PlayerControlPanel(
                         )
                     }
                     Spacer(Modifier.height(4.dp))
+                    // Estimated time remaining, once the downloader has enough
+                    // history to compute it ("~2m 30s left").
+                    val etaText = formatEtaRemaining(downloadStatus.etaSeconds)
+                    if (etaText.isNotEmpty()) {
+                        Text(
+                            text = etaText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(4.dp))
+                    }
                     if (downloadStatus.progress >= 0f) {
                         LinearProgressIndicator(
                             progress = { downloadStatus.progress.coerceIn(0f, 1f) },

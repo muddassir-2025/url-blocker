@@ -3,6 +3,8 @@ package com.muddassir.clearview.media.ui
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -29,6 +31,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
@@ -84,6 +87,7 @@ import com.muddassir.clearview.media.download.StoragePolicy
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.util.formatBytes
 import com.muddassir.clearview.media.util.formatDownloadDate
+import com.muddassir.clearview.media.util.formatEtaRemaining
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -125,6 +129,29 @@ fun DownloadsSection(
     val selectedIds = remember { mutableStateListOf<String>() }
     // A download awaiting "delete offline audio" confirmation (single row).
     var pendingDeleteItem by remember { mutableStateOf<DownloadItem?>(null) }
+    // Importing audio files picked from the device (multi-select SAF picker).
+    var importing by remember { mutableStateOf(false) }
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        importing = true
+        AudioDownloads.importFromDevice(
+            context = context,
+            uris = uris,
+            channelId = channelId.orEmpty(),
+            channelName = channelName.orEmpty()
+        ) { imported ->
+            importing = false
+            Toast.makeText(
+                context,
+                if (imported == uris.size) "Imported $imported audio${if (imported == 1) "" else "s"}"
+                else "Imported $imported of ${uris.size} audios",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+    val addAudio: () -> Unit = { importLauncher.launch(arrayOf("audio/*")) }
     // Multi-select deletion confirmation.
     var pendingMultiDelete by remember { mutableStateOf(false) }
     // A downloaded item awaiting the add-to-playlist picker / name dialog.
@@ -182,7 +209,9 @@ fun DownloadsSection(
         StorageCard(
             used = used,
             limit = limit,
-            onManage = { showManage = true }
+            onManage = { showManage = true },
+            onAddAudio = addAudio,
+            importing = importing
         )
 
         // ── Search (offline audios) ────────────────────────────────
@@ -247,18 +276,34 @@ fun DownloadsSection(
 
         when {
             // Nothing downloaded anywhere (incl. other channels).
-            !hasAnything -> Box(
+            !hasAnything -> Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 40.dp),
-                contentAlignment = Alignment.Center
+                    .padding(horizontal = 24.dp, vertical = 32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "No downloads yet.\nOpen any video's ⋮ menu and tap \"Download audio\" to save it offline.",
+                    text = "No downloads yet.\nAdd audio from your device, or open any video's ⋮ menu and tap \"Download audio\" to save it offline.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp)
                 )
+                Spacer(Modifier.height(16.dp))
+                OutlinedButton(
+                    onClick = addAudio,
+                    enabled = !importing,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (importing) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Importing…")
+                    } else {
+                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Add audio from device")
+                    }
+                }
             }
             // Downloads exist, but the channel scope / search hides them all.
             downloads.isEmpty() && visibleActiveIds.isEmpty() -> Box(
@@ -447,7 +492,10 @@ private fun SectionLabel(text: String) {
 private fun StorageCard(
     used: Long,
     limit: Long,
-    onManage: () -> Unit
+    onManage: () -> Unit,
+    /** When set, an "Add audio" button appears next to the gear. */
+    onAddAudio: (() -> Unit)? = null,
+    importing: Boolean = false
 ) {
     val fraction = StoragePolicy.usageFraction(used, limit)
     val barColor = storageColor(fraction)
@@ -470,6 +518,28 @@ private fun StorageCard(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
                 )
+                // Import audio files from the device (multi-select picker).
+                if (onAddAudio != null) {
+                    IconButton(
+                        onClick = onAddAudio,
+                        enabled = !importing,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        if (importing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.Add,
+                                contentDescription = "Add audio from device",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
                 // Media settings gear: opens the sheet with all the storage
                 // stats, the limit picker and the cleanup actions.
                 IconButton(onClick = onManage, modifier = Modifier.size(32.dp)) {
@@ -580,7 +650,7 @@ private fun ActiveDownloadRow(
                         Spacer(Modifier.height(3.dp))
                         Text(
                             "Downloading ${(progress.coerceIn(0f, 1f) * 100).toInt()}%" +
-                                formatEta(status.etaSeconds),
+                                etaSuffix(status.etaSeconds),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -590,7 +660,7 @@ private fun ActiveDownloadRow(
                         )
                         Spacer(Modifier.height(3.dp))
                         Text(
-                            "Downloading…" + formatEta(status.etaSeconds),
+                            "Downloading…" + etaSuffix(status.etaSeconds),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -807,20 +877,10 @@ private fun EqBar(fraction: Float) {
     )
 }
 
-/**
- * " · ~2m 30s left" for a download ETA (seconds), or "" while the estimate
- * is unavailable (too early in the download, the size is unknown, or the
- * finish line is right there — "~0s left" is noise).
- */
-private fun formatEta(seconds: Long): String {
-    if (seconds < 2L) return ""
-    val s = seconds.coerceAtLeast(0L)
-    val text = when {
-        s < 60 -> "~${s}s"
-        s < 3600 -> "~${s / 60}m ${s % 60}s"
-        else -> "~${s / 3600}h ${(s % 3600) / 60}m"
-    }
-    return " · $text left"
+/** " · ~2m 30s left" suffix for a downloading line (or "" while unknown). */
+private fun etaSuffix(seconds: Long): String {
+    val eta = formatEtaRemaining(seconds)
+    return if (eta.isEmpty()) "" else " · $eta"
 }
 
 /** "12:34" (or "1:02:34" past an hour) for a track duration in seconds. */
@@ -832,7 +892,7 @@ private fun formatTrackTime(seconds: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%02d:%02d".format(m, sec)
 }
 
-/** RSS / URL source chip on download rows. */
+/** RSS / URL / Device source chip on download rows. */
 @Composable
 private fun SourceChip(source: String) {
     Surface(
@@ -840,7 +900,11 @@ private fun SourceChip(source: String) {
         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
     ) {
         Text(
-            text = if (source == DownloadItem.SOURCE_URL) "URL" else "RSS",
+            text = when (source) {
+                DownloadItem.SOURCE_URL -> "URL"
+                DownloadItem.SOURCE_DEVICE -> "Device"
+                else -> "RSS"
+            },
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.primary,

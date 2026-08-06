@@ -110,6 +110,7 @@ import com.muddassir.clearview.media.model.FeedContentFilter
 import com.muddassir.clearview.media.model.FeedDateFilter
 import com.muddassir.clearview.media.model.FeedFilter
 import com.muddassir.clearview.media.model.FeedSortOrder
+import com.muddassir.clearview.media.model.FeedSourceFilter
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.model.SavedChannel
@@ -119,6 +120,7 @@ import com.muddassir.clearview.media.model.datePickerMillisToLocalStart
 import com.muddassir.clearview.media.util.MediaVideos
 import com.muddassir.clearview.media.util.applyFeedFilter
 import com.muddassir.clearview.media.util.feedFilterSummary
+import com.muddassir.clearview.media.util.formatEtaRemaining
 import com.muddassir.clearview.media.util.formatViews
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -359,14 +361,24 @@ fun MediaTab(
             else -> baseVideos.filter { it.channelId == filterChannelId }
         }
     }
+    // Id-sets behind the Source filter: videos added by URL (manual), and
+    // videos that appear in any of the user's own playlists.
+    val manualIds = remember(manualVideos) { manualVideos.map { it.videoId }.toSet() }
+    val playlistVideoIds = remember(userPlaylists) {
+        userPlaylists.flatMap { p -> p.videos.map { it.videoId } }.toSet()
+    }
     // User playlists keep their hand-picked ORDER — the feed filters (date /
-    // content / watch status) don't apply; search still filters on top.
-    val displayed = remember(channelVideos, feedFilter, libraryRevision, feedIsUserPlaylist) {
+    // content / watch status / source) don't apply; search still filters on top.
+    val displayed = remember(
+        channelVideos, feedFilter, manualIds, playlistVideoIds, feedIsUserPlaylist
+    ) {
         if (feedIsUserPlaylist) channelVideos
         else applyFeedFilter(
             channelVideos,
             feedFilter,
-            progressOf = { progressStore.get(it) }
+            progressOf = { progressStore.get(it) },
+            isManual = { it in manualIds },
+            inPlaylist = { it in playlistVideoIds }
         )
     }
     // Feed search: matches titles and channel names (case-insensitive) over
@@ -800,6 +812,10 @@ fun MediaTab(
     if (showFilterSheet) {
         FilterSheet(
             filter = feedFilter,
+            // Inside a user-playlist feed the filters are bypassed entirely
+            // (the hand-picked order wins), so the Source section — which is
+            // about playlist membership — would silently do nothing there.
+            showSourceSection = !feedIsUserPlaylist,
             onApply = { applied ->
                 saveFilter(applied)
                 showFilterSheet = false
@@ -1983,6 +1999,8 @@ private fun FeedHeader(
 @Composable
 private fun FilterSheet(
     filter: FeedFilter,
+    /** Hidden inside user-playlist feeds, where feed filters don't apply. */
+    showSourceSection: Boolean = true,
     onApply: (FeedFilter) -> Unit,
     onReset: (FeedFilter) -> Unit,
     onDismiss: () -> Unit
@@ -2068,6 +2086,34 @@ private fun FilterSheet(
                             label = { Text(option.label) }
                         )
                     }
+            }
+
+            if (showSourceSection) {
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "Source",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Where the videos come from: added manually by URL, pulled automatically from your channels, or in one of your playlists.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                androidx.compose.foundation.layout.FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FeedSourceFilter.entries.forEach { option ->
+                        FilterChip(
+                            selected = draft.source == option,
+                            onClick = { draft = draft.copy(source = option) },
+                            label = { Text(option.label) }
+                        )
+                    }
+                }
             }
 
             Spacer(Modifier.height(16.dp))
@@ -2301,33 +2347,58 @@ private fun BoxScope.DownloadThumbOverlay(
     if (status !is DownloadStatus.Preparing && status !is DownloadStatus.Downloading) return
     val known = status is DownloadStatus.Downloading && status.progress >= 0f
     val fraction = (status as? DownloadStatus.Downloading)?.progress?.coerceIn(0f, 1f) ?: 0f
+    // Estimated time remaining ("~2m 30s left") once the downloader has
+    // enough history to estimate it — rendered as its own small pill BELOW the
+    // % pill (so the % pill stays compact on narrow thumbnails).
+    val etaText = formatEtaRemaining((status as? DownloadStatus.Downloading)?.etaSeconds ?: -1L)
     val label = when {
         status is DownloadStatus.Preparing -> "Preparing…"
         known -> "${(fraction * 100).toInt()}%"
         else -> "Downloading…"
     }
 
-    Surface(
+    Column(
         modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
-        shape = RoundedCornerShape(5.dp),
-        color = Color.Black.copy(alpha = 0.65f)
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Surface(
+            shape = RoundedCornerShape(5.dp),
+            color = Color.Black.copy(alpha = 0.65f)
         ) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(10.dp),
-                strokeWidth = 2.dp,
-                color = Color.White
-            )
-            Spacer(Modifier.width(4.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White
-            )
+            Row(
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(10.dp),
+                    strokeWidth = 2.dp,
+                    color = Color.White
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White
+                )
+            }
+        }
+        if (etaText.isNotEmpty()) {
+            Surface(
+                shape = RoundedCornerShape(5.dp),
+                color = Color.Black.copy(alpha = 0.65f)
+            ) {
+                Text(
+                    text = etaText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .widthIn(max = 168.dp)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
         }
     }
 

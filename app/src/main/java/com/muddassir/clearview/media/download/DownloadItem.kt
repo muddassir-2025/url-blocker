@@ -38,6 +38,8 @@ data class DownloadItem(
     companion object {
         const val SOURCE_RSS = "rss"
         const val SOURCE_URL = "url"
+        /** Imported from the device's local storage (not downloaded). */
+        const val SOURCE_DEVICE = "device"
     }
 }
 

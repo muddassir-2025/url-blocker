@@ -3,9 +3,13 @@ package com.muddassir.clearview.media.download
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.provider.OpenableColumns
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.UUID
 
 /**
  * Unified storage for offline audio downloads:
@@ -141,6 +145,105 @@ class AudioDownloadStore(context: Context) {
             null
         } finally {
             conn?.disconnect()
+        }
+    }
+
+    /**
+     * Imports audio files the user picked from the device (SAF document Uris)
+     * into the offline library: each file is COPIED into [audioDir] and
+     * registered as a [DownloadItem] (source [DownloadItem.SOURCE_DEVICE]) so
+     * it appears in the Downloads list and plays through [OfflineAudioPlayer]
+     * exactly like a downloaded one. Returns how many were imported.
+     *
+     * [channelId]/[channelName] tag the import with the Downloads view's
+     * current channel scope (if any), so the new items show up right where
+     * the user added them instead of silently appearing only in "All".
+     */
+    fun importFromDevice(
+        context: Context,
+        uris: List<Uri>,
+        channelId: String = "",
+        channelName: String = ""
+    ): Int = synchronized(LOCK) {
+        var imported = 0
+        uris.forEach { uri ->
+            try {
+                val displayName = queryDisplayName(context, uri)
+                    ?: "Audio ${imported + 1}"
+                val ext = displayName.substringAfterLast('.', "m4a")
+                    .takeIf { it.length in 1..5 && it.all { c -> c.isLetterOrDigit() } }
+                    ?: "m4a"
+                val id = "device-" + UUID.randomUUID().toString().take(8)
+                val fileName = "$id.$ext"
+                val target = File(audioDir, fileName)
+                val copied = context.contentResolver.openInputStream(uri)?.use { input ->
+                    target.outputStream().use { out -> input.copyTo(out) }
+                } ?: -1L
+                if (copied <= 0L || !target.exists()) {
+                    target.delete()
+                    return@forEach
+                }
+                val now = System.currentTimeMillis()
+                upsert(
+                    DownloadItem(
+                        videoId = id,
+                        title = displayName.substringBeforeLast('.', displayName)
+                            .ifBlank { displayName },
+                        channelName = channelName.ifBlank { "From device" },
+                        source = DownloadItem.SOURCE_DEVICE,
+                        fileName = fileName,
+                        fileSize = target.length(),
+                        downloadedAt = now,
+                        lastPlayed = 0L,
+                        // These are the user's OWN files, not downloads — keep
+                        // them indefinitely (no 15-day expiry), matching the
+                        // "manual actions are never restricted" philosophy.
+                        expiresAt = 0L,
+                        thumbnailPath = "",
+                        // Real track length so the Downloads list shows "3:24"
+                        // instead of hiding the duration (0 = unreadable file).
+                        durationSeconds = readDurationSeconds(target),
+                        channelId = channelId
+                    )
+                )
+                imported++
+            } catch (e: Exception) {
+                // Unreadable / non-audio pick → skip it, keep importing the rest.
+            }
+        }
+        imported
+    }
+
+    /**
+     * Reads a copied audio file's duration in whole seconds via
+     * [MediaMetadataRetriever], or 0 when it can't be read (unsupported or
+     * corrupt container). The retriever is always released, even on failure.
+     */
+    private fun readDurationSeconds(file: File): Long {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()
+                ?.coerceAtLeast(0L)
+                ?.div(1000L)
+                ?: 0L
+        } catch (e: Exception) {
+            0L
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
+    /** The picker's display name for [uri] (from OpenableColumns), or null. */
+    private fun queryDisplayName(context: Context, uri: Uri): String? {
+        return try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 

@@ -4,6 +4,7 @@ import com.muddassir.clearview.media.model.FeedContentFilter
 import com.muddassir.clearview.media.model.FeedDateFilter
 import com.muddassir.clearview.media.model.FeedFilter
 import com.muddassir.clearview.media.model.FeedSortOrder
+import com.muddassir.clearview.media.model.FeedSourceFilter
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
 import org.junit.Assert.assertEquals
@@ -280,6 +281,89 @@ class FeedFiltersTest {
             watchStatus = FeedWatchStatus.PARTIALLY_WATCHED
         )
         assertEquals(filter, decodeFeedFilter(encodeFeedFilter(filter)))
+    }
+
+    @Test
+    fun `source by URL keeps only manually added videos`() {
+        val all = listOf(video("manual", now - day), video("auto", now - 2 * day))
+        val result = applyFeedFilter(
+            all,
+            FeedFilter(source = FeedSourceFilter.BY_URL, watchStatus = FeedWatchStatus.ALL),
+            now,
+            isManual = { it == "manual" }
+        )
+        assertEquals(listOf("manual"), result.map { it.videoId })
+    }
+
+    @Test
+    fun `source system keeps only channel-feed videos`() {
+        val all = listOf(video("manual", now - day), video("auto", now - 2 * day))
+        val result = applyFeedFilter(
+            all,
+            FeedFilter(source = FeedSourceFilter.SYSTEM, watchStatus = FeedWatchStatus.ALL),
+            now,
+            isManual = { it == "manual" }
+        )
+        assertEquals(listOf("auto"), result.map { it.videoId })
+    }
+
+    @Test
+    fun `source playlist keeps only videos in user playlists`() {
+        val all = listOf(
+            video("in-list", now - day),
+            video("elsewhere", now - 2 * day)
+        )
+        val result = applyFeedFilter(
+            all,
+            FeedFilter(source = FeedSourceFilter.PLAYLIST, watchStatus = FeedWatchStatus.ALL),
+            now,
+            inPlaylist = { it == "in-list" }
+        )
+        assertEquals(listOf("in-list"), result.map { it.videoId })
+    }
+
+    @Test
+    fun `source combines with watch status`() {
+        val all = listOf(
+            video("manual-watched", now - day),
+            video("manual-fresh", now - 2 * day)
+        )
+        val result = applyFeedFilter(
+            all,
+            FeedFilter(source = FeedSourceFilter.BY_URL, watchStatus = FeedWatchStatus.WATCHED),
+            now,
+            isManual = { true },
+            progressOf = { if (it == "manual-watched") 1f else null }
+        )
+        assertEquals(listOf("manual-watched"), result.map { it.videoId })
+    }
+
+    @Test
+    fun `source filter round-trips through encode decode`() {
+        val filter = FeedFilter(source = FeedSourceFilter.PLAYLIST)
+        assertEquals(filter, decodeFeedFilter(encodeFeedFilter(filter)))
+    }
+
+    @Test
+    fun `summary includes source label when not all`() {
+        val summary = feedFilterSummary(
+            FeedFilter(source = FeedSourceFilter.BY_URL, watchStatus = FeedWatchStatus.ALL),
+            resultCount = 2
+        )
+        assertEquals("All time · Added by URL · 2 videos", summary)
+    }
+
+    @Test
+    fun `isActive is true for source filters`() {
+        assertTrue(FeedFilter(source = FeedSourceFilter.SYSTEM).isActive)
+    }
+
+    @Test
+    fun `old filter values without source key decode to the All default`() {
+        val oldJson = "{\"date\":\"TODAY\",\"content\":\"ALL\"," +
+            "\"sort\":\"NEWEST_FIRST\",\"watchStatus\":\"ALL\"}"
+        val decoded = decodeFeedFilter(oldJson)
+        assertEquals(FeedSourceFilter.ALL, decoded?.source)
     }
 
     @Test

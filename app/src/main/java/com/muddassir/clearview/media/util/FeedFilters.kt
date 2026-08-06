@@ -4,6 +4,7 @@ import com.muddassir.clearview.media.model.FeedContentFilter
 import com.muddassir.clearview.media.model.FeedDateFilter
 import com.muddassir.clearview.media.model.FeedFilter
 import com.muddassir.clearview.media.model.FeedSortOrder
+import com.muddassir.clearview.media.model.FeedSourceFilter
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.model.startOfDayEpochMillis
@@ -28,13 +29,17 @@ const val STARTED_FRACTION_THRESHOLD = 0.02f
  * already-loaded videos are filtered), using [now] as the reference time for
  * the relative date presets. Filtering uses each video's real publication
  * timestamp. [progressOf] reports the watched fraction (0..1, null = never
- * started) — needed for the watch-status filter.
+ * started) — needed for the watch-status filter. [isManual] tells whether a
+ * video was added by URL and [inPlaylist] whether it's in a user playlist —
+ * both needed for the source filter.
  */
 fun applyFeedFilter(
     videos: List<MediaVideo>,
     filter: FeedFilter,
     now: Long = System.currentTimeMillis(),
-    progressOf: (String) -> Float? = { null }
+    progressOf: (String) -> Float? = { null },
+    isManual: (String) -> Boolean = { false },
+    inPlaylist: (String) -> Boolean = { false }
 ): List<MediaVideo> {
     val start = when (filter.date) {
         FeedDateFilter.ALL_TIME -> null
@@ -66,7 +71,13 @@ fun applyFeedFilter(
             FeedWatchStatus.PARTIALLY_WATCHED ->
                 p != null && p >= STARTED_FRACTION_THRESHOLD && p < WATCHED_FRACTION_THRESHOLD
         }
-        afterStart && beforeEnd && typeOk && statusOk
+        val sourceOk = when (filter.source) {
+            FeedSourceFilter.ALL -> true
+            FeedSourceFilter.BY_URL -> isManual(v.videoId)
+            FeedSourceFilter.SYSTEM -> !isManual(v.videoId)
+            FeedSourceFilter.PLAYLIST -> inPlaylist(v.videoId)
+        }
+        afterStart && beforeEnd && typeOk && statusOk && sourceOk
     }
 
     return when (filter.sort) {
@@ -95,10 +106,12 @@ fun feedFilterSummary(
     val typePart = if (filter.content == FeedContentFilter.ALL) null else filter.content.label
     val statusPart =
         if (filter.watchStatus == FeedWatchStatus.ALL) null else filter.watchStatus.label
+    val sourcePart = if (filter.source == FeedSourceFilter.ALL) null else filter.source.label
     return buildString {
         append(datePart)
         typePart?.let { append(" · ").append(it) }
         statusPart?.let { append(" · ").append(it) }
+        sourcePart?.let { append(" · ").append(it) }
         append(" · ").append(resultCount).append(if (resultCount == 1) " video" else " videos")
     }
 }
@@ -118,6 +131,7 @@ fun encodeFeedFilter(filter: FeedFilter): String =
         .put("content", filter.content.name)
         .put("sort", filter.sort.name)
         .put("watchStatus", filter.watchStatus.name)
+        .put("source", filter.source.name)
         .put("customStart", filter.customStartEpochMillis ?: JSONObject.NULL)
         .put("customEnd", filter.customEndEpochMillis ?: JSONObject.NULL)
         .toString()
@@ -146,11 +160,17 @@ fun decodeFeedFilter(json: String?): FeedFilter? {
         val watchStatus = runCatching {
             FeedWatchStatus.valueOf(o.optString("watchStatus", ""))
         }.getOrNull() ?: FeedWatchStatus.UNWATCHED
+        // The source filter is new — values saved by older builds (no key, or
+        // an unknown value) decode to its All default.
+        val source = runCatching {
+            FeedSourceFilter.valueOf(o.optString("source", ""))
+        }.getOrNull() ?: FeedSourceFilter.ALL
         FeedFilter(
             date = date,
             content = content,
             sort = sort,
             watchStatus = watchStatus,
+            source = source,
             customStartEpochMillis = if (o.isNull("customStart")) null else o.optLong("customStart", 0L),
             customEndEpochMillis = if (o.isNull("customEnd")) null else o.optLong("customEnd", 0L)
         )

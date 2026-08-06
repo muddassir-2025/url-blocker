@@ -212,6 +212,39 @@ object AudioDownloads {
     private fun currentProtectedIds(): Set<String> =
         OfflineAudioPlayer.playingVideoId.value?.let { setOf(it) } ?: emptySet()
 
+    // ── Device import ──────────────────────────────────────────────
+
+    /**
+     * Imports audio files the user picked from the device (SAF document Uris)
+     * into the offline library — copied into the audio cache and registered
+     * so they appear in the Downloads list and play like any download.
+     * [channelId]/[channelName] tag the imports with the Downloads view's
+     * current channel scope (so they show up where the user added them).
+     * [onResult] fires with the number actually imported.
+     */
+    fun importFromDevice(
+        context: Context,
+        uris: List<android.net.Uri>,
+        channelId: String = "",
+        channelName: String = "",
+        onResult: (Int) -> Unit = {}
+    ) {
+        val s = storeOrThrow()
+        scope.launch {
+            // Never leave the caller stuck (a stuck "Importing…" button): any
+            // unexpected failure still reports a 0-result so the UI resets.
+            val imported = try {
+                withContext(Dispatchers.IO) {
+                    s.importFromDevice(context, uris, channelId, channelName)
+                }
+            } catch (e: Exception) {
+                0
+            }
+            refresh()
+            onResult(imported)
+        }
+    }
+
     // ── Deletion (always allowed) ──────────────────────────────────
 
     fun delete(videoId: String) {
