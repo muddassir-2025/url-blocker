@@ -6,6 +6,10 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Foreground media service: offline audio keeps playing (with
+         notification controls) when the app is backgrounded / screen off. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <application
         android:allowBackup="false"
@@ -86,6 +90,14 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- Offline-audio foreground playback service: owns the MediaPlayer
+             so audio continues in the background, with a media notification
+             (play/pause/stop + lock-screen controls via MediaSessionCompat). -->
+        <service
+            android:name=".media.download.AudioPlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
 
         <!-- Device Admin Receiver (adds uninstall friction) -->
         <receiver

@@ -18,11 +18,13 @@ import java.util.concurrent.ConcurrentHashMap
 
 /** Live state of one in-flight (or failed) download. */
 sealed class DownloadStatus {
-    /** Connecting / waiting for the server (incl. Render cold starts). */
+    /** Resolving the audio stream on-device (NewPipeExtractor) before bytes flow. */
     data object Preparing : DownloadStatus()
 
-    /** Streaming; [progress] is 0..1, or -1 when the total size is unknown. */
-    data class Downloading(val progress: Float) : DownloadStatus()
+    /** Streaming; [progress] is 0..1 (or -1 when the total size is unknown),
+     *  and [etaSeconds] is the estimated time remaining (or -1 while it's too
+     *  early / unknown to estimate). */
+    data class Downloading(val progress: Float, val etaSeconds: Long = -1L) : DownloadStatus()
 
     /** The download failed; [message] is user-facing. Tap again to retry. */
     data class Error(val message: String) : DownloadStatus()
@@ -138,9 +140,9 @@ object AudioDownloads {
                     AudioDownloader.download(
                         context = appContext!!,
                         videoId = id,
-                        serverUrl = s.getServerUrl(),
-                        token = s.getServerToken(),
-                        onProgress = { p -> active[id] = DownloadStatus.Downloading(p) },
+                        onProgress = { p ->
+                            active[id] = DownloadStatus.Downloading(p.fraction, p.etaSeconds)
+                        },
                         isCancelled = { cancelRequested[id] == true },
                         onConnection = { conn -> connections[id] = conn }
                     )
@@ -153,6 +155,7 @@ object AudioDownloads {
                             videoId = id,
                             title = video.title,
                             channelName = video.channelName.ifBlank { video.channelId },
+                            channelId = video.channelId,
                             source = source,
                             fileName = result.file.name,
                             fileSize = result.file.length(),
@@ -274,18 +277,6 @@ object AudioDownloads {
     }
 
     // ── Settings ───────────────────────────────────────────────────
-
-    fun serverUrl(): String = storeOrThrow().getServerUrl()
-
-    fun saveServer(url: String, token: String?) {
-        val s = storeOrThrow()
-        scope.launch {
-            withContext(Dispatchers.IO) {
-                s.setServerUrl(url)
-                s.setServerToken(token)
-            }
-        }
-    }
 
     fun setStorageLimit(bytes: Long) {
         storageLimit.longValue = bytes

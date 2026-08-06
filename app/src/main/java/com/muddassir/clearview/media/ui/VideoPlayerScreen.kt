@@ -11,7 +11,6 @@ import android.util.Log
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -33,7 +32,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Replay10
@@ -343,6 +341,8 @@ fun VideoPlayerScreen(
     }
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showHideConfirm by remember { mutableStateOf(false) }
+    // The ⋮ menu's "Delete download" asks first (never deletes by accident).
+    var confirmDeleteDownload by remember { mutableStateOf(false) }
 
     // Player commands for the Shorts viewer (play/pause/mute). Each command is
     // a token + label pair: bumping the token re-sends the command to the page.
@@ -654,22 +654,6 @@ fun VideoPlayerScreen(
                 )
             }
 
-            // ── Download progress overlay: a blurred card pinned to the
-            // bottom of the video while the audio downloads (Preparing →
-            // animated sweep, Downloading → real %), with a cancel button.
-            when (downloadStatus) {
-                is DownloadStatus.Preparing, is DownloadStatus.Downloading ->
-                    VideoDownloadOverlay(
-                        video = video,
-                        status = downloadStatus,
-                        onCancel = { AudioDownloads.cancel(video.videoId) },
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = if (fullscreenVertical) 96.dp else 12.dp)
-                    )
-                else -> Unit
-            }
-
             // ── Loading placeholder: a blurred thumbnail of the actual video
             // (or a plain dark box) that fades away when playback first starts.
             // No icon, no spinner, no text — the video area stays clean.
@@ -839,10 +823,7 @@ fun VideoPlayerScreen(
                     AudioDownloads.download(video, AudioDownloads.sourceFor(video))
                 },
                 onPlayOffline = onPlayOffline,
-                onDeleteDownload = {
-                    AudioDownloads.delete(video.videoId)
-                    Toast.makeText(context, "Download deleted", Toast.LENGTH_SHORT).show()
-                },
+                onDeleteDownload = { confirmDeleteDownload = true },
                 onDownloadMenuAction = {
                     if (downloadStatus is DownloadStatus.Preparing ||
                         downloadStatus is DownloadStatus.Downloading
@@ -884,6 +865,25 @@ fun VideoPlayerScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showHideConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // ── Delete offline audio confirmation (⋮ menu → Delete download) ──
+    if (confirmDeleteDownload) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteDownload = false },
+            title = { Text("Delete download?") },
+            text = { Text("Delete the offline audio of \"${video.title}\"?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    AudioDownloads.delete(video.videoId)
+                    confirmDeleteDownload = false
+                    Toast.makeText(context, "Download deleted", Toast.LENGTH_SHORT).show()
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteDownload = false }) { Text("Cancel") }
             }
         )
     }
@@ -1238,115 +1238,6 @@ private fun PlayerControlPanel(
 }
 
 /**
- * The animated download card shown over the video while audio downloads: a
- * blurred-thumbnail backdrop with a live progress bar (sweep while preparing,
- * a real % once bytes flow) and a cancel button.
- */
-@Composable
-private fun VideoDownloadOverlay(
-    video: MediaVideo,
-    status: DownloadStatus,
-    onCancel: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val isDownloading = status is DownloadStatus.Downloading
-    val progress = if (status is DownloadStatus.Downloading) status.progress else -1f
-    val known = isDownloading && progress >= 0f
-
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp)
-            .height(72.dp)
-            .clip(RoundedCornerShape(16.dp))
-    ) {
-        // Blurred thumbnail backdrop (same look as the loading placeholder).
-        if (video.thumbnailUrl.isNotBlank()) {
-            RemoteImage(
-                url = video.thumbnailUrl,
-                showLoadingSpinner = false,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .scale(1.15f)
-                    .blur(14.dp)
-            )
-        } else {
-            Box(Modifier.fillMaxSize().background(Color.Black))
-        }
-        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)))
-
-        Row(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (known) {
-                CircularProgressIndicator(
-                    progress = { progress.coerceIn(0f, 1f) },
-                    modifier = Modifier.size(30.dp),
-                    strokeWidth = 3.dp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            } else {
-                // Preparing / unknown total — animate rather than look stuck.
-                CircularProgressIndicator(
-                    modifier = Modifier.size(30.dp),
-                    strokeWidth = 3.dp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = if (known)
-                        "Downloading ${(progress.coerceIn(0f, 1f) * 100).toInt()}%"
-                    else
-                        "Preparing audio…",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(4.dp))
-                if (known) {
-                    val animated by animateFloatAsState(
-                        targetValue = progress.coerceIn(0f, 1f),
-                        animationSpec = tween(400),
-                        label = "download-overlay-progress"
-                    )
-                    LinearProgressIndicator(
-                        progress = { animated },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(4.dp)
-                            .clip(RoundedCornerShape(2.dp)),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = Color.White.copy(alpha = 0.3f)
-                    )
-                } else {
-                    LinearProgressIndicator(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(4.dp)
-                            .clip(RoundedCornerShape(2.dp)),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = Color.White.copy(alpha = 0.3f)
-                    )
-                }
-            }
-            Spacer(Modifier.width(4.dp))
-            IconButton(onClick = onCancel) {
-                Icon(
-                    Icons.Filled.Close,
-                    contentDescription = "Cancel download",
-                    tint = Color.White
-                )
-            }
-        }
-    }
-}
-
-/**
  * Fades the loading placeholder in/out. Wrapped in its own composable so the
  * [AnimatedVisibility] call resolves to the top-level overload (inside the
  * video Box the ColumnScope extension would otherwise be ambiguous).
@@ -1572,11 +1463,11 @@ private fun formatPosition(seconds: Long): String {
 }
 
 /** "1.0x", "1.25x", … (whole values rendered without a trailing .0). */
-private fun formatRate(rate: Double): String =
+internal fun formatRate(rate: Double): String =
     (if (rate == rate.toLong().toDouble()) rate.toLong().toString() else rate.toString()) + "x"
 
-/** The playback-speed options offered by the embedded player. */
-private val SPEED_OPTIONS = listOf(0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
+/** The playback-speed options offered by the players. */
+internal val SPEED_OPTIONS = listOf(0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
 
 /** SharedPreferences holding the user's persisted playback rate. */
 private const val PREFS_NAME = "media_player_prefs"

@@ -291,9 +291,11 @@ class ContentHubState(appContext: Context) {
         playingAudio = item
     }
 
-    /** Closes the audio player (stops playback too). */
+    /** Closes the audio player screen. Playback deliberately CONTINUES in the
+     *  background (foreground service + media notification) — like any music
+     *  app, leaving the player must not stop the audio.
+     */
     fun exitAudio() {
-        OfflineAudioPlayer.stop()
         playingAudio = null
     }
 
@@ -601,11 +603,12 @@ fun ContentHubTopBar(
             }
         )
 
-        // Offline audio: back arrow closes the podcast-style player (stops it).
+        // Offline audio: back arrow closes the podcast-style player; the bar
+        // shows "Now Playing" (the player body itself shows the track title).
         state.playingAudio != null -> TopAppBar(
             title = {
                 Text(
-                    text = state.playingAudio!!.title,
+                    text = "Now Playing",
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )

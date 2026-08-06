@@ -20,8 +20,7 @@ import java.net.URL
  * survives restarts. All heavy I/O is expected to run on the caller's
  * background dispatcher.
  *
- * Also owns the persisted server settings (backend URL + optional token) and
- * the storage limit, which live in SharedPreferences.
+ * Also owns the persisted storage limit, which lives in SharedPreferences.
  */
 class AudioDownloadStore(context: Context) {
 
@@ -35,23 +34,6 @@ class AudioDownloadStore(context: Context) {
     init {
         audioDir.mkdirs()
         thumbnailsDir.mkdirs()
-    }
-
-    // ── Server settings ────────────────────────────────────────────
-
-    /** The audio backend base URL (e.g. "https://my-app.onrender.com"). */
-    fun getServerUrl(): String = prefs.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL)!!
-
-    fun setServerUrl(url: String) {
-        prefs.edit().putString(KEY_SERVER_URL, url.trim().trimEnd('/')).apply()
-    }
-
-    /** Optional shared-secret token sent as an X-Audio-Token header. */
-    fun getServerToken(): String? =
-        prefs.getString(KEY_SERVER_TOKEN, null)?.takeIf { it.isNotBlank() }
-
-    fun setServerToken(token: String?) {
-        prefs.edit().putString(KEY_SERVER_TOKEN, token?.trim().orEmpty()).apply()
     }
 
     // ── Storage limit ──────────────────────────────────────────────
@@ -219,13 +201,7 @@ class AudioDownloadStore(context: Context) {
         val LOCK = Any()
 
         const val PREFS_NAME = "audio_downloads"
-        const val KEY_SERVER_URL = "server_url"
-        const val KEY_SERVER_TOKEN = "server_token"
         const val KEY_STORAGE_LIMIT = "storage_limit"
-
-        // The ClearView audio backend. Built-in so downloads work out of the
-        // box for every install; overridable in Downloads → Server settings.
-        const val DEFAULT_SERVER_URL = "https://clearview-app-6db1.onrender.com"
 
         const val STALE_PART_MS = 24L * 60 * 60 * 1000
     }

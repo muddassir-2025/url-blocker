@@ -133,7 +133,15 @@ fun YoutubePlayer(
      */
     muted: Boolean = true,
     /** The player's REAL muted state (reported by the page). */
-    onMuteState: (Boolean) -> Unit = {}
+    onMuteState: (Boolean) -> Unit = {},
+    /**
+     * Max-quality pin (Makkah / Madinah Live tab): requests the best
+     * available playback quality ('highres') and keeps re-requesting it —
+     * live embeds start on "auto", which can pick a low tier, and YouTube
+     * can downshift quality on its own. Passed with every load so the page
+     * arms its quality watchdog (see youtube_player.html setMaxQuality).
+     */
+    maxQuality: Boolean = false
 ) {
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val controller = remember { PlayerController() }
@@ -472,6 +480,7 @@ fun YoutubePlayer(
             controller.videoId = videoId
             controller.retryToken = retryToken
             controller.preferredMuted = muted
+            controller.maxQuality = maxQuality
             // Assigned OUTSIDE the pageReady guard: the first applySource may
             // come from onPageFinished before any ready update runs, and it
             // must see the resume position (Continue Watching on first open).
@@ -610,8 +619,10 @@ private fun applySource(webView: WebView, controller: PlayerController, bridge: 
     val video = controller.videoId ?: return
     val resume = controller.resumeFromSeconds
     // Always pass the desired mute state so every new video honours the
-    // user's last choice (Shorts swiping keeps the setting consistent).
-    val js = "loadVideo('$video', $resume, ${controller.preferredMuted})"
+    // user's last choice (Shorts swiping keeps the setting consistent); the
+    // max-quality flag rides along so the embed is created with the quality
+    // pin armed.
+    val js = "loadVideo('$video', $resume, ${controller.preferredMuted}, ${controller.maxQuality})"
     controller.appliedVideoId = video
     controller.appliedRetryToken = controller.retryToken
     // New source → a repeated error from the old source must be able to fire
@@ -664,6 +675,8 @@ private class PlayerController {
     var resumeFromSeconds: Double = 0.0
     /** The user's desired mute state (applied with every source load). */
     @Volatile var preferredMuted: Boolean = true
+    /** Max-quality pin (best available playback quality) for the current player. */
+    @Volatile var maxQuality: Boolean = false
     /** Last seekToken honored (drives the Continue-Watching re-seek). */
     var appliedSeekToken: Int = 0
     /** Last commandToken honored (Shorts transport commands). */

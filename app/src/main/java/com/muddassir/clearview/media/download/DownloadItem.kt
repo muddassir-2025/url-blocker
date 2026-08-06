@@ -29,7 +29,11 @@ data class DownloadItem(
     val lastPlayed: Long = 0L,
     val expiresAt: Long = 0L,
     val thumbnailPath: String = "",
-    val durationSeconds: Long = 0L
+    val durationSeconds: Long = 0L,
+    /** The video's channel id (empty for downloads made before this field
+     *  existed, or when the channel id wasn't known). Drives per-channel
+     *  filtering in the Downloads view. */
+    val channelId: String = ""
 ) {
     companion object {
         const val SOURCE_RSS = "rss"
@@ -60,6 +64,7 @@ object DownloadItems {
                     .put("expiresAt", item.expiresAt)
                     .put("thumbnailPath", item.thumbnailPath)
                     .put("durationSeconds", item.durationSeconds)
+                    .put("channelId", item.channelId)
             )
         }
         return arr.toString()
@@ -86,7 +91,8 @@ object DownloadItems {
                         lastPlayed = o.optLong("lastPlayed", 0L),
                         expiresAt = o.optLong("expiresAt", 0L),
                         thumbnailPath = o.optString("thumbnailPath", ""),
-                        durationSeconds = o.optLong("durationSeconds", 0L)
+                        durationSeconds = o.optLong("durationSeconds", 0L),
+                        channelId = o.optString("channelId", "")
                     )
                 } catch (e: Exception) {
                     null

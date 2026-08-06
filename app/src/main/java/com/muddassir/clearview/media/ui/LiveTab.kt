@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -50,12 +51,18 @@ import kotlinx.coroutines.delay
  *
  * LAYOUT (no-overlap guarantee): the `🕋 Makkah Live` / `🕌 Madinah Live`
  * selector is its OWN horizontally scrollable row ABOVE the player — it never
- * overlays the video, so it can never collide with the player's own
- * mute/speaker, CC, or settings icons (a real problem on small screens when
- * the chips floated over the video). The selector row collapses to zero
- * height in landscape (immersive fullscreen) but STAYS in composition so the
- * player keeps its slot and rotation never restarts the stream. The caption
- * sits BELOW the player in portrait.
+ * overlays the video, so it can never collide with YouTube's native player
+ * icons (a real problem on small screens when the chips floated over the
+ * video). The selector row collapses to zero height in landscape (immersive
+ * fullscreen) but STAYS in composition so the player keeps its slot and
+ * rotation never restarts the stream. In portrait the player is a PROPER 16:9
+ * card (never stretched to fill the leftover height); in landscape it fills
+ * the whole screen. The caption sits BELOW the player in portrait, with any
+ * remaining space underneath. The player itself is a NORMAL, un-cropped
+ * YouTube embed (no CSS zoom/crop, native controls on tap).
+ *
+ * QUALITY: the stream is pinned to the best available playback quality
+ * (maxQuality) — see the JS quality watchdog in youtube_player.html.
  *
  * CONNECTING BACKDROP: while a stream is connecting — or when it ends / is
  * unavailable — a smooth gradient backdrop ([LiveBackdrop]) fills the player
@@ -150,11 +157,17 @@ fun LiveTab(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
+                .then(
+                    if (isLandscape) Modifier.weight(1f)
+                    else Modifier.aspectRatio(16f / 9f)
+                )
         ) {
+            // Normal YouTube embed: no CSS crop, no click shield, the native
+            // controls (tap the video for play/pause + mute) stay available.
             YoutubePlayer(
                 videoId = videoId,
                 modifier = Modifier.fillMaxSize(),
+                maxQuality = true,
                 onPlayerState = { s ->
                     playerState = s
                     if (s == YtState.PLAYING) busy = false
@@ -218,9 +231,12 @@ fun LiveTab(
                     }
                 }
             }
+
         }
 
         // ── Caption (portrait only): BELOW the player — can never cover it.
+        // The 16:9 player leaves leftover height; a weight spacer pins the
+        // caption right under the video and lets the empty space sit below.
         if (!isLandscape) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -242,6 +258,7 @@ fun LiveTab(
                     )
                 }
             }
+            Spacer(Modifier.weight(1f))
         }
     }
 }

@@ -113,6 +113,14 @@ dependencies {
     // "com.google.ai.edge.litert", hence android.uniquePackageNames=false
     // in gradle.properties.
     implementation(libs.litert)
+    // On-device YouTube audio extraction (NewPipeExtractor, GPL-3.0-or-later):
+    // resolves the direct audio-stream URL from the phone's own IP so downloads
+    // never depend on a server. Audio-only streams only — no FFmpeg needed.
+    implementation(libs.newpipe.extractor)
+    // MediaSessionCompat + MediaStyle notification for the offline-audio
+    // foreground service: background playback with lock-screen / notification
+    // media controls.
+    implementation(libs.androidx.media)
 
     testImplementation(libs.junit)
     // org.json is stubbed in the Android SDK; provide the real JVM impl for unit tests

@@ -5,7 +5,6 @@ import android.widget.Toast
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -15,7 +14,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -26,7 +25,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -183,6 +181,9 @@ fun MediaTab(
     var showAddVideoDialog by remember { mutableStateOf(false) }
     var showHiddenDialog by remember { mutableStateOf(false) }
     var pendingRemove by remember { mutableStateOf<SavedChannel?>(null) }
+    // A downloaded video awaiting "delete offline audio" confirmation — the
+    // card's ⋮ menu "Delete download" no longer deletes without asking.
+    var pendingDeleteDownload by remember { mutableStateOf<MediaVideo?>(null) }
     // The feed filter is persisted per context (survives restarts): the All
     // Feed filter when no channel is selected, and each channel's own filter
     // when one is. Switching channels swaps to that channel's saved filter.
@@ -402,22 +403,28 @@ fun MediaTab(
             .sortedByDescending { it.publishedAtEpochMillis }
             .take(6)
     }
-    // Already downloaded → play the local offline audio immediately (podcast
-    // style); otherwise the normal (WebView) video playback.
+    // Tapping a card ALWAYS opens the normal (WebView) video player — even for
+    // downloaded videos, so watching online is never taken away by a download.
+    // The offline audio stays available as an explicit choice: the card's ⋮
+    // menu → "Play audio offline", and the player's below-video button.
     val playShort: (MediaVideo) -> Unit = { video ->
-        if (AudioDownloads.isDownloaded(video.videoId)) {
-            onPlayOffline(video)
-        } else {
-            val idx = shorts.indexOfFirst { it.videoId == video.videoId }
-            onPlayVideo(video, shorts, idx)
-        }
+        val idx = shorts.indexOfFirst { it.videoId == video.videoId }
+        onPlayVideo(video, shorts, idx)
     }
     val playLong: (MediaVideo) -> Unit = { video ->
-        if (AudioDownloads.isDownloaded(video.videoId)) onPlayOffline(video)
-        else onPlayVideo(video, emptyList(), -1)
+        onPlayVideo(video, emptyList(), -1)
     }
     // The Downloads content filter swaps the feed for the Downloads section.
     val downloadsFilter = feedFilter.content == FeedContentFilter.DOWNLOADS
+    // Entering the Downloads view resets any stale feed-search query, so the
+    // offline-audio list never filters for an invisible reason (the header
+    // search toggle is hidden there — only the section's own field searches).
+    LaunchedEffect(downloadsFilter) {
+        if (downloadsFilter) {
+            searchActive = false
+            searchQuery = ""
+        }
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
 
@@ -513,20 +520,38 @@ fun MediaTab(
                 feedIsUserPlaylist -> selectedUserPlaylist?.name ?: "My Playlist"
                 feedIsPlaylist -> playlists.firstOrNull { it.playlistId == selectedPlaylistId }
                     ?.title ?: "Playlist"
+                downloadsFilter -> "Downloads"
                 else -> "All Feed"
             }
+            // The header's result count mirrors what the section shows: the
+            // channel + search-scoped downloads in Downloads view, the feed
+            // search results otherwise.
+            val resultCount = if (downloadsFilter) {
+                val q = searchQuery.trim()
+                val channelName = channels.firstOrNull { it.channelId == filterChannelId }?.displayName
+                AudioDownloads.items.value.count { item ->
+                    val inChannel = filterChannelId == null ||
+                        item.channelId == filterChannelId ||
+                        (item.channelId.isBlank() && channelName != null &&
+                            item.channelName.equals(channelName, ignoreCase = true))
+                    inChannel &&
+                        (q.isEmpty() || item.title.contains(q, ignoreCase = true) ||
+                            item.channelName.contains(q, ignoreCase = true))
+                }
+            } else searchResults.size
             FeedHeader(
                 title = headerTitle,
                 filter = feedFilter,
-                resultCount = searchResults.size,
+                resultCount = resultCount,
                 hiddenCount = contextHiddenVideos.size,
                 // "Add video by URL" is available when a channel is selected
                 // OR when viewing one of the user's own playlists (the added
                 // video then lands in that playlist too).
                 canAddVideo = filterChannelId != null || feedIsUserPlaylist,
                 canEditPlaylist = feedIsUserPlaylist,
-                searchActive = searchActive,
+                searchActive = searchActive && !downloadsFilter,
                 searchQuery = searchQuery,
+                searchEnabled = !downloadsFilter,
                 // "Updated Xm ago" — recomputed whenever a refresh lands OR
                 // the minute ticker bumps (clockTick read forces recompose).
                 updatedAgo = if (sourceRefreshedAt > 0L && !sourceLoading && clockTick >= 0) {
@@ -568,8 +593,13 @@ fun MediaTab(
         ) {
             when {
                 // Downloads filter → the Downloads section (storage card +
-                // offline audio list). Replaces the feed entirely.
-                downloadsFilter && !isSearching -> DownloadsSection(
+                // searchable, per-channel offline audio list). Replaces the
+                // feed entirely; search and the channel strip scope its list.
+                downloadsFilter -> DownloadsSection(
+                    channelId = filterChannelId,
+                    channelName = channels.firstOrNull { it.channelId == filterChannelId }?.displayName,
+                    searchQuery = searchQuery,
+                    onSearchQueryChange = { searchQuery = it },
                     onPlayAudio = onPlayAudio
                 )
                 // Imported playlist: loading / error / empty states.
@@ -626,6 +656,7 @@ fun MediaTab(
                                     ContinueWatchingCard(
                                         video = video,
                                         progressStore = progressStore,
+                                        downloadStatus = AudioDownloads.statusFor(video.videoId),
                                         onClick = { playLong(video) }
                                     )
                                 }
@@ -647,14 +678,14 @@ fun MediaTab(
                                         video = video,
                                         progressStore = progressStore,
                                         isManual = libraryStore.isManuallyAdded(video.videoId),
-                                        downloadStatus = AudioDownloads.statusFor(video.videoId),
-                                        isOffline = AudioDownloads.isDownloaded(video.videoId),
-                                        onClick = { playShort(video) },
+                                        downloadStatus = AudioDownloads.statusFor(video.videoId),                                            isOffline = AudioDownloads.isDownloaded(video.videoId),
+                                            onPlayOffline = { onPlayOffline(video) },
+                                            onClick = { playShort(video) },
                                         onDownload = {
                                             AudioDownloads.download(video, AudioDownloads.sourceFor(video))
                                         },
                                         onCancelDownload = { AudioDownloads.cancel(video.videoId) },
-                                        onDeleteDownload = { AudioDownloads.delete(video.videoId) },
+                                        onDeleteDownload = { pendingDeleteDownload = video },
                                         onHide = {
                                             libraryStore.hideVideo(video)
                                             libraryRevision++
@@ -684,12 +715,13 @@ fun MediaTab(
                                 isManual = libraryStore.isManuallyAdded(video.videoId),
                                 downloadStatus = AudioDownloads.statusFor(video.videoId),
                                 isOffline = AudioDownloads.isDownloaded(video.videoId),
+                                onPlayOffline = { onPlayOffline(video) },
                                 onClick = { playLong(video) },
                                 onDownload = {
                                     AudioDownloads.download(video, AudioDownloads.sourceFor(video))
                                 },
                                 onCancelDownload = { AudioDownloads.cancel(video.videoId) },
-                                onDeleteDownload = { AudioDownloads.delete(video.videoId) },
+                                onDeleteDownload = { pendingDeleteDownload = video },
                                 onHide = {
                                     libraryStore.hideVideo(video)
                                     libraryRevision++
@@ -720,12 +752,13 @@ fun MediaTab(
                                 isManual = libraryStore.isManuallyAdded(video.videoId),
                                 downloadStatus = AudioDownloads.statusFor(video.videoId),
                                 isOffline = AudioDownloads.isDownloaded(video.videoId),
+                                onPlayOffline = { onPlayOffline(video) },
                                 onClick = { playLong(video) },
                                 onDownload = {
                                     AudioDownloads.download(video, AudioDownloads.sourceFor(video))
                                 },
                                 onCancelDownload = { AudioDownloads.cancel(video.videoId) },
-                                onDeleteDownload = { AudioDownloads.delete(video.videoId) },
+                                onDeleteDownload = { pendingDeleteDownload = video },
                                 onHide = {
                                     libraryStore.hideVideo(video)
                                     libraryRevision++
@@ -1045,6 +1078,25 @@ fun MediaTab(
             }
         )
     }
+
+    // ── Delete offline audio confirmation (⋮ menu → Delete download) ──
+    pendingDeleteDownload?.let { video ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteDownload = null },
+            title = { Text("Delete download?") },
+            text = { Text("Delete the offline audio of \"${video.title}\"?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    AudioDownloads.delete(video.videoId)
+                    pendingDeleteDownload = null
+                    Toast.makeText(context, "Download deleted", Toast.LENGTH_SHORT).show()
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteDownload = null }) { Text("Cancel") }
+            }
+        )
+    }
 }
 
 @Composable
@@ -1245,6 +1297,8 @@ private fun ShortCard(
     isManual: Boolean,
     downloadStatus: DownloadStatus?,
     isOffline: Boolean,
+    /** Plays the downloaded audio (card ⋮ menu) — non-null only when offline. */
+    onPlayOffline: (() -> Unit)? = null,
     onClick: () -> Unit,
     onDownload: () -> Unit,
     onCancelDownload: () -> Unit,
@@ -1315,7 +1369,9 @@ private fun ShortCard(
                         )
                     }
                 }
-            } else if (downloadStatus == null && fraction != null && fraction > 0.02f && !live) {
+            } else if (downloadStatus != null) {
+                DownloadThumbOverlay(status = downloadStatus)
+            } else if (fraction != null && fraction > 0.02f && !live) {
                 Surface(
                     modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
                     shape = RoundedCornerShape(5.dp),
@@ -1353,19 +1409,14 @@ private fun ShortCard(
                 onDownloadAction = downloadMenuAction(
                     downloadStatus, isOffline, onDownload, onCancelDownload, onDeleteDownload
                 ),
+                onPlayOffline = if (isOffline) onPlayOffline else null,
                 onHide = onHide,
                 onRemoveManual = onRemoveManual,
                 onAddToPlaylist = onAddToPlaylist
             )
-            // Download progress: an animated bar pinned to the bottom of the
-            // thumbnail while the audio downloads (pulsing while the server
-            // prepares, a real % once bytes flow, red if it failed — the ⋮
-            // menu then offers Retry). The download icon itself lives in the
-            // ⋮ menu and the video player's control panel.
-            downloadStatus?.let { status ->
-                DownloadProgressOverlay(status, Modifier.align(Alignment.BottomStart))
-            }
-            // Bottom-end stack: status pills + duration pill.
+            // Live download progress renders on the thumbnail itself (a
+            // status pill + bottom progress bar); the ⋮ menu keeps the
+            // Cancel / Retry action. Bottom-end stack: status pills + duration pill.
             Column(
                 modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp),
                 horizontalAlignment = Alignment.End,
@@ -1442,6 +1493,8 @@ private fun LongVideoCard(
     isManual: Boolean,
     downloadStatus: DownloadStatus?,
     isOffline: Boolean,
+    /** Plays the downloaded audio (card ⋮ menu) — non-null only when offline. */
+    onPlayOffline: (() -> Unit)? = null,
     onClick: () -> Unit,
     onDownload: () -> Unit,
     onCancelDownload: () -> Unit,
@@ -1520,18 +1573,16 @@ private fun LongVideoCard(
                     onDownloadAction = downloadMenuAction(
                         downloadStatus, isOffline, onDownload, onCancelDownload, onDeleteDownload
                     ),
+                    onPlayOffline = if (isOffline) onPlayOffline else null,
                     onHide = onHide,
                     onRemoveManual = onRemoveManual,
                     onAddToPlaylist = onAddToPlaylist,
                     onRemoveFromPlaylist = onRemoveFromPlaylist
                 )
-            // Download progress: an animated bar pinned to the bottom of the
-            // thumbnail while the audio downloads (see ShortCard for details).
-            downloadStatus?.let { status ->
-                DownloadProgressOverlay(status, Modifier.align(Alignment.BottomStart))
-            }
-            // Bottom-end stack: status pills + duration pill. Everything sits
-            // above the watch-progress bar.
+            // Live download progress renders on the thumbnail itself (a
+            // status pill + bottom progress bar); the ⋮ menu keeps the
+            // Cancel / Retry action. Bottom-end stack: status pills +
+            // duration pill. Everything sits above the download/watch bar.
             Column(
                 modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
                 horizontalAlignment = Alignment.End,
@@ -1592,7 +1643,9 @@ private fun LongVideoCard(
                             )
                         }
                     }
-                } else if (downloadStatus == null && fraction != null && fraction > 0.02f && !live) {
+                } else if (downloadStatus != null) {
+                    DownloadThumbOverlay(status = downloadStatus)
+                } else if (fraction != null && fraction > 0.02f && !live) {
                     // In-progress: YouTube-style thin progress bar + a small
                     // "NN%" pill (top-right) so the watched amount is visible
                     // at a glance.
@@ -1685,6 +1738,9 @@ private fun FeedHeader(
     canEditPlaylist: Boolean = false,
     searchActive: Boolean,
     searchQuery: String,
+    /** When false the search toggle is hidden (e.g. the Downloads view, which
+     *  owns its own search field over the offline audios). */
+    searchEnabled: Boolean = true,
     /** "Updated Xm ago" text shown under the title row (null = hide). */
     updatedAgo: String? = null,
     /** When set, an ✕ appears that exits the current playlist context. */
@@ -1703,13 +1759,15 @@ private fun FeedHeader(
     val keyboardController = LocalSoftwareKeyboardController.current
     // Autofocus the search field the moment search mode opens.
     val searchFocus = remember { FocusRequester() }
-    LaunchedEffect(searchActive) {
-        if (searchActive) {
-            searchFocus.requestFocus()
-        } else {
-            // The field leaves composition when search closes — dismiss the
-            // keyboard too, otherwise it lingers over the feed.
-            keyboardController?.hide()
+    if (searchEnabled) {
+        LaunchedEffect(searchActive) {
+            if (searchActive) {
+                searchFocus.requestFocus()
+            } else {
+                // The field leaves composition when search closes — dismiss the
+                // keyboard too, otherwise it lingers over the feed.
+                keyboardController?.hide()
+            }
         }
     }
     Column(
@@ -1752,18 +1810,21 @@ private fun FeedHeader(
                 }
             }
             // Search toggle: a magnifier normally, an ✕ to close in search mode
-            // (closing also clears the query via onToggleSearch).
-            IconButton(
-                onClick = onToggleSearch,
-                modifier = Modifier.size(40.dp)
-            ) {
-                Icon(
-                    if (searchActive) Icons.Filled.Close else Icons.Filled.Search,
-                    contentDescription = if (searchActive) "Close search" else "Search feed",
-                    tint = if (searchActive) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(22.dp)
-                )
+            // (closing also clears the query via onToggleSearch). Hidden in the
+            // Downloads view, which owns its own search field.
+            if (searchEnabled) {
+                IconButton(
+                    onClick = onToggleSearch,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        if (searchActive) Icons.Filled.Close else Icons.Filled.Search,
+                        contentDescription = if (searchActive) "Close search" else "Search feed",
+                        tint = if (searchActive) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             }
             Box {
                 IconButton(
@@ -2141,6 +2202,7 @@ private fun formatShortDate(millis: Long?, fallback: String): String {
 private fun ContinueWatchingCard(
     video: MediaVideo,
     progressStore: WatchProgressStore,
+    downloadStatus: DownloadStatus? = null,
     onClick: () -> Unit
 ) {
     val progress = remember(video.videoId) { progressStore.getProgress(video.videoId) }
@@ -2159,33 +2221,39 @@ private fun ContinueWatchingCard(
                     .aspectRatio(16f / 9f)
             ) {
                 RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
-                val fraction = (progress?.fraction ?: 0f).coerceIn(0f, 1f)
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .fillMaxWidth()
-                        .height(3.dp)
-                        .background(Color.Black.copy(alpha = 0.45f))
-                ) {
+                if (downloadStatus != null) {
+                    // A re-download in flight: the thumbnail shows the live
+                    // download pill + bar instead of the watch progress.
+                    DownloadThumbOverlay(status = downloadStatus)
+                } else {
+                    val fraction = (progress?.fraction ?: 0f).coerceIn(0f, 1f)
                     Box(
                         modifier = Modifier
-                            .fillMaxHeight()
-                            .fillMaxWidth(fraction)
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
-                }
-                Surface(
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
-                    shape = RoundedCornerShape(5.dp),
-                    color = Color.Black.copy(alpha = 0.7f)
-                ) {
-                    Text(
-                        text = formatResumeLabel(progress?.positionSeconds, progress?.durationSeconds),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color.White,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .background(Color.Black.copy(alpha = 0.45f))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(fraction)
+                                .background(MaterialTheme.colorScheme.primary)
+                        )
+                    }
+                    Surface(
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                        shape = RoundedCornerShape(5.dp),
+                        color = Color.Black.copy(alpha = 0.7f)
+                    ) {
+                        Text(
+                            text = formatResumeLabel(progress?.positionSeconds, progress?.durationSeconds),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                 }
             }
             Column(modifier = Modifier.padding(12.dp)) {
@@ -2215,6 +2283,79 @@ private fun formatResumeLabel(positionSeconds: Long?, durationSeconds: Long?): S
     val dur = durationSeconds ?: return "Resume"
     if (dur <= 0L) return "Resume"
     return "${formatClock(pos)} / ${formatClock(dur)}"
+}
+
+/**
+ * Live download progress overlaid on a feed thumbnail while a download is in
+ * flight: a status pill (spinner + "Preparing…" / "NN%") in the top corner
+ * and a bottom progress bar — determinate while bytes flow, an infinite
+ * sweep while preparing or the total size is unknown. BoxScope so both parts
+ * can align within the thumbnail's Box.
+ */
+@Composable
+private fun BoxScope.DownloadThumbOverlay(
+    status: DownloadStatus
+) {
+    // Only an in-flight download gets the thumbnail animation — a failed one
+    // is surfaced by the ⋮ menu's Retry action instead of an endless sweep.
+    if (status !is DownloadStatus.Preparing && status !is DownloadStatus.Downloading) return
+    val known = status is DownloadStatus.Downloading && status.progress >= 0f
+    val fraction = (status as? DownloadStatus.Downloading)?.progress?.coerceIn(0f, 1f) ?: 0f
+    val label = when {
+        status is DownloadStatus.Preparing -> "Preparing…"
+        known -> "${(fraction * 100).toInt()}%"
+        else -> "Downloading…"
+    }
+
+    Surface(
+        modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
+        shape = RoundedCornerShape(5.dp),
+        color = Color.Black.copy(alpha = 0.65f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(10.dp),
+                strokeWidth = 2.dp,
+                color = Color.White
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White
+            )
+        }
+    }
+
+    // Bottom progress bar: real fraction while downloading, an animated sweep
+    // while preparing (or when the total size is unknown).
+    val sweep = rememberInfiniteTransition(label = "download-sweep").animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "download-sweep-value"
+    )
+    Box(
+        modifier = Modifier
+            .align(Alignment.BottomStart)
+            .fillMaxWidth()
+            .height(3.dp)
+            .background(Color.Black.copy(alpha = 0.45f))
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(if (known) fraction else sweep.value)
+                .background(MaterialTheme.colorScheme.primary)
+        )
+    }
 }
 
 /**
@@ -2253,92 +2394,11 @@ private fun formatClock(seconds: Long): String {
 }
 
 /**
- * The animated download bar pinned to the bottom of a feed-card thumbnail.
- * Replaces the old corner download icon: while the audio is being fetched the
- * bar sweeps (Preparing — the server may be cold-starting), then fills with
- * real progress once bytes flow (Downloading), and turns red if it failed
- * (the ⋮ menu then offers "Retry download").
- */
-@Composable
-private fun DownloadProgressOverlay(
-    status: DownloadStatus,
-    modifier: Modifier = Modifier
-) {
-    when (status) {
-        is DownloadStatus.Preparing -> DownloadSweepBar(modifier)
-        is DownloadStatus.Downloading -> {
-            if (status.progress >= 0f) {
-                // Smoothly filled as bytes land.
-                val animated by animateFloatAsState(
-                    targetValue = status.progress.coerceIn(0f, 1f),
-                    animationSpec = tween(400),
-                    label = "download-progress"
-                )
-                Box(
-                    modifier = modifier
-                        .fillMaxWidth()
-                        .height(3.dp)
-                        .background(Color.Black.copy(alpha = 0.5f))
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .fillMaxWidth(animated)
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
-                }
-            } else {
-                // Total size unknown yet — sweep instead of looking stuck.
-                DownloadSweepBar(modifier)
-            }
-        }
-        is DownloadStatus.Error -> {
-            // Failed: a static red bar signals the download didn't complete.
-            Box(
-                modifier = modifier
-                    .fillMaxWidth()
-                    .height(3.dp)
-                    .background(MaterialTheme.colorScheme.error)
-            )
-        }
-    }
-}
-
-/** A pulsing bar that sweeps across the thumbnail (Preparing / unknown size). */
-@Composable
-private fun DownloadSweepBar(modifier: Modifier = Modifier) {
-    val transition = rememberInfiniteTransition(label = "download-sweep")
-    val sweep by transition.animateFloat(
-        initialValue = -1f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "download-sweep-offset"
-    )
-    BoxWithConstraints(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(3.dp)
-            .background(Color.Black.copy(alpha = 0.5f))
-    ) {
-        val bar = maxWidth * 0.35f
-        Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .width(bar)
-                .offset(x = (maxWidth + bar) * sweep - bar)
-                .background(MaterialTheme.colorScheme.primary)
-        )
-    }
-}
-
-/**
- * Overflow menu on feed cards: Add to playlist, Download audio, Hide video,
- * and (for manually added videos) Remove. In a user-playlist feed a
- * "Remove from playlist" entry is offered too. Tapping any entry does NOT
- * trigger the card's own onClick (the inner clickable consumes the tap).
+ * Overflow menu on feed cards: Add to playlist, Play audio offline (when the
+ * audio is downloaded), Download audio, Hide video, and (for manually added
+ * videos) Remove. In a user-playlist feed a "Remove from playlist" entry is
+ * offered too. Tapping any entry does NOT trigger the card's own onClick (the
+ * inner clickable consumes the tap).
  */
 @Composable
 private fun VideoCardMenu(
@@ -2346,6 +2406,8 @@ private fun VideoCardMenu(
     isManual: Boolean,
     downloadLabel: String? = null,
     onDownloadAction: (() -> Unit)? = null,
+    /** When set (the video's audio is downloaded), the menu offers "Play audio offline". */
+    onPlayOffline: (() -> Unit)? = null,
     onHide: () -> Unit,
     onRemoveManual: () -> Unit,
     onAddToPlaylist: (() -> Unit)? = null,
@@ -2388,6 +2450,15 @@ private fun VideoCardMenu(
                     onClick = {
                         showMenu = false
                         onRemoveFromPlaylist()
+                    }
+                )
+            }
+            if (onPlayOffline != null) {
+                DropdownMenuItem(
+                    text = { Text("Play audio offline") },
+                    onClick = {
+                        showMenu = false
+                        onPlayOffline()
                     }
                 )
             }

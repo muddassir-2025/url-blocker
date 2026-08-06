@@ -113,6 +113,13 @@ This video cannot be played inside the app.</string>
     <string name="live_tab_playing">Live · playing inside the app</string>
     <string name="live_tab_error">Live stream currently unavailable. Please try again later.</string>
 
+    <!-- Offline-audio background playback (foreground media service) -->
+    <string name="audio_notification_channel">Audio playback</string>
+    <string name="audio_notification_channel_desc">Controls for the offline audio playing in the background</string>
+    <string name="audio_notification_play">Play</string>
+    <string name="audio_notification_pause">Pause</string>
+    <string name="audio_notification_stop">Stop</string>
+
     <plurals name="quran_verse_interval_set">
         <item quantity="one">New verse every %1$d hour</item>
         <item quantity="other">New verse every %1$d hours</item>

@@ -1,24 +1,18 @@
 package com.muddassir.clearview.media.download
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioManager
-import android.media.MediaPlayer
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import java.io.File
 
 /**
- * A single, lightweight [MediaPlayer]-based controller for the offline audio
- * player (podcast-style). Only one audio plays at a time; state is Compose
- * state so the player screen and the rest of the app observe it directly.
+ * App-facing facade for offline-audio playback.
+ *
+ * The actual [android.media.MediaPlayer] lives inside [AudioPlaybackService] —
+ * a foreground media service — so the audio keeps playing when the app is
+ * backgrounded or the screen is off, with a media notification (play/pause/
+ * stop, lock-screen controls) attached. All state stays Compose state, so the
+ * player screen and the rest of the app observe it exactly as before; every
+ * command is forwarded to the service through intents.
  */
 object OfflineAudioPlayer {
 
@@ -27,132 +21,81 @@ object OfflineAudioPlayer {
     val isPlaying = mutableStateOf(false)
     val positionMs = mutableLongStateOf(0L)
     val durationMs = mutableLongStateOf(0L)
+    /** Current playback speed (1.0 = normal), persisted across sessions. */
+    val speed = mutableStateOf(1f)
 
-    private var player: MediaPlayer? = null
-    private var tickerJob: Job? = null
-    private var audioManager: AudioManager? = null
+    private var appContext: Context? = null
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-
-    /** Loads and starts playing [file] (the downloaded audio for [videoId]). */
-    fun play(context: Context, file: File, videoId: String) {
-        stopInternal()
-        playingVideoId.value = videoId
-        val mp = MediaPlayer()
-        try {
-            mp.setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build()
-            )
-            mp.setDataSource(file.absolutePath)
-            mp.setOnPreparedListener { prepared ->
-                durationMs.longValue = prepared.duration.toLong().coerceAtLeast(0L)
-                positionMs.longValue = 0L
-                prepared.start()
-                isPlaying.value = true
-                requestAudioFocus(context)
-                startTicker()
-            }
-            mp.setOnCompletionListener { finishPlayback() }
-            mp.setOnErrorListener { _, _, _ ->
-                stop()
-                true
-            }
-            mp.prepareAsync()
-            player = mp
-        } catch (e: Exception) {
-            mp.release()
-            player = null
-            playingVideoId.value = null
-        }
+    /**
+     * Loads and starts background playback of the downloaded [item].
+     *
+     * No-op when [item] is already the loaded audio: with playback continuing
+     * in the background after the player screen closes, re-opening the screen
+     * must NOT restart the track — it simply shows the ongoing playback.
+     */
+    fun play(context: Context, item: DownloadItem) {
+        appContext = context.applicationContext
+        // Sync the persisted speed into Compose state so the player screen and
+        // the notification reflect the saved rate even after a restart (the
+        // service applies it when the new player is prepared).
+        speed.value = persistedSpeed(context)
+        if (playingVideoId.value == item.videoId) return
+        AudioPlaybackService.play(context, item)
     }
 
     fun toggle() {
-        if (isPlaying.value) pause() else resume()
+        val ctx = appContext ?: return
+        if (playingVideoId.value == null) return
+        if (isPlaying.value) {
+            AudioPlaybackService.send(ctx, AudioPlaybackService.ACTION_PAUSE)
+        } else {
+            AudioPlaybackService.send(ctx, AudioPlaybackService.ACTION_RESUME)
+        }
     }
 
     fun pause() {
-        player?.pause()
-        isPlaying.value = false
-        stopTicker()
+        val ctx = appContext ?: return
+        if (playingVideoId.value == null) return
+        AudioPlaybackService.send(ctx, AudioPlaybackService.ACTION_PAUSE)
     }
 
     fun resume() {
-        val mp = player
-        if (mp != null && playingVideoId.value != null) {
-            mp.start()
-            isPlaying.value = true
-            startTicker()
-        }
+        val ctx = appContext ?: return
+        if (playingVideoId.value == null) return
+        AudioPlaybackService.send(ctx, AudioPlaybackService.ACTION_RESUME)
     }
 
     fun seekTo(ms: Long) {
-        player?.seekTo(ms.toInt().coerceAtLeast(0))
-        positionMs.longValue = ms.coerceAtLeast(0L)
+        val ctx = appContext ?: return
+        if (playingVideoId.value == null) return
+        AudioPlaybackService.send(ctx, AudioPlaybackService.ACTION_SEEK, ms.coerceAtLeast(0L))
     }
 
-    /** Stops playback, records the play, and clears the loaded audio. */
+    /** Stops playback; the service tears down its notification and itself. */
     fun stop() {
-        val id = playingVideoId.value
-        stopInternal()
-        playingVideoId.value = null
-        durationMs.longValue = 0L
-        if (id != null) AudioDownloads.markPlayed(id)
+        val ctx = appContext ?: return
+        if (playingVideoId.value == null) return
+        AudioPlaybackService.send(ctx, AudioPlaybackService.ACTION_STOP)
     }
 
-    private fun finishPlayback() {
-        val id = playingVideoId.value
-        stopInternal()
-        playingVideoId.value = null
-        durationMs.longValue = 0L
-        if (id != null) AudioDownloads.markPlayed(id)
+    /**
+     * Changes the playback speed. Persisted so it survives restarts and is
+     * applied to the live player by [AudioPlaybackService]; the Compose state
+     * updates immediately so the player screen and notification follow.
+     */
+    fun setSpeed(context: Context, rate: Float) {
+        val ctx = context.applicationContext
+        appContext = ctx
+        speed.value = rate
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putFloat(KEY_SPEED, rate).apply()
+        AudioPlaybackService.send(ctx, AudioPlaybackService.ACTION_SET_SPEED, speed = rate)
     }
 
-    private fun stopInternal() {
-        stopTicker()
-        runCatching { player?.stop() }
-        player?.release()
-        player = null
-        isPlaying.value = false
-        positionMs.longValue = 0L
-        abandonAudioFocus()
-    }
+    private fun persistedSpeed(context: Context): Float =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getFloat(KEY_SPEED, 1f)
 
-    private fun startTicker() {
-        stopTicker()
-        tickerJob = scope.launch {
-            while (isActive) {
-                positionMs.longValue = player?.currentPosition?.toLong() ?: 0L
-                delay(500)
-            }
-        }
-    }
-
-    private fun stopTicker() {
-        tickerJob?.cancel()
-        tickerJob = null
-    }
-
-    // ── Audio focus (polite media playback) ────────────────────────
-
-    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        when (change) {
-            AudioManager.AUDIOFOCUS_LOSS,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pause()
-            else -> Unit
-        }
-    }
-
-    private fun requestAudioFocus(context: Context) {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-        audioManager = am
-        am.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
-    }
-
-    private fun abandonAudioFocus() {
-        audioManager?.abandonAudioFocus(focusListener)
-        audioManager = null
-    }
+    private const val PREFS_NAME = "offline_audio_player"
+    private const val KEY_SPEED = "playback_speed"
 }

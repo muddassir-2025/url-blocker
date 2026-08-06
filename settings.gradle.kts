@@ -19,6 +19,9 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // NewPipeExtractor is published to JitPack (net.newpipe:extractor on
+        // Maven Central 404s for release builds). See libs.versions.toml.
+        maven("https://jitpack.io")
     }
 }
 
