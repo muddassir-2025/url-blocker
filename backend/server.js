@@ -18,11 +18,14 @@
  *      between calls instead of every request looking like a brand-new,
  *      unrelated client (which is what drew the bot check). NO account login
  *      is involved anywhere — the jar starts empty and yt-dlp populates it.
- *   3. Client chains (configurable via YTDLP_CLIENTS): the primary chain is
- *      `mweb,web` + fetch_pot=always + a PO token from the bundled provider
- *      (web_embedded is excluded — it returned LOGIN_REQUIRED in testing),
- *      then mobile innertube clients (direct signed URLs, no token needed),
- *      then the default chain.
+ *   3. Client chains (configurable via YTDLP_CLIENTS / YTDLP_MOBILE_CLIENTS /
+ *      YTDLP_TV_CLIENTS): the primary chain is `mweb,web` + fetch_pot=always +
+ *      a PO token from the bundled provider (web_embedded is excluded — it
+ *      returned LOGIN_REQUIRED in testing), then mobile innertube clients
+ *      (direct signed URLs + GVS PO token), then the tv/tv_embedded family,
+ *      then the default chain. The web/PO chain is ADAPTIVELY DEMOTED to the
+ *      end after repeated login/botcheck verdicts (a flagged datacenter IP)
+ *      so it never stalls every request; the cooldown re-tests it.
  *   4. A global rate limiter (token bucket + FIFO queue) keeps extraction
  *      comfortably under YouTube's guest-session ceiling (~300 requests/hour)
  *      and serializes calls so the shared cookiejar has no concurrent write
@@ -130,6 +133,24 @@ const STREAM_CACHE_MAX = Number(process.env.STREAM_CACHE_MAX_ENTRIES || 500);
 // LOGIN_REQUIRED in testing. Override with YTDLP_CLIENTS when YouTube shifts
 // its trust signals (e.g. YTDLP_CLIENTS=android_vr,ios,web_safari).
 const CLIENT_LIST = process.env.YTDLP_CLIENTS || 'mweb,web';
+// Fallback client lists (configurable for when YouTube shifts its trust
+// signals). MOBILE: innertube clients that serve direct signed URLs and now
+// also accept GVS PO tokens. TV: the tv/tv_embedded client family, a separate
+// trust path that historically survives datacenter-IP blocks.
+const MOBILE_CLIENT_LIST =
+  process.env.YTDLP_MOBILE_CLIENTS || 'android_vr,android,ios,web_safari,web_music';
+const TV_CLIENT_LIST = process.env.YTDLP_TV_CLIENTS || 'tv_embedded,tv';
+// Adaptive web/PO-chain demotion: on datacenter IPs the mweb,web pairing can
+// be permanently bot-blocked (LOGIN_REQUIRED even with a valid PO token). After
+// PO_CHAIN_DEMOTE_STREAK consecutive login/botcheck verdicts the web chain is
+// demoted to the END of the rotation for PO_CHAIN_DEMOTE_MS, so real requests
+// stop burning 5-30 s on it before reaching a working fallback. It is NEVER
+// removed: the cooldown re-tests it, and a success re-promotes it immediately.
+const PO_CHAIN_DEMOTE_STREAK = Number(process.env.YTDLP_PO_DEMOTE_STREAK || 3);
+const PO_CHAIN_DEMOTE_MS =
+  Number(process.env.YTDLP_PO_DEMOTE_MINUTES || 30) * 60 * 1000;
+let poChainFailStreak = 0;
+let poChainDemotedAt = 0; // epoch ms; 0 = not demoted
 
 // Single backoff retry across all chains on transient failures (bot checks /
 // 429s / timeouts are often momentary).
@@ -464,12 +485,12 @@ function verifyPotWiring() {
   //    request failures in monitoring.
   //    Probe A — the PRIMARY chain (CLIENT_LIST + PO token + guest session):
   //      exactly what real requests use. The FIRST video's probe A also WARMS
-  //      the real guest cookiejar and the provider's minter, and opens the 503
-  //      gate when it finishes.
-  //    Probe B — the FALLBACK mobile chain (direct signed URLs, no PO token):
-  //      proves the fallback still works even if the provider is unhappy. Runs
-  //      with -v and ALWAYS dumps its output tail on failure, so a broken
-  //      fallback is diagnosable from the log alone.
+  //      the real guest cookiejar and the provider's minter, and opens the 503    //      gate when it finishes.
+    //    Probe B — the MOBILE innertube chain (direct signed URLs + GVS PO
+    //      token): validates the exact mobile+PO config real requests now use
+    //      and verifies the provider mints tokens for it. Runs with -v and
+    //      ALWAYS dumps its output tail on failure, so a broken fallback is
+    //      diagnosable from the log alone.
   function runYtDlpProbe() {
     if (ytDlpProbeStarted) return;
     ytDlpProbeStarted = true;
@@ -520,7 +541,7 @@ function verifyPotWiring() {
       const expected = videoIdFromUrl(url);
       return { id, title, ok: id.length > 0 && id === (expected || id) };
     };
-    const MOBILE_ARGS = 'youtube:player_client=android_vr,android,ios,web_safari,web_music';
+    const MOBILE_ARGS = `youtube:player_client=${MOBILE_CLIENT_LIST};fetch_pot=always`;
     let probeIndex = 0;
 
     // ---- Probe A: PRIMARY chain (guest cookiejar + CLIENT_LIST + PO token) ----
@@ -629,23 +650,27 @@ function verifyPotWiring() {
       );
     }
 
-    // ---- Probe B: FALLBACK mobile chain (direct URLs, no PO token) ----
+    // ---- Probe B: MOBILE innertube chain (direct URLs + GVS PO token) ----
     // Throwaway jar of its own (the gate is open by now), -v, and the output
     // tail is ALWAYS dumped on failure — the old code logged only the error
-    // message and cut off with no detail.
+    // message and cut off with no detail. Mirrors probe A's PO-pipeline
+    // verdicts so the boot log proves the provider minted a MOBILE token.
     function runProbeB(url) {
       const jar = throwawayJar('probe-b');
       const tag = label(url);
       console.log(
-        `[boot-check] probe B (FALLBACK mobile chain) ${tag}: ${BIN_PATH} --cookies ${jar} --no-warnings --no-check-certificates --no-update --socket-timeout 20 --extractor-args "${MOBILE_ARGS}" --print "%(id)s|%(title)s" -v ${url}`
+        `[boot-check] probe B (MOBILE ${MOBILE_CLIENT_LIST}+PO chain) ${tag}: ${BIN_PATH} --cookies ${jar} --plugin-dirs ${PLUGINS_DIR} --no-warnings --no-check-certificates --no-update --socket-timeout 20 --extractor-args "${MOBILE_ARGS}" --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}" --print "%(id)s|%(title)s" -v ${url}`
       );
+      const beforeB = potActivity;
       execFile(
         BIN_PATH,
         [
           '--cookies', jar,
+          '--plugin-dirs', PLUGINS_DIR,
           '--no-warnings', '--no-check-certificates', '--no-update',
           '--socket-timeout', '20',
           '--extractor-args', MOBILE_ARGS,
+          '--extractor-args', `youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
           '--print', '%(id)s|%(title)s',
           '-v',
           url,
@@ -663,9 +688,9 @@ function verifyPotWiring() {
           const titleB = probePrint.title;
           const okB = !errB && probePrint.ok;
           if (okB) {
-            console.log(`[boot-check] FALLBACK mobile chain extraction OK — "${(titleB || extractedId).slice(0, 60)}" (${tag}, direct URLs, no PO token needed)`);
+            console.log(`[boot-check] MOBILE chain extraction OK — "${(titleB || extractedId).slice(0, 60)}" (${tag}, mobile innertube clients + PO token)`);
           } else {
-            console.warn(`[boot-check] FALLBACK mobile chain extraction FAILED (${String((errB && errB.message) || 'no id extracted').slice(0, 120)}) — ${tag}`);
+            console.warn(`[boot-check] MOBILE chain extraction FAILED (${String((errB && errB.message) || 'no id extracted').slice(0, 120)}) — ${tag}`);
             // ALWAYS dump the output tail on failure (the old code logged only
             // the message and cut off with no detail) — including the
             // exit-0-no-id case, where the tail is the only evidence.
@@ -674,6 +699,21 @@ function verifyPotWiring() {
             for (const line of probeLines.slice(-15)) {
               console.log(`[boot-check]   | ${line.slice(0, 220)}`);
             }
+          }
+          // PO-pipeline verdict for the mobile chain (same signals as probe A).
+          const potLines = potActivity - beforeB;
+          const httpProviderUsed = /\[pot:bgutil:http\]\s+Generating a .*PO Token for/.test(outB);
+          const tokenRetrieved = /Retrieved a .*PO Token/.test(outB);
+          if (httpProviderUsed) {
+            console.log(`[boot-check] ${tag}: bgutil HTTP provider WAS USED for the mobile chain`);
+          }
+          console.log(
+            potLines > 0
+              ? `[boot-check] ${tag}: provider GENERATED ${potLines} token generation(s) during probe B — mobile chain PO pipeline works`
+              : `[boot-check] ${tag}: provider saw NO token request during probe B (token may have been served from the provider cache)`
+          );
+          if (tokenRetrieved) {
+            console.log(`[boot-check] ${tag}: yt-dlp RETRIEVED at least one PO token for the mobile chain`);
           }
           probeIndex++;
           if (probeIndex < probeVideos.length) runProbeA(probeVideos[probeIndex]);
@@ -816,37 +856,71 @@ function pipeDirect(url, videoId, ext, size, req, res, source) {
 //     (joined with ';') and the plugin base_url its OWN `youtubepot-…:` flag —
 //     a second `youtube:` flag would override the first (only the last flag
 //     per extractor key survives).
-//   - FALLBACK: mobile innertube clients (android_vr/android/ios/web_safari) —
-//     direct signed URLs, no PO token, no provider round-trip; fetch_pot is
-//     intentionally NOT set (these clients aren't in the plugin's WEBPO_CLIENTS,
-//     so a token fetch would just add latency).
+//   - FALLBACK: mobile innertube clients (android_vr/android/ios/…) + GVS PO
+//     token. They serve direct signed URLs; newer YouTube builds strip or block
+//     them without a token (yt-dlp #17348), so fetch_pot=always is now set. A
+//     failed token fetch degrades gracefully (yt-dlp proceeds tokenless).
+//   - TV: tv_embedded/tv — a separate trust path that historically survives
+//     datacenter-IP blocks (no PO token needed).
 //   - DEFAULT: yt-dlp's own default client set.
-// Each entry is tried until one returns a playable URL.
+// Each entry is tried until one returns a playable URL. The web/PO chain is
+// ADAPTIVELY DEMOTED to the end after repeated login/botcheck verdicts (see
+// PO_CHAIN_DEMOTE_* above) so a dead-on-this-IP web chain never stalls every
+// request; the cooldown re-tests it and a success re-promotes it.
 function clientChains() {
   const poBaseUrl = `youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`;
-  if (potReady) {
+  const webChain = {
+    label: `primary (${CLIENT_LIST} + PO token)`,
+    extractorArgs: [`youtube:player_client=${CLIENT_LIST};fetch_pot=always`, poBaseUrl],
+    pluginDirs: PLUGINS_DIR,
+    kind: 'web',
+  };
+  const mobileChain = {
+    label: `mobile (${MOBILE_CLIENT_LIST} + PO)`,
+    extractorArgs: [
+      `youtube:player_client=${MOBILE_CLIENT_LIST};fetch_pot=always`,
+      poBaseUrl,
+    ],
+    pluginDirs: PLUGINS_DIR,
+    kind: 'mobile',
+  };
+  const tvChain = {
+    label: `tv (${TV_CLIENT_LIST})`,
+    extractorArgs: `youtube:player_client=${TV_CLIENT_LIST}`,
+  };
+  const defaultChain = {
+    label: 'default,-web',
+    extractorArgs: 'youtube:player_client=default,-web',
+  };
+  // Insurance against a hard-failing mobile token fetch: same innertube
+  // clients WITHOUT fetch_pot, tried only when the +PO mobile chain fails.
+  // If fetch_pot degrades gracefully this chain is never reached.
+  const mobileTokenlessChain = {
+    label: `mobile tokenless (${MOBILE_CLIENT_LIST})`,
+    extractorArgs: `youtube:player_client=${MOBILE_CLIENT_LIST}`,
+  };
+
+  if (!potReady) {
+    // Provider down (no PO tokens): mobile tokenless first, then tv, defaults.
     return [
       {
-        label: `primary (${CLIENT_LIST} + PO token)`,
-        extractorArgs: [`youtube:player_client=${CLIENT_LIST};fetch_pot=always`, poBaseUrl],
-        pluginDirs: PLUGINS_DIR,
+        label: `mobile (${MOBILE_CLIENT_LIST})`,
+        extractorArgs: `youtube:player_client=${MOBILE_CLIENT_LIST}`,
       },
-      {
-        label: 'mobile (android_vr,android,ios,web_safari,web_music)',
-        extractorArgs: 'youtube:player_client=android_vr,android,ios,web_safari,web_music',
-      },
-      { label: 'default,-web', extractorArgs: 'youtube:player_client=default,-web' },
+      tvChain,
+      defaultChain,
+      { label: 'yt-dlp default', extractorArgs: null },
     ];
   }
-  // Provider down (no PO tokens): mobile first (direct URLs), then defaults.
-  return [
-    {
-      label: 'mobile (no provider)',
-      extractorArgs: 'youtube:player_client=android_vr,android,ios,web_safari,web_music',
-    },
-    { label: 'default,-web', extractorArgs: 'youtube:player_client=default,-web' },
-    { label: 'yt-dlp default', extractorArgs: null },
-  ];
+
+  const demoted = poChainDemotedAt > 0 &&
+    Date.now() < poChainDemotedAt + PO_CHAIN_DEMOTE_MS;
+  const chains = [webChain, mobileChain, mobileTokenlessChain, tvChain, defaultChain];
+  if (demoted) {
+    const [first, ...rest] = chains;
+    return [...rest, first]; // web chain demoted to the end, still present
+  }
+  return chains;
 }
 
 /**
@@ -886,6 +960,7 @@ async function extractWithYtDlp(url, videoId) {
       if (chain.pluginDirs) opts.pluginDirs = chain.pluginDirs;
       if (PROXY_URL) opts.proxy = PROXY_URL;
       const isPoChain = !!chain.pluginDirs;
+      const isWebChain = chain.kind === 'web';
 
       // DEBUG instrumentation: print the EXACT command line youtube-dl-exec
       // will spawn for the first chain, and run it with --verbose so its debug
@@ -904,25 +979,69 @@ async function extractWithYtDlp(url, videoId) {
         }
       }
 
+      // Per-client result logging: each attempt logs a Trying + result line so
+      // the chain that actually fixed (or failed) a request is obvious at a
+      // glance (e.g. [yt-dlp] trying chain 2/4: "mobile …" → OK).
+      console.log(`[yt-dlp] trying chain ${idx + 1}/${chains.length}: "${chain.label || 'default'}"`);
       try {
         const info = await ytDlp(url, opts);
+        if (isWebChain) {
+          // A working web chain clears the demotion state (and any streak).
+          poChainFailStreak = 0;
+          if (poChainDemotedAt > 0) {
+            poChainDemotedAt = 0;
+            console.log('[yt-dlp] web/PO chain worked again — re-promoted to the front of the chain order');
+          }
+        }
         const direct = info.url;
         if (!direct) throw new Error('yt-dlp returned no stream url');
+        const size = info.filesize || info.filesize_approx || 0;
+        console.log(`[yt-dlp] chain "${chain.label || 'default'}" OK — ${info.ext || 'm4a'}${size ? `, ${size} bytes` : ''}`);
         return {
           url: direct,
           ext: info.ext || 'm4a',
-          size: info.filesize || info.filesize_approx || 0,
+          size,
           source: 'yt-dlp',
         };
       } catch (e) {
         lastError = e;
-        if (isTransientExtractionError(e)) anyTransient = true;
+        const verdict = classifyExtractionError(e);
+        // Reuse the verdict instead of re-classifying inside
+        // isTransientExtractionError (identical botcheck/transient rule).
+        if (verdict.code === 'botcheck' || verdict.code === 'transient') anyTransient = true;
+        if (isWebChain) {
+          // Adaptive demotion: consecutive bot-blocks on the web chain mean the
+          // datacenter IP is flagged for web clients — stop paying the 5-30 s
+          // cost on every request until the cooldown re-tests. Only the bot
+          // signal counts: a genuinely private/age-restricted video (login
+          // WITHOUT the LOGIN_REQUIRED playability line) must not demote the
+          // web chain — every chain fails on those.
+          const rawText = String(e.stderr || '') + '\n' + String(e.message || '');
+          const isBotBlock = verdict.code === 'botcheck' ||
+            (verdict.code === 'login' && /LOGIN_REQUIRED/i.test(rawText));
+          if (isBotBlock) {
+            if (poChainDemotedAt > 0 && Date.now() >= poChainDemotedAt + PO_CHAIN_DEMOTE_MS) {
+              // Cooldown over: clear the demotion and start a fresh streak.
+              poChainDemotedAt = 0;
+              poChainFailStreak = 0;
+            }
+            poChainFailStreak++;
+            if (poChainDemotedAt === 0 && poChainFailStreak >= PO_CHAIN_DEMOTE_STREAK) {
+              poChainDemotedAt = Date.now();
+              console.warn(
+                `[yt-dlp] web/PO chain failed ${PO_CHAIN_DEMOTE_STREAK}× in a row (${verdict.code}) — demoting it for ${Math.round(PO_CHAIN_DEMOTE_MS / 60000)} min; mobile/tv chains go first now`
+              );
+            }
+          } else {
+            poChainFailStreak = 0;
+          }
+        }
         // Log the full stderr — POT-plugin warnings ("failed to get token",
         // etc.) live there but never reach the thrown message. The real error
         // is at the END of stderr (the --verbose debug header eats the first
         // ~1.5 KB), so log the TAIL, not the head.
         const detail = String(e.stderr || e.message || e).slice(-600);
-        console.warn(`[yt-dlp] chain "${chain.label || 'default'}" failed: ${detail}`);
+        console.warn(`[yt-dlp] chain "${chain.label || 'default'}" failed (${verdict.code}): ${detail}`);
         if (e && e.stderr) {
           console.warn(`[yt-dlp] chain "${chain.label || 'default'}" STDERR TAIL:\n${String(e.stderr).slice(-2000)}`);
         }
