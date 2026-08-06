@@ -2,4 +2,21 @@
 <resources>
 
     <style name="Theme.Urlblocker" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!--
+      Block overlay theme: the same full-screen look, but with alpha-only
+      window animations. The stock default animation scales the window as it
+      closes, which is what triggers the launcher's "floating app icon"
+      animation when the overlay exits to Home. A pure fade keeps the
+      transition smooth and silent.
+    -->
+    <style name="Theme.Urlblocker.Overlay" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowAnimationStyle">@style/OverlayWindowAnimation</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+
+    <style name="OverlayWindowAnimation">
+        <item name="android:windowEnterAnimation">@anim/overlay_fade_in</item>
+        <item name="android:windowExitAnimation">@anim/overlay_fade_out</item>
+    </style>
 </resources>

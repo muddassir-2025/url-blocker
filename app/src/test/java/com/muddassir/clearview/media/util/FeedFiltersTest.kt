@@ -245,6 +245,20 @@ class FeedFiltersTest {
     }
 
     @Test
+    fun `persisted LIVE content filter is migrated to ALL`() {
+        // The Live chip was removed from Filter → Content; a filter saved by an
+        // older build could still hold LIVE, which would lock the feed to an
+        // unreachable filter. Decoding must normalize it to ALL.
+        val oldJson = "{\"date\":\"ALL_TIME\",\"content\":\"LIVE\"," +
+            "\"sort\":\"NEWEST_FIRST\",\"watchStatus\":\"UNWATCHED\"," +
+            "\"library\":\"ALL\"}"
+        val decoded = decodeFeedFilter(oldJson)
+        assertEquals(FeedContentFilter.ALL, decoded?.content)
+        // And the normalized filter round-trips stably.
+        assertEquals(decoded, decodeFeedFilter(encodeFeedFilter(decoded!!)))
+    }
+
+    @Test
     fun `old filter values without new keys decode with defaults`() {
         val oldJson = "{\"date\":\"TODAY\",\"content\":\"ALL\",\"sort\":\"NEWEST_FIRST\"}"
         val decoded = decodeFeedFilter(oldJson)

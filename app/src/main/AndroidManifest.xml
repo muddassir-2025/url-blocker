@@ -35,14 +35,18 @@
             </intent-filter>
         </activity>
 
-        <!-- Block overlay activity - no history, no recents, dialog theme to cover full screen -->
+        <!-- Block overlay activity - no history, no recents, full-screen theme.
+             Theme.Urlblocker.Overlay uses alpha-only window animations: the
+             default scale-based close animation is what makes some launchers
+             play a "floating app icon" animation when the overlay exits to
+             Home, so a pure fade is applied instead. -->
         <activity
             android:name=".ui.BlockOverlayActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:taskAffinity=""
-            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:theme="@style/Theme.Urlblocker.Overlay"
             android:windowSoftInputMode="stateAlwaysHidden" />
 
         <!-- Quran Reminder hub: verse + Media + Live, opened from the widget.

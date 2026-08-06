@@ -28,7 +28,10 @@
     <string name="quran_verse_previous">Previous</string>
     <string name="quran_verse_next">Next</string>
     <string name="quran_verse_copied">Verse copied to clipboard</string>
-    <string name="media_notifications">Media Notifications</string>
+    <!-- Exactly TWO notification toggles exist in Settings (see QuranSettingsSheet):
+         Channel Updates (media) and Quran Reminders. These labels must stay unique
+         so no duplicate preference row can ever appear. -->
+    <string name="media_notifications">Channel Updates</string>
     <string name="media_notifications_note">Get a notification when your saved channels upload new videos</string>
     <string name="media_notification_permission_denied">Notifications are blocked. Allow them in Settings to get channel updates.</string>
     <string name="media_latest_updates">Latest Updates</string>
@@ -48,7 +51,7 @@
     <string name="quran_settings">Settings</string>
     <string name="quran_settings_title">Settings</string>
     <string name="quran_notifications_title">Notifications</string>
-    <string name="quran_notifications">Quran notifications</string>
+    <string name="quran_notifications">Quran Reminders</string>
     <string name="quran_notifications_note">Get a notification when a new verse is chosen</string>
     <string name="quran_notification_channel">Quran reminders</string>
     <string name="quran_notification_channel_desc">New verse notifications</string>
