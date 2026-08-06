@@ -27,15 +27,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddLink
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -71,6 +74,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -78,16 +82,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.muddassir.clearview.media.data.MediaRepository
 import com.muddassir.clearview.media.data.UserPlaylistStore
 import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.download.DownloadItem
 import com.muddassir.clearview.media.download.DownloadStatus
 import com.muddassir.clearview.media.download.OfflineAudioPlayer
 import com.muddassir.clearview.media.download.StoragePolicy
+import com.muddassir.clearview.media.model.DownloadSourceFilter
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.util.formatBytes
 import com.muddassir.clearview.media.util.formatDownloadDate
 import com.muddassir.clearview.media.util.formatEtaRemaining
+import com.muddassir.clearview.media.util.matchesDownloadSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -120,15 +127,27 @@ fun DownloadsSection(
     /** Live search text (title / channel name match). */
     searchQuery: String = "",
     onSearchQueryChange: (String) -> Unit = {},
+    /**
+     * Source filter (All / By URL / From device / From channels / In
+     * playlists). Hoisted to the Media tab so the header's result count
+     * matches the visible list.
+     */
+    sourceFilter: DownloadSourceFilter = DownloadSourceFilter.ALL,
+    onSourceFilterChange: (DownloadSourceFilter) -> Unit = {},
+    /** Bumped when a playlist changes here (Media tab mirrors its own counter). */
+    onPlaylistsChanged: () -> Unit = {},
     onPlayAudio: (DownloadItem) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val repository = remember { MediaRepository(context.applicationContext) }
     var showManage by remember { mutableStateOf(false) }
     var selectionMode by remember { mutableStateOf(false) }
     val selectedIds = remember { mutableStateListOf<String>() }
     // A download awaiting "delete offline audio" confirmation (single row).
     var pendingDeleteItem by remember { mutableStateOf<DownloadItem?>(null) }
+    // The "Add audio by URL" dialog (paste a YouTube link → download audio).
+    var showAddAudioUrlDialog by remember { mutableStateOf(false) }
     // Importing audio files picked from the device (multi-select SAF picker).
     var importing by remember { mutableStateOf(false) }
     val importLauncher = rememberLauncherForActivityResult(
@@ -140,16 +159,17 @@ fun DownloadsSection(
             context = context,
             uris = uris,
             channelId = channelId.orEmpty(),
-            channelName = channelName.orEmpty()
-        ) { imported ->
-            importing = false
-            Toast.makeText(
-                context,
-                if (imported == uris.size) "Imported $imported audio${if (imported == 1) "" else "s"}"
-                else "Imported $imported of ${uris.size} audios",
-                Toast.LENGTH_SHORT
-            ).show()
-        }
+            channelName = channelName.orEmpty(),
+            onResult = { imported ->
+                importing = false
+                Toast.makeText(
+                    context,
+                    if (imported == uris.size) "Imported $imported audio${if (imported == 1) "" else "s"}"
+                    else "Imported $imported of ${uris.size} audios",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        )
     }
     val addAudio: () -> Unit = { importLauncher.launch(arrayOf("audio/*")) }
     // Multi-select deletion confirmation.
@@ -185,11 +205,12 @@ fun DownloadsSection(
         }
     }
     val q = searchQuery.trim()
-    val downloads = remember(channelDownloads, q) {
-        if (q.isEmpty()) channelDownloads
-        else channelDownloads.filter {
-            it.title.contains(q, ignoreCase = true) ||
-                it.channelName.contains(q, ignoreCase = true)
+    val downloads = remember(channelDownloads, q, sourceFilter) {
+        channelDownloads.filter { item ->
+            val matchesQ = q.isEmpty() ||
+                item.title.contains(q, ignoreCase = true) ||
+                item.channelName.contains(q, ignoreCase = true)
+            matchesQ && matchesDownloadSource(item, sourceFilter)
         }
     }
     val visibleActiveIds = remember(channelActiveIds, q) {
@@ -211,6 +232,7 @@ fun DownloadsSection(
             limit = limit,
             onManage = { showManage = true },
             onAddAudio = addAudio,
+            onAddAudioByUrl = { showAddAudioUrlDialog = true },
             importing = importing
         )
 
@@ -234,6 +256,24 @@ fun DownloadsSection(
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp)
             )
+        }
+
+        // ── Source filter: All / By URL / From device / From channels / In
+        // playlists. Shown whenever there is anything at all — so a filter
+        // that empties the list can always be switched back.
+        if (hasAnything) {
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+            ) {
+                items(DownloadSourceFilter.entries, key = { it.name }) { option ->
+                    FilterChip(
+                        selected = sourceFilter == option,
+                        onClick = { onSourceFilterChange(option) },
+                        label = { Text(option.label) }
+                    )
+                }
+            }
         }
 
         Spacer(Modifier.height(4.dp))
@@ -283,25 +323,42 @@ fun DownloadsSection(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "No downloads yet.\nAdd audio from your device, or open any video's ⋮ menu and tap \"Download audio\" to save it offline.",
+                    text = "No downloads yet.\nAdd audio from your device or by URL, or open any video's ⋮ menu and tap \"Download audio\" to save it offline.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp)
                 )
                 Spacer(Modifier.height(16.dp))
-                OutlinedButton(
-                    onClick = addAudio,
-                    enabled = !importing,
-                    modifier = Modifier.fillMaxWidth()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (importing) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Importing…")
-                    } else {
-                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    OutlinedButton(
+                        onClick = addAudio,
+                        enabled = !importing,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        if (importing) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Importing…")
+                        } else {
+                            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("From device")
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { showAddAudioUrlDialog = true },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            Icons.Filled.AddLink,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
                         Spacer(Modifier.width(6.dp))
-                        Text("Add audio from device")
+                        Text("By URL")
                     }
                 }
             }
@@ -315,6 +372,8 @@ fun DownloadsSection(
                 Text(
                     text = when {
                         q.isNotEmpty() -> "No downloads match your search."
+                        sourceFilter != DownloadSourceFilter.ALL ->
+                            "No downloads match this filter."
                         channelId != null -> "No downloaded audios for this channel yet."
                         else -> "No downloads yet."
                     },
@@ -446,6 +505,7 @@ fun DownloadsSection(
             onAdd = { p ->
                 userPlaylistStore.addVideos(p.id, listOf(media))
                 playlistRevision++
+                onPlaylistsChanged()
                 pendingPlaylistItem = null
                 Toast.makeText(context, "Added to ${p.name}", Toast.LENGTH_SHORT).show()
             },
@@ -463,10 +523,19 @@ fun DownloadsSection(
             confirmLabel = "Create",
             onSubmit = { name ->
                 userPlaylistStore.createPlaylist(name, listOf(item.toMediaVideo()))
+                onPlaylistsChanged()
                 pendingCreatePlaylistItem = null
                 Toast.makeText(context, "Created \"$name\"", Toast.LENGTH_SHORT).show()
             },
             onDismiss = { pendingCreatePlaylistItem = null }
+        )
+    }
+
+    // ── Add audio by URL ──────────────────────────────────────────
+    if (showAddAudioUrlDialog) {
+        AddAudioByUrlDialog(
+            repository = repository,
+            onDismiss = { showAddAudioUrlDialog = false }
         )
     }
 }
@@ -495,6 +564,8 @@ private fun StorageCard(
     onManage: () -> Unit,
     /** When set, an "Add audio" button appears next to the gear. */
     onAddAudio: (() -> Unit)? = null,
+    /** When set, the add menu also offers adding audio by pasting a URL. */
+    onAddAudioByUrl: (() -> Unit)? = null,
     importing: Boolean = false
 ) {
     val fraction = StoragePolicy.usageFraction(used, limit)
@@ -518,24 +589,49 @@ private fun StorageCard(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
                 )
-                // Import audio files from the device (multi-select picker).
-                if (onAddAudio != null) {
-                    IconButton(
-                        onClick = onAddAudio,
-                        enabled = !importing,
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        if (importing) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp
+                // Add audio: a + button that offers importing files from the
+                // device (multi-select picker) or adding by pasting a URL.
+                if (onAddAudio != null || onAddAudioByUrl != null) {
+                    var addMenuOpen by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(
+                            onClick = { addMenuOpen = true },
+                            enabled = !importing,
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            if (importing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Filled.Add,
+                                    contentDescription = "Add audio",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = addMenuOpen,
+                            onDismissRequest = { addMenuOpen = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Add audio from device") },
+                                enabled = onAddAudio != null && !importing,
+                                onClick = {
+                                    addMenuOpen = false
+                                    onAddAudio?.invoke()
+                                }
                             )
-                        } else {
-                            Icon(
-                                Icons.Filled.Add,
-                                contentDescription = "Add audio from device",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp)
+                            DropdownMenuItem(
+                                text = { Text("Add audio by URL") },
+                                enabled = onAddAudioByUrl != null,
+                                onClick = {
+                                    addMenuOpen = false
+                                    onAddAudioByUrl?.invoke()
+                                }
                             )
                         }
                     }
@@ -913,7 +1009,12 @@ private fun SourceChip(source: String) {
     }
 }
 
-/** Local thumbnail for a download (works offline); initials-style fallback. */
+/**
+ * Local thumbnail for a download (works offline). Device-imported audio has
+ * no artwork file, so it falls back to a soft minimalist gradient with a
+ * music note — the same treatment playlist cards use for device audio —
+ * instead of a flat dark box with a stray play icon.
+ */
 @Composable
 fun OfflineThumbnail(item: DownloadItem, modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -939,17 +1040,34 @@ fun OfflineThumbnail(item: DownloadItem, modifier: Modifier = Modifier) {
                 contentScale = ContentScale.Crop
             )
         } else {
-            Box(
+            // Icon scales with the frame: ~40dp in the player's large artwork,
+            // proportionally smaller in the 56dp list rows (where a play badge
+            // also sits on top).
+            androidx.compose.foundation.layout.BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                    .background(
+                        Brush.linearGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
+                                MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        )
+                    ),
                 contentAlignment = Alignment.Center
             ) {
+                // Icon scales with the frame: constraints are pixels, so convert
+                // back to dp; ~40% of the smaller side, capped so the player's
+                // large artwork frame (252dp) keeps a tasteful note instead of
+                // one that swallows the whole box.
+                val iconDp = with(androidx.compose.ui.platform.LocalDensity.current) {
+                    (minOf(constraints.maxWidth, constraints.maxHeight) * 0.4f).toDp()
+                }
                 Icon(
-                    Icons.Filled.PlayArrow,
+                    Icons.Filled.MusicNote,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                    modifier = Modifier.size(iconDp.coerceIn(16.dp, 88.dp))
                 )
             }
         }
@@ -1099,14 +1217,100 @@ private fun StatRow(label: String, value: String) {
 }
 
 /** The feed-style video a download belongs to (playlist add etc.). */
-private fun DownloadItem.toMediaVideo(): MediaVideo = MediaVideo(
+fun DownloadItem.toMediaVideo(): MediaVideo = MediaVideo(
     videoId = videoId,
     title = title,
     channelId = "",
     channelName = channelName.ifBlank { "YouTube" },
     publishedAtEpochMillis = downloadedAt,
-    thumbnailUrl = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg",
+    // Device imports aren't YouTube videos — a fake i.ytimg URL would 404, so
+    // leave the thumbnail blank (cards render a plain placeholder box).
+    thumbnailUrl = if (source == DownloadItem.SOURCE_DEVICE) ""
+    else "https://i.ytimg.com/vi/$videoId/hqdefault.jpg",
     durationSeconds = durationSeconds
 )
+
+/**
+ * "Add audio by URL": pastes a YouTube link, resolves it (oEmbed / feed) and
+ * starts downloading its audio straight into the offline library — no need to
+ * add the video to the feed first. The download lands in the Downloads list
+ * with a "URL" source chip, exactly like a by-URL download from a card. A
+ * video whose audio is already downloaded reports that instead of re-downloading.
+ */
+@Composable
+private fun AddAudioByUrlDialog(
+    repository: MediaRepository,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var input by remember { mutableStateOf("") }
+    var status by remember { mutableStateOf<String?>(null) }
+    var resolving by remember { mutableStateOf(false) }
+    val isError: (String) -> Boolean = { it.startsWith("Couldn't") || it.startsWith("That doesn't") }
+    // Starts the download for a resolved video (or reports it already exists).
+    val startOrReport: (MediaVideo) -> Unit = { video ->
+        if (AudioDownloads.isDownloaded(video.videoId)) {
+            status = "That audio is already downloaded."
+        } else {
+            AudioDownloads.download(video, DownloadItem.SOURCE_URL)
+            Toast.makeText(context, "Downloading audio…", Toast.LENGTH_SHORT).show()
+            onDismiss()
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!resolving) onDismiss() },
+        title = { Text("Add audio by URL") },
+        text = {
+            Column {
+                Text(
+                    text = "Paste a YouTube link. Its audio is downloaded and saved offline, " +
+                        "just like tapping \"Download audio\" on a video in the feed.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it; status = null },
+                    singleLine = true,
+                    enabled = !resolving,
+                    isError = status?.let(isError) == true,
+                    label = { Text("YouTube URL") }
+                )
+                if (status != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = status!!,
+                        color = if (isError(status!!)) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !resolving && input.isNotBlank(),
+                onClick = {
+                    resolving = true
+                    status = null
+                    scope.launch {
+                        when (val result = repository.resolveVideoByUrl(input.trim(), null)) {
+                            is MediaRepository.ResolveVideoResult.Success -> startOrReport(result.video)
+                            is MediaRepository.ResolveVideoResult.AlreadyExists -> startOrReport(result.video)
+                            is MediaRepository.ResolveVideoResult.Error -> status = result.message
+                        }
+                        resolving = false
+                    }
+                }
+            ) { Text(if (resolving) "Resolving…" else "Download") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !resolving) { Text("Cancel") }
+        }
+    )
+}
 
 

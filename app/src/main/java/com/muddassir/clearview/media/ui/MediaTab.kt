@@ -2,6 +2,8 @@ package com.muddassir.clearview.media.ui
 
 import android.text.format.DateUtils
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -40,6 +42,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
@@ -49,6 +52,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Search
@@ -106,6 +110,7 @@ import com.muddassir.clearview.media.data.WatchProgressStore
 import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.download.DownloadItem
 import com.muddassir.clearview.media.download.DownloadStatus
+import com.muddassir.clearview.media.model.DownloadSourceFilter
 import com.muddassir.clearview.media.model.FeedContentFilter
 import com.muddassir.clearview.media.model.FeedDateFilter
 import com.muddassir.clearview.media.model.FeedFilter
@@ -113,6 +118,7 @@ import com.muddassir.clearview.media.model.FeedSortOrder
 import com.muddassir.clearview.media.model.FeedSourceFilter
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
+import com.muddassir.clearview.media.model.PlaylistTypeFilter
 import com.muddassir.clearview.media.model.SavedChannel
 import com.muddassir.clearview.media.model.SavedPlaylist
 import com.muddassir.clearview.media.model.UserPlaylist
@@ -121,11 +127,15 @@ import com.muddassir.clearview.media.util.MediaVideos
 import com.muddassir.clearview.media.util.applyFeedFilter
 import com.muddassir.clearview.media.util.feedFilterSummary
 import com.muddassir.clearview.media.util.formatEtaRemaining
+import com.muddassir.clearview.media.util.matchesDownloadSource
 import com.muddassir.clearview.media.util.formatViews
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Label for the device-import source shown in playlist contexts. */
+private const val DEVICE_SOURCE_LABEL = "From device"
 
 /**
  * Media tab — a Subscriptions-style feed:
@@ -186,21 +196,14 @@ fun MediaTab(
     // A downloaded video awaiting "delete offline audio" confirmation — the
     // card's ⋮ menu "Delete download" no longer deletes without asking.
     var pendingDeleteDownload by remember { mutableStateOf<MediaVideo?>(null) }
-    // The feed filter is persisted per context (survives restarts): the All
-    // Feed filter when no channel is selected, and each channel's own filter
-    // when one is. Switching channels swaps to that channel's saved filter.
-    var feedFilter by remember(filterChannelId) {
-        mutableStateOf(repository.getFeedFilter(filterChannelId))
-    }
-    var showFilterSheet by remember { mutableStateOf(false) }
+    // Downloads view source filter (All / By URL / From device) — hoisted
+    // here so the header's result count matches the section's list. Only used
+    // while the Downloads content filter is active.
+    var downloadsSourceFilter by remember { mutableStateOf(DownloadSourceFilter.ALL) }
     // Feed search: a live title/channel filter applied on top of the current
     // feed (All Feed or a selected channel) — never refetches.
     var searchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
-    val saveFilter: (FeedFilter) -> Unit = { f ->
-        feedFilter = f
-        repository.setFeedFilter(f, filterChannelId)
-    }
 
     // ── Imported YouTube playlists (added by URL) ─────────────────
     var playlists by remember { mutableStateOf(repository.getSavedPlaylists()) }
@@ -224,6 +227,22 @@ fun MediaTab(
     var playlistRevision by remember { mutableIntStateOf(0) }
     var showPlaylistsSheet by remember { mutableStateOf(false) }
     var selectedUserPlaylistId by remember { mutableStateOf<String?>(null) }
+    // The feed filter is persisted per context (survives restarts): the All
+    // Feed filter when no channel is selected, each channel's own filter when
+    // one is, and each user playlist's own filter while it's open — so a
+    // playlist's Source / Type choices never leak into the All Feed (or back).
+    val feedFilterSlot: String? = when {
+        selectedUserPlaylistId != null -> "user-playlist-" + selectedUserPlaylistId
+        else -> filterChannelId
+    }
+    var feedFilter by remember(feedFilterSlot) {
+        mutableStateOf(repository.getFeedFilter(feedFilterSlot))
+    }
+    var showFilterSheet by remember { mutableStateOf(false) }
+    val saveFilter: (FeedFilter) -> Unit = { f ->
+        feedFilter = f
+        repository.setFeedFilter(f, feedFilterSlot)
+    }
     var showPlaylistEditor by remember { mutableStateOf(false) }
     var showAddVideosPicker by remember { mutableStateOf(false) }
     // Name dialog: null target = create a new playlist, non-null = rename it.
@@ -239,6 +258,33 @@ fun MediaTab(
         userPlaylists.firstOrNull { it.id == selectedUserPlaylistId }
     }
     val saveUserPlaylists: () -> Unit = { playlistRevision++ }
+
+    // "Add from device": picks audio files from the device (multi-select) and
+    // adds them to the open user playlist — they're imported into the offline
+    // library (Downloads) too, so they play like any downloaded audio.
+    val addSystemAudioLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        val target = selectedUserPlaylist ?: return@rememberLauncherForActivityResult
+        AudioDownloads.importFromDevice(
+            context = context,
+            uris = uris,
+            onResult = { imported ->
+                Toast.makeText(
+                    context,
+                    if (imported == uris.size)
+                        "Added $imported audio${if (imported == 1) "" else "s"} to ${target.name}"
+                    else "Added $imported of ${uris.size} audios to ${target.name}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            },
+            onImported = { items ->
+                userPlaylistStore.addVideos(target.id, items.map { it.toMediaVideo() })
+                saveUserPlaylists()
+            }
+        )
+    }
 
     // The user opened the Media tab — its channel updates count as seen.
     LaunchedEffect(Unit) { onMediaOpened() }
@@ -361,25 +407,37 @@ fun MediaTab(
             else -> baseVideos.filter { it.channelId == filterChannelId }
         }
     }
-    // Id-sets behind the Source filter: videos added by URL (manual), and
-    // videos that appear in any of the user's own playlists.
+    // Id-set behind the Source filter: videos the user added manually by URL.
     val manualIds = remember(manualVideos) { manualVideos.map { it.videoId }.toSet() }
-    val playlistVideoIds = remember(userPlaylists) {
-        userPlaylists.flatMap { p -> p.videos.map { it.videoId } }.toSet()
-    }
-    // User playlists keep their hand-picked ORDER — the feed filters (date /
-    // content / watch status / source) don't apply; search still filters on top.
+    // A device-imported audio's id is prefixed "device-".
+    val isDeviceAudio: (String) -> Boolean = { it.startsWith("device-") }
+    // User playlists keep their hand-picked ORDER — only the Source (By URL /
+    // From device) and Type (Video / Audio) filters apply there, and only then
+    // does the Type filter see the Source-filtered list; search still on top.
     val displayed = remember(
-        channelVideos, feedFilter, manualIds, playlistVideoIds, feedIsUserPlaylist
+        channelVideos, feedFilter, manualIds, feedIsUserPlaylist
     ) {
-        if (feedIsUserPlaylist) channelVideos
-        else applyFeedFilter(
-            channelVideos,
-            feedFilter,
-            progressOf = { progressStore.get(it) },
-            isManual = { it in manualIds },
-            inPlaylist = { it in playlistVideoIds }
-        )
+        when {
+            feedIsUserPlaylist -> {
+                val bySource = when (feedFilter.source) {
+                    FeedSourceFilter.ALL -> channelVideos
+                    FeedSourceFilter.BY_URL -> channelVideos.filter { it.videoId in manualIds }
+                    // "From device": audio imported from the system into the playlist.
+                    FeedSourceFilter.SYSTEM -> channelVideos.filter { isDeviceAudio(it.videoId) }
+                }
+                when (feedFilter.playlistType) {
+                    PlaylistTypeFilter.ALL -> bySource
+                    PlaylistTypeFilter.VIDEO -> bySource.filterNot { isDeviceAudio(it.videoId) }
+                    PlaylistTypeFilter.AUDIO -> bySource.filter { isDeviceAudio(it.videoId) }
+                }
+            }
+            else -> applyFeedFilter(
+                channelVideos,
+                feedFilter,
+                progressOf = { progressStore.get(it) },
+                isManual = { it in manualIds }
+            )
+        }
     }
     // Feed search: matches titles and channel names (case-insensitive) over
     // the channel + feed-filtered list; a blank query leaves the feed alone.
@@ -426,8 +484,13 @@ fun MediaTab(
     val playLong: (MediaVideo) -> Unit = { video ->
         onPlayVideo(video, emptyList(), -1)
     }
+    // Inside a playlist the feed shows ONLY the playlist's own videos — the
+    // channel-feed states (no channels / loading / errors) never apply there.
+    val inPlaylistContext = feedIsUserPlaylist || feedIsPlaylist
     // The Downloads content filter swaps the feed for the Downloads section.
-    val downloadsFilter = feedFilter.content == FeedContentFilter.DOWNLOADS
+    // Never while a playlist is open — a leftover Downloads filter from the
+    // All Feed must not replace the playlist's own videos.
+    val downloadsFilter = !inPlaylistContext && feedFilter.content == FeedContentFilter.DOWNLOADS
     // Entering the Downloads view resets any stale feed-search query, so the
     // offline-audio list never filters for an invisible reason (the header
     // search toggle is hidden there — only the section's own field searches).
@@ -441,6 +504,9 @@ fun MediaTab(
     Column(modifier = modifier.fillMaxSize()) {
 
         // ── Channel avatar strip (Subscriptions-style) ─────────────
+        // Hidden inside a playlist — the playlist shows only its own videos
+        // (leave it via the ✕ in the header instead of the channel strip).
+        if (!inPlaylistContext) {
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
@@ -454,6 +520,14 @@ fun MediaTab(
                         selectedPlaylistId = null
                         selectedUserPlaylistId = null
                     }
+                )
+            }
+            item(key = "playlists") {
+                PlaylistsAvatar(
+                    // Only ever visible from the feed — inside a playlist the
+                    // strip is hidden, so this stays in its feed-home state.
+                    selected = feedIsUserPlaylist || feedIsPlaylist,
+                    onClick = { showPlaylistsSheet = true }
                 )
             }
             items(channels, key = { it.channelId }) { channel ->
@@ -474,11 +548,13 @@ fun MediaTab(
                 AddAvatar(onClick = { showAddDialog = true })
             }
         }
+        }
 
         // ── Imported YouTube playlist strip (below the channels) ──
         // A horizontal row of the user's imported playlists (tap to view its
         // videos as a feed, tap again / ✕ to deselect) ending in an add chip.
-        if (playlists.isNotEmpty()) {
+        // Hidden while inside a playlist (user or imported) — only its videos.
+        if (!inPlaylistContext && playlists.isNotEmpty()) {
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
@@ -548,7 +624,8 @@ fun MediaTab(
                             item.channelName.equals(channelName, ignoreCase = true))
                     inChannel &&
                         (q.isEmpty() || item.title.contains(q, ignoreCase = true) ||
-                            item.channelName.contains(q, ignoreCase = true))
+                            item.channelName.contains(q, ignoreCase = true)) &&
+                        matchesDownloadSource(item, downloadsSourceFilter)
                 }
             } else searchResults.size
             FeedHeader(
@@ -591,7 +668,31 @@ fun MediaTab(
                 onAddVideo = { showAddVideoDialog = true },
                 onAddPlaylist = { showAddPlaylistDialog = true },
                 onOpenMyPlaylists = { showPlaylistsSheet = true },
-                onEditPlaylist = { showPlaylistEditor = true }
+                onEditPlaylist = { showPlaylistEditor = true },
+                // "Add from device" only makes sense while viewing one of the
+                // user's own playlists — the picked audio lands in it.
+                onAddFromSystem = if (feedIsUserPlaylist) {
+                    { addSystemAudioLauncher.launch(arrayOf("audio/*")) }
+                } else null,
+                // Rename the playlist you're viewing (⋮ menu).
+                onRenamePlaylist = if (feedIsUserPlaylist) {
+                    {
+                        playlistNameTarget = selectedUserPlaylist
+                        showPlaylistNameDialog = true
+                    }
+                } else null,
+                // Inside a playlist the summary shows just the type + source + count
+                // (date/watch parts of the shared filter don't apply there).
+                summaryOverride = if (feedIsUserPlaylist) {
+                    val type = if (feedFilter.playlistType == PlaylistTypeFilter.ALL) ""
+                    else " · ${feedFilter.playlistType.label}"
+                    val src = when (feedFilter.source) {
+                        FeedSourceFilter.ALL -> ""
+                        FeedSourceFilter.BY_URL -> " · By URL"
+                        FeedSourceFilter.SYSTEM -> " · $DEVICE_SOURCE_LABEL"
+                    }
+                    "All$type$src · $resultCount ${if (resultCount == 1) "item" else "items"}"
+                } else null
             )
         }
 
@@ -612,6 +713,11 @@ fun MediaTab(
                     channelName = channels.firstOrNull { it.channelId == filterChannelId }?.displayName,
                     searchQuery = searchQuery,
                     onSearchQueryChange = { searchQuery = it },
+                    sourceFilter = downloadsSourceFilter,
+                    onSourceFilterChange = { downloadsSourceFilter = it },
+                    // Keep the header's "In playlists" count fresh when a
+                    // download is added to a playlist from inside Downloads.
+                    onPlaylistsChanged = { playlistRevision++ },
                     onPlayAudio = onPlayAudio
                 )
                 // Imported playlist: loading / error / empty states.
@@ -624,20 +730,36 @@ fun MediaTab(
                 // User playlist: empty state (videos get added via Edit).
                 feedIsUserPlaylist && userPlaylistVideos.isEmpty() ->
                     ErrorCard("This playlist is empty. Tap Edit to add videos.")
+                // User playlist with items hidden by the Source / Type filters.
+                feedIsUserPlaylist && userPlaylistVideos.isNotEmpty() && displayed.isEmpty() ->
+                    ErrorCard("No videos match these filters.")
+                // Imported playlist: the feed filter hid every video.
+                feedIsPlaylist && displayed.isEmpty() ->
+                    ErrorCard(
+                        if (feedFilter.isActive) "No videos match your filters."
+                        else "No videos in this playlist yet."
+                    )
+                // Playlist (user or imported) with a search that matches none.
+                inPlaylistContext && isSearching && searchResults.isEmpty() ->
+                    ErrorCard("No videos match your search.")
                 // First load: no channels → nothing to load (and nothing to
                 // refresh). Shown before the skeleton so a channel-less feed
-                // doesn't shimmer forever.
-                channels.isEmpty() && videos.isEmpty() && !isLoading ->
+                // doesn't shimmer forever. (Playlist contexts are handled by
+                // their own branches above — these channel-feed states never
+                // apply inside a playlist.)
+                !inPlaylistContext && channels.isEmpty() && videos.isEmpty() && !isLoading ->
                     ErrorCard("No channels saved. Tap + Add to save one.")
                 // First load with channels: shimmer placeholders while the
                 // feeds fetch (never a blank screen).
-                isLoading && videos.isEmpty() -> SkeletonFeed()
-                errorMessage != null && videos.isEmpty() -> ErrorCard(errorMessage!!)
-                videos.isEmpty() && !isLoading -> ErrorCard("No videos yet for your channels.")
-                videos.isNotEmpty() && displayed.isNotEmpty() &&
+                !inPlaylistContext && isLoading && videos.isEmpty() -> SkeletonFeed()
+                !inPlaylistContext && errorMessage != null && videos.isEmpty() ->
+                    ErrorCard(errorMessage!!)
+                !inPlaylistContext && videos.isEmpty() && !isLoading ->
+                    ErrorCard("No videos yet for your channels.")
+                !inPlaylistContext && videos.isNotEmpty() && displayed.isNotEmpty() &&
                     searchResults.isEmpty() && isSearching && !isLoading ->
                     ErrorCard("No videos match your search.")
-                videos.isNotEmpty() && displayed.isEmpty() && !isLoading ->
+                !inPlaylistContext && videos.isNotEmpty() && displayed.isEmpty() && !isLoading ->
                     ErrorCard(
                         if (feedFilter.isActive) "No videos match your filters."
                         else "No videos for this channel yet."
@@ -758,14 +880,20 @@ fun MediaTab(
                             )
                         }
                         items(searchResults, key = { it.videoId }) { video ->
+                            // Audio imported from the system (device) is an
+                            // offline track, not a YouTube video — tapping it
+                            // plays the audio instead of opening the player.
+                            val isDeviceAudio = video.videoId.startsWith("device-")
                             LongVideoCard(
                                 video = video,
                                 progressStore = progressStore,
                                 isManual = libraryStore.isManuallyAdded(video.videoId),
                                 downloadStatus = AudioDownloads.statusFor(video.videoId),
-                                isOffline = AudioDownloads.isDownloaded(video.videoId),
+                                isOffline = isDeviceAudio || AudioDownloads.isDownloaded(video.videoId),
                                 onPlayOffline = { onPlayOffline(video) },
-                                onClick = { playLong(video) },
+                                onClick = {
+                                    if (isDeviceAudio) onPlayOffline(video) else playLong(video)
+                                },
                                 onDownload = {
                                     AudioDownloads.download(video, AudioDownloads.sourceFor(video))
                                 },
@@ -812,10 +940,10 @@ fun MediaTab(
     if (showFilterSheet) {
         FilterSheet(
             filter = feedFilter,
-            // Inside a user-playlist feed the filters are bypassed entirely
-            // (the hand-picked order wins), so the Source section — which is
-            // about playlist membership — would silently do nothing there.
-            showSourceSection = !feedIsUserPlaylist,
+            // Inside a user playlist only the Source (By URL / From device) and
+            // Type (Video / Audio) filters apply — playlists keep their own
+            // order, so the sheet shows just those two sections there.
+            isPlaylistContext = feedIsUserPlaylist,
             onApply = { applied ->
                 saveFilter(applied)
                 showFilterSheet = false
@@ -1016,10 +1144,16 @@ fun MediaTab(
         )
     }
 
-    // ── Playlist editor (reorder / remove / add videos) ────────────
+    // ── Playlist editor (rename / reorder / remove / add videos) ────
     if (showPlaylistEditor && selectedUserPlaylist != null) {
         PlaylistEditorSheet(
             playlist = selectedUserPlaylist!!,
+            onRename = {
+                // Close the editor, then open the name dialog for this playlist.
+                showPlaylistEditor = false
+                playlistNameTarget = selectedUserPlaylist
+                showPlaylistNameDialog = true
+            },
             onMove = { from, to ->
                 userPlaylistStore.moveVideo(selectedUserPlaylist!!.id, from, to)
                 saveUserPlaylists()
@@ -1265,6 +1399,51 @@ private fun ChannelAvatar(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,
+            color = if (selected) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/**
+ * Playlists entry in the strip (next to "All") — opens the My Playlists
+ * manager. A colorful gradient makes it stand out from the channel avatars.
+ */
+@Composable
+private fun PlaylistsAvatar(selected: Boolean, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.width(64.dp).clickable(onClick = onClick)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .clip(CircleShape)
+                .background(
+                    Brush.linearGradient(
+                        listOf(Color(0xFF8E24AA), Color(0xFFEC407A))
+                    )
+                )
+                .border(
+                    width = if (selected) 2.dp else 0.dp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    shape = CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.PlaylistPlay,
+                contentDescription = "Playlists",
+                tint = Color.White,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "Playlists",
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             color = if (selected) MaterialTheme.colorScheme.primary
             else MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -1543,7 +1722,33 @@ private fun LongVideoCard(
                     .width(176.dp)
                     .aspectRatio(16f / 9f)
             ) {
-                RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
+                if (video.thumbnailUrl.isBlank()) {
+                    // Device/system audio has no thumbnail — a soft minimalist
+                    // gradient with a music note keeps the card looking
+                    // intentional instead of showing a broken image.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.MusicNote,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier.size(42.dp)
+                        )
+                    }
+                } else {
+                    RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
+                }
                 // Watched treatment: dim the whole thumbnail FIRST, so every
                 // badge (LIVE, menu, duration) stays bright on top — matching
                 // the ShortCard ordering.
@@ -1769,7 +1974,13 @@ private fun FeedHeader(
     onAddVideo: () -> Unit,
     onAddPlaylist: (() -> Unit)? = null,
     onOpenMyPlaylists: (() -> Unit)? = null,
-    onEditPlaylist: (() -> Unit)? = null
+    onEditPlaylist: (() -> Unit)? = null,
+    /** When set (user-playlist view), the ⋮ menu offers "Add from device". */
+    onAddFromSystem: (() -> Unit)? = null,
+    /** When set (user-playlist view), the ⋮ menu offers "Rename playlist". */
+    onRenamePlaylist: (() -> Unit)? = null,
+    /** When set, replaces the whole summary line (playlists show source only). */
+    summaryOverride: String? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -1894,6 +2105,22 @@ private fun FeedHeader(
                             onAddVideo()
                         }
                     )
+                    DropdownMenuItem(
+                        text = { Text("Add from device") },
+                        enabled = onAddFromSystem != null,
+                        onClick = {
+                            showMenu = false
+                            onAddFromSystem?.invoke()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Rename playlist") },
+                        enabled = onRenamePlaylist != null,
+                        onClick = {
+                            showMenu = false
+                            onRenamePlaylist?.invoke()
+                        }
+                    )
                 }
             }
             IconButton(
@@ -1955,13 +2182,13 @@ private fun FeedHeader(
                 )
             }
         }
-        if (filter.isActive) {
+        if (filter.isActive || summaryOverride != null) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = feedFilterSummary(filter, resultCount),
+                    text = summaryOverride ?: feedFilterSummary(filter, resultCount),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f)
@@ -1999,8 +2226,10 @@ private fun FeedHeader(
 @Composable
 private fun FilterSheet(
     filter: FeedFilter,
-    /** Hidden inside user-playlist feeds, where feed filters don't apply. */
-    showSourceSection: Boolean = true,
+    /** Inside a user playlist only the Source (By URL / From device) and Type
+     *  (Video / Audio) filters apply — playlists keep their hand-picked order,
+     *  so the sheet shows just those two sections there. */
+    isPlaylistContext: Boolean = false,
     onApply: (FeedFilter) -> Unit,
     onReset: (FeedFilter) -> Unit,
     onDismiss: () -> Unit
@@ -2023,81 +2252,85 @@ private fun FilterSheet(
                 fontWeight = FontWeight.Bold
             )
 
-            Spacer(Modifier.height(16.dp))
-            Text(
-                text = "Date",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(4.dp))
-            FeedDateFilter.entries.forEach { option ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { draft = draft.copy(date = option) },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(
-                        selected = draft.date == option,
-                        onClick = { draft = draft.copy(date = option) }
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text(option.label, style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-            if (draft.date == FeedDateFilter.CUSTOM) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = { showStartPicker = true },
-                        modifier = Modifier.weight(1f)
-                    ) { Text(formatShortDate(draft.customStartEpochMillis, "Start")) }
-                    OutlinedButton(
-                        onClick = { showEndPicker = true },
-                        modifier = Modifier.weight(1f)
-                    ) { Text(formatShortDate(draft.customEndEpochMillis, "End")) }
-                }
-            }
-
-            Spacer(Modifier.height(16.dp))
-            Text(
-                text = "Content",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(8.dp))
-            // FlowRow of chips (All / Videos / Shorts / Downloads) wraps instead
-            // of overflowing on narrow screens. LIVE is deliberately excluded:
-            // the dedicated Live tab is the only live viewer, so a Live feed
-            // filter is no longer offered here.
-            androidx.compose.foundation.layout.FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                FeedContentFilter.entries
-                    .filterNot { it == FeedContentFilter.LIVE }
-                    .forEach { option ->
-                        FilterChip(
-                            selected = draft.content == option,
-                            onClick = { draft = draft.copy(content = option) },
-                            label = { Text(option.label) }
-                        )
-                    }
-            }
-
-            if (showSourceSection) {
+            if (!isPlaylistContext) {
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    text = "Source",
+                    text = "Date",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(4.dp))
+                FeedDateFilter.entries.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { draft = draft.copy(date = option) },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = draft.date == option,
+                            onClick = { draft = draft.copy(date = option) }
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(option.label, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                if (draft.date == FeedDateFilter.CUSTOM) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { showStartPicker = true },
+                            modifier = Modifier.weight(1f)
+                        ) { Text(formatShortDate(draft.customStartEpochMillis, "Start")) }
+                        OutlinedButton(
+                            onClick = { showEndPicker = true },
+                            modifier = Modifier.weight(1f)
+                        ) { Text(formatShortDate(draft.customEndEpochMillis, "End")) }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "Content",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(8.dp))
+                // FlowRow of chips (All / Videos / Shorts / Downloads) wraps instead
+                // of overflowing on narrow screens. LIVE is deliberately excluded:
+                // the dedicated Live tab is the only live viewer, so a Live feed
+                // filter is no longer offered here.
+                androidx.compose.foundation.layout.FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FeedContentFilter.entries
+                        .filterNot { it == FeedContentFilter.LIVE }
+                        .forEach { option ->
+                            FilterChip(
+                                selected = draft.content == option,
+                                onClick = { draft = draft.copy(content = option) },
+                                label = { Text(option.label) }
+                            )
+                        }
+                }
+            }
+
+            // Type — only meaningful inside a user playlist, which can hold
+            // both YouTube videos and audio imported from the device.
+            if (isPlaylistContext) {
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "Type",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "Where the videos come from: added manually by URL, pulled automatically from your channels, or in one of your playlists.",
+                    text = "Show everything, only the YouTube videos, or only the audio added from your device.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -2106,61 +2339,113 @@ private fun FilterSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    FeedSourceFilter.entries.forEach { option ->
+                    PlaylistTypeFilter.entries.forEach { option ->
                         FilterChip(
-                            selected = draft.source == option,
-                            onClick = { draft = draft.copy(source = option) },
+                            selected = draft.playlistType == option,
+                            onClick = { draft = draft.copy(playlistType = option) },
                             label = { Text(option.label) }
                         )
                     }
                 }
             }
 
+            // Source — always available: it's the only feed filter that also
+            // applies inside a user playlist (playlists keep their own order).
             Spacer(Modifier.height(16.dp))
             Text(
-                text = "Sort",
+                text = "Source",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold
             )
             Spacer(Modifier.height(4.dp))
-            FeedSortOrder.entries.forEach { option ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { draft = draft.copy(sort = option) },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(
-                        selected = draft.sort == option,
-                        onClick = { draft = draft.copy(sort = option) }
+            Text(
+                text = if (isPlaylistContext) {
+                    "Where the audio in this playlist comes from: added by URL, or imported from your device."
+                } else {
+                    "Where the videos come from: added by URL, or pulled automatically from your channels."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FeedSourceFilter.entries.forEach { option ->
+                    FilterChip(
+                        selected = draft.source == option,
+                        onClick = {
+                            draft = draft.copy(
+                                source = option,
+                                // A source filter means "everything from here" —
+                                // the default Unwatched status would otherwise
+                                // hide already-watched videos and make the filter
+                                // look like it shows the wrong videos.
+                                watchStatus = if (option == FeedSourceFilter.ALL) {
+                                    draft.watchStatus
+                                } else {
+                                    FeedWatchStatus.ALL
+                                }
+                            )
+                        },
+                        label = {
+                            Text(
+                                if (option == FeedSourceFilter.SYSTEM && isPlaylistContext) DEVICE_SOURCE_LABEL
+                                else option.label
+                            )
+                        }
                     )
-                    Spacer(Modifier.width(4.dp))
-                    Text(option.label, style = MaterialTheme.typography.bodyMedium)
                 }
             }
 
-            Spacer(Modifier.height(16.dp))
-            Text(
-                text = "Watch Status",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(4.dp))
-            FeedWatchStatus.entries.forEach { option ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { draft = draft.copy(watchStatus = option) },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(
-                        selected = draft.watchStatus == option,
-                        onClick = { draft = draft.copy(watchStatus = option) }
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text(option.label, style = MaterialTheme.typography.bodyMedium)
+            if (!isPlaylistContext) {
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "Sort",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(4.dp))
+                FeedSortOrder.entries.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { draft = draft.copy(sort = option) },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = draft.sort == option,
+                            onClick = { draft = draft.copy(sort = option) }
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(option.label, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "Watch Status",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(4.dp))
+                FeedWatchStatus.entries.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { draft = draft.copy(watchStatus = option) },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = draft.watchStatus == option,
+                            onClick = { draft = draft.copy(watchStatus = option) }
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(option.label, style = MaterialTheme.typography.bodyMedium)
+                    }
                 }
             }
 
@@ -3366,6 +3651,8 @@ internal fun PlaylistNameDialog(
 @Composable
 private fun PlaylistEditorSheet(
     playlist: UserPlaylist,
+    /** Opens the rename dialog for this playlist. */
+    onRename: () -> Unit,
     onMove: (from: Int, to: Int) -> Unit,
     onRemove: (video: MediaVideo) -> Unit,
     onAddVideos: () -> Unit,
@@ -3379,13 +3666,26 @@ private fun PlaylistEditorSheet(
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 24.dp)
         ) {
-            Text(
-                text = playlist.name,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            // Title + rename pencil: the playlist name, with an edit action
+            // right next to it so renaming is reachable from the editor itself.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = playlist.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onRename, modifier = Modifier.size(36.dp)) {
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = "Rename playlist",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
             Spacer(Modifier.height(2.dp))
             Text(
                 text = "${playlist.videos.size} video${if (playlist.videos.size == 1) "" else "s"} · use ↑↓ to reorder",

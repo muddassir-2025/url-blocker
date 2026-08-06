@@ -7,6 +7,7 @@ import com.muddassir.clearview.media.model.FeedSortOrder
 import com.muddassir.clearview.media.model.FeedSourceFilter
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
+import com.muddassir.clearview.media.model.PlaylistTypeFilter
 import com.muddassir.clearview.media.model.startOfDayEpochMillis
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -30,16 +31,14 @@ const val STARTED_FRACTION_THRESHOLD = 0.02f
  * the relative date presets. Filtering uses each video's real publication
  * timestamp. [progressOf] reports the watched fraction (0..1, null = never
  * started) — needed for the watch-status filter. [isManual] tells whether a
- * video was added by URL and [inPlaylist] whether it's in a user playlist —
- * both needed for the source filter.
+ * video was added by URL — needed for the source filter.
  */
 fun applyFeedFilter(
     videos: List<MediaVideo>,
     filter: FeedFilter,
     now: Long = System.currentTimeMillis(),
     progressOf: (String) -> Float? = { null },
-    isManual: (String) -> Boolean = { false },
-    inPlaylist: (String) -> Boolean = { false }
+    isManual: (String) -> Boolean = { false }
 ): List<MediaVideo> {
     val start = when (filter.date) {
         FeedDateFilter.ALL_TIME -> null
@@ -74,8 +73,8 @@ fun applyFeedFilter(
         val sourceOk = when (filter.source) {
             FeedSourceFilter.ALL -> true
             FeedSourceFilter.BY_URL -> isManual(v.videoId)
+            // "From channels": pulled automatically from the saved channels.
             FeedSourceFilter.SYSTEM -> !isManual(v.videoId)
-            FeedSourceFilter.PLAYLIST -> inPlaylist(v.videoId)
         }
         afterStart && beforeEnd && typeOk && statusOk && sourceOk
     }
@@ -132,6 +131,7 @@ fun encodeFeedFilter(filter: FeedFilter): String =
         .put("sort", filter.sort.name)
         .put("watchStatus", filter.watchStatus.name)
         .put("source", filter.source.name)
+        .put("playlistType", filter.playlistType.name)
         .put("customStart", filter.customStartEpochMillis ?: JSONObject.NULL)
         .put("customEnd", filter.customEndEpochMillis ?: JSONObject.NULL)
         .toString()
@@ -165,12 +165,18 @@ fun decodeFeedFilter(json: String?): FeedFilter? {
         val source = runCatching {
             FeedSourceFilter.valueOf(o.optString("source", ""))
         }.getOrNull() ?: FeedSourceFilter.ALL
+        // The playlist media-type filter is new — unknown/missing values decode
+        // to its All default (it's only meaningful inside user playlists).
+        val playlistType = runCatching {
+            PlaylistTypeFilter.valueOf(o.optString("playlistType", ""))
+        }.getOrNull() ?: PlaylistTypeFilter.ALL
         FeedFilter(
             date = date,
             content = content,
             sort = sort,
             watchStatus = watchStatus,
             source = source,
+            playlistType = playlistType,
             customStartEpochMillis = if (o.isNull("customStart")) null else o.optLong("customStart", 0L),
             customEndEpochMillis = if (o.isNull("customEnd")) null else o.optLong("customEnd", 0L)
         )

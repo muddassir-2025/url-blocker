@@ -220,14 +220,16 @@ object AudioDownloads {
      * so they appear in the Downloads list and play like any download.
      * [channelId]/[channelName] tag the imports with the Downloads view's
      * current channel scope (so they show up where the user added them).
-     * [onResult] fires with the number actually imported.
+     * [onResult] fires with the number actually imported, and [onImported]
+     * with the [DownloadItem]s created (e.g. to also add them to a playlist).
      */
     fun importFromDevice(
         context: Context,
         uris: List<android.net.Uri>,
         channelId: String = "",
         channelName: String = "",
-        onResult: (Int) -> Unit = {}
+        onResult: (Int) -> Unit = {},
+        onImported: (List<DownloadItem>) -> Unit = {}
     ) {
         val s = storeOrThrow()
         scope.launch {
@@ -238,10 +240,11 @@ object AudioDownloads {
                     s.importFromDevice(context, uris, channelId, channelName)
                 }
             } catch (e: Exception) {
-                0
+                emptyList()
             }
             refresh()
-            onResult(imported)
+            onResult(imported.size)
+            onImported(imported)
         }
     }
 

@@ -153,7 +153,8 @@ class AudioDownloadStore(context: Context) {
      * into the offline library: each file is COPIED into [audioDir] and
      * registered as a [DownloadItem] (source [DownloadItem.SOURCE_DEVICE]) so
      * it appears in the Downloads list and plays through [OfflineAudioPlayer]
-     * exactly like a downloaded one. Returns how many were imported.
+     * exactly like a downloaded one. Returns the [DownloadItem]s actually
+     * imported (callers can e.g. add them to a user playlist).
      *
      * [channelId]/[channelName] tag the import with the Downloads view's
      * current channel scope (if any), so the new items show up right where
@@ -164,7 +165,8 @@ class AudioDownloadStore(context: Context) {
         uris: List<Uri>,
         channelId: String = "",
         channelName: String = ""
-    ): Int = synchronized(LOCK) {
+    ): List<DownloadItem> = synchronized(LOCK) {
+        val created = mutableListOf<DownloadItem>()
         var imported = 0
         uris.forEach { uri ->
             try {
@@ -184,34 +186,34 @@ class AudioDownloadStore(context: Context) {
                     return@forEach
                 }
                 val now = System.currentTimeMillis()
-                upsert(
-                    DownloadItem(
-                        videoId = id,
-                        title = displayName.substringBeforeLast('.', displayName)
-                            .ifBlank { displayName },
-                        channelName = channelName.ifBlank { "From device" },
-                        source = DownloadItem.SOURCE_DEVICE,
-                        fileName = fileName,
-                        fileSize = target.length(),
-                        downloadedAt = now,
-                        lastPlayed = 0L,
-                        // These are the user's OWN files, not downloads — keep
-                        // them indefinitely (no 15-day expiry), matching the
-                        // "manual actions are never restricted" philosophy.
-                        expiresAt = 0L,
-                        thumbnailPath = "",
-                        // Real track length so the Downloads list shows "3:24"
-                        // instead of hiding the duration (0 = unreadable file).
-                        durationSeconds = readDurationSeconds(target),
-                        channelId = channelId
-                    )
+                val item = DownloadItem(
+                    videoId = id,
+                    title = displayName.substringBeforeLast('.', displayName)
+                        .ifBlank { displayName },
+                    channelName = channelName.ifBlank { "From device" },
+                    source = DownloadItem.SOURCE_DEVICE,
+                    fileName = fileName,
+                    fileSize = target.length(),
+                    downloadedAt = now,
+                    lastPlayed = 0L,
+                    // These are the user's OWN files, not downloads — keep
+                    // them indefinitely (no 15-day expiry), matching the
+                    // "manual actions are never restricted" philosophy.
+                    expiresAt = 0L,
+                    thumbnailPath = "",
+                    // Real track length so the Downloads list shows "3:24"
+                    // instead of hiding the duration (0 = unreadable file).
+                    durationSeconds = readDurationSeconds(target),
+                    channelId = channelId
                 )
+                upsert(item)
+                created += item
                 imported++
             } catch (e: Exception) {
                 // Unreadable / non-audio pick → skip it, keep importing the rest.
             }
         }
-        imported
+        created
     }
 
     /**

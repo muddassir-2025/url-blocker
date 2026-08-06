@@ -38,15 +38,26 @@ enum class FeedSortOrder(val label: String) {
 
 /**
  * Source filter for the All Feed — where each video came from:
- * [BY_URL] videos the user added manually by URL, [SYSTEM] videos the app
- * pulled automatically from saved channels (RSS), and [PLAYLIST] videos that
- * appear in one of the user's own playlists.
+ * [BY_URL] videos the user added manually by URL, and [SYSTEM] videos the
+ * app pulled automatically from saved channels (RSS). In user-playlist
+ * contexts the [SYSTEM] option is presented as "From device" (device audio
+ * imported into the playlist).
  */
 enum class FeedSourceFilter(val label: String) {
     ALL("All"),
-    BY_URL("Added by URL"),
-    SYSTEM("From channels"),
-    PLAYLIST("In playlists")
+    BY_URL("By URL"),
+    SYSTEM("From channels")
+}
+
+/**
+ * Media-type filter used inside user playlists — playlists can hold both
+ * YouTube videos and audio imported from the device: [VIDEO] keeps only
+ * YouTube videos, [AUDIO] keeps only the imported device audio.
+ */
+enum class PlaylistTypeFilter(val label: String) {
+    ALL("All"),
+    VIDEO("Video"),
+    AUDIO("Audio")
 }
 
 /** Watch-status filter for the All Feed (combinable with the date filter). */
@@ -75,6 +86,9 @@ data class FeedFilter(
     val watchStatus: FeedWatchStatus = FeedWatchStatus.UNWATCHED,
     /** Where the videos come from (manual by-URL, channels, playlists). */
     val source: FeedSourceFilter = FeedSourceFilter.ALL,
+    /** Media type — only meaningful inside user playlists (YouTube video vs
+     *  audio imported from the device). */
+    val playlistType: PlaylistTypeFilter = PlaylistTypeFilter.ALL,
     val customStartEpochMillis: Long? = null,
     val customEndEpochMillis: Long? = null
 ) {
@@ -84,7 +98,8 @@ data class FeedFilter(
             content != FeedContentFilter.ALL ||
             sort != FeedSortOrder.NEWEST_FIRST ||
             watchStatus != FeedWatchStatus.UNWATCHED ||
-            source != FeedSourceFilter.ALL
+            source != FeedSourceFilter.ALL ||
+            playlistType != PlaylistTypeFilter.ALL
 }
 
 /** Local start-of-day (midnight) for [epochMillis] in the device's time zone. */

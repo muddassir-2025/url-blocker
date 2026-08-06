@@ -7,6 +7,7 @@ import com.muddassir.clearview.media.model.FeedSortOrder
 import com.muddassir.clearview.media.model.FeedSourceFilter
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
+import com.muddassir.clearview.media.model.PlaylistTypeFilter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -308,21 +309,6 @@ class FeedFiltersTest {
     }
 
     @Test
-    fun `source playlist keeps only videos in user playlists`() {
-        val all = listOf(
-            video("in-list", now - day),
-            video("elsewhere", now - 2 * day)
-        )
-        val result = applyFeedFilter(
-            all,
-            FeedFilter(source = FeedSourceFilter.PLAYLIST, watchStatus = FeedWatchStatus.ALL),
-            now,
-            inPlaylist = { it == "in-list" }
-        )
-        assertEquals(listOf("in-list"), result.map { it.videoId })
-    }
-
-    @Test
     fun `source combines with watch status`() {
         val all = listOf(
             video("manual-watched", now - day),
@@ -340,8 +326,20 @@ class FeedFiltersTest {
 
     @Test
     fun `source filter round-trips through encode decode`() {
-        val filter = FeedFilter(source = FeedSourceFilter.PLAYLIST)
+        val filter = FeedFilter(source = FeedSourceFilter.SYSTEM)
         assertEquals(filter, decodeFeedFilter(encodeFeedFilter(filter)))
+    }
+
+    @Test
+    fun `persisted PLAYLIST source from an old build decodes to All`() {
+        // The "In playlists" source option was removed; a filter saved by an
+        // older build could still hold PLAYLIST. Decoding must normalize it to
+        // All so the feed never locks to a hidden filter.
+        val oldJson = "{\"date\":\"TODAY\",\"content\":\"ALL\"," +
+            "\"sort\":\"NEWEST_FIRST\",\"watchStatus\":\"ALL\"," +
+            "\"source\":\"PLAYLIST\"}"
+        val decoded = decodeFeedFilter(oldJson)
+        assertEquals(FeedSourceFilter.ALL, decoded?.source)
     }
 
     @Test
@@ -350,7 +348,7 @@ class FeedFiltersTest {
             FeedFilter(source = FeedSourceFilter.BY_URL, watchStatus = FeedWatchStatus.ALL),
             resultCount = 2
         )
-        assertEquals("All time · Added by URL · 2 videos", summary)
+        assertEquals("All time · By URL · 2 videos", summary)
     }
 
     @Test
@@ -377,5 +375,33 @@ class FeedFiltersTest {
         val decoded = decodeFeedFilter(oldJson)
         assertEquals(FeedDateFilter.TODAY, decoded?.date)
         assertEquals(FeedWatchStatus.ALL, decoded?.watchStatus)
+    }
+
+    @Test
+    fun `playlist type filter round-trips through encode decode`() {
+        val filter = FeedFilter(playlistType = PlaylistTypeFilter.AUDIO)
+        assertEquals(filter, decodeFeedFilter(encodeFeedFilter(filter)))
+    }
+
+    @Test
+    fun `old filter values without playlist type key decode to the All default`() {
+        val oldJson = "{\"date\":\"TODAY\",\"content\":\"ALL\"," +
+            "\"sort\":\"NEWEST_FIRST\",\"watchStatus\":\"ALL\"}"
+        val decoded = decodeFeedFilter(oldJson)
+        assertEquals(PlaylistTypeFilter.ALL, decoded?.playlistType)
+    }
+
+    @Test
+    fun `isActive is true for playlist type filters`() {
+        assertTrue(FeedFilter(playlistType = PlaylistTypeFilter.VIDEO).isActive)
+    }
+
+    @Test
+    fun `feed filter round-trip keeps playlist type`() {
+        val filter = FeedFilter(
+            source = FeedSourceFilter.SYSTEM,
+            playlistType = PlaylistTypeFilter.VIDEO
+        )
+        assertEquals(filter, decodeFeedFilter(encodeFeedFilter(filter)))
     }
 }
