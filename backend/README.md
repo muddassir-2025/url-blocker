@@ -66,6 +66,25 @@ YouTube's BotGuard attestation **on the server's own IP** and hands yt-dlp a pro
 a local HTTP server on `127.0.0.1:4416`; the plugin's solve timeout is patched to 45 s at
 build time (cold solves on Render take 20–45 s).
 
+### Boot check (self-test)
+
+At boot the server probes extraction with **both chains across several videos** — not just one
+smoke-test id. The default set mixes the classic yt-dlp canary (`jNQXAC9IVRw` — hammered by
+CI traffic, so it must never be the *only* signal) with an ordinary public video and two real
+videos from the RSS feeds this app actually serves (Makkah + Madinah channels):
+
+- `jNQXAC9IVRw` (canary) · `aqz-KE-bpKQ` (Big Buck Bunny) · `C_iHHP8LfGk` (Madinah feed) ·
+  `jK6wgG6C4PY` (Makkah feed)
+
+Override the set with `BOOT_CHECK_VIDEOS` (comma-separated URLs or bare 11-char ids) — plug in
+the latest ids from your own RSS feeds. The first probe A warms the guest cookiejar and the
+PO-token provider's minter and opens the request gate; the remaining probes run in the
+background with throwaway cookiejars (they never race real requests on the shared jar). Every
+probe logs a per-video verdict, and **both** probe types dump their verbose output tail on
+failure so a broken chain is diagnosable from the log alone. Each probe is one YouTube
+guest-session request — if the probe volume ever matters under load, trim the list via
+`BOOT_CHECK_VIDEOS` or set `DEBUG_BOOT_CHECK=false` (the provider warmup still runs).
+
 ### Guest-session rate ceiling + queue
 
 YouTube's documented guideline for a guest session is **~300 requests/hour per session/IP**.
@@ -153,6 +172,7 @@ bash scripts/local-e2e-test.sh
 | `YTDLP_RETRY_BACKOFF_MS` | `3000` | Backoff before the single transient-failure retry pass. |
 | `PROXY` | (none) | Optional `--proxy` for yt-dlp — an escape hatch if the guest session + cache are ever rate-limited at scale; NOT required normally. |
 | `DEBUG_BOOT_CHECK` | `true` | `false` skips the boot-time yt-dlp extraction probes (the provider warmup still runs). |
+| `BOOT_CHECK_VIDEOS` | 4 default videos | Comma-separated YouTube URLs or 11-char video ids probed at boot with both chains (default: the classic canary + an ordinary public video + 2 real videos from this app's RSS feeds). |
 | `YTDLP_AUTO_UPDATE` | `true` | `false` disables the runtime yt-dlp updater. |
 | `YTDLP_UPDATE_CHECK_HOURS` | `24` | How often the updater may check GitHub (it also runs ~5 min after each boot). |
 | `YTDLP_FORCE` | — | Force postinstall scripts / the updater to re-download. |
@@ -187,7 +207,11 @@ for this app because the RSS feeds it serves are public content.
 
 - Boot-check lines are prefixed **`[boot-check]`** so monitoring/alerting can exclude them
   (real request failures are `[yt-dlp]`, `[extract]`, `[cache]`, `[rate-limit]` lines).
-  Set `DEBUG_BOOT_CHECK=false` to skip the two extraction probes entirely.
+  Set `DEBUG_BOOT_CHECK=false` to skip the extraction probes entirely (the provider warmup
+  still runs). Every probe logs a per-video verdict line
+  (`PRIMARY chain … extraction OK/FAILED`, `FALLBACK mobile chain … extraction OK/FAILED`),
+  and **both** probe types dump their verbose output tail on failure — a failure is always
+diagnosable from the log without a re-run.
 - `[cache] HIT <id>` — a repeat download served from the cache (no YouTube call).
 - `[rate-limit] queue full — 503 … (position #N)` — the guest-session ceiling is being hit.
 - `[pot:bgutil:script-node] Script path doesn't exist…` lines are **expected noise** from
@@ -196,14 +220,13 @@ for this app because the RSS feeds it serves are public content.
   `[boot-check] provider GENERATED N token generation(s) during probe A — PO pipeline works end-to-end`.
 - `[update-ytdlp]` lines report yt-dlp release checks / swaps.
 
-## Deprecated: account cookies (`COOKIES_B64` / `cookies.txt`)
+## Account cookies are retired (`COOKIES_B64` / `cookies.txt`)
 
 Older versions used `COOKIES_B64` (base64 of a Netscape `cookies.txt` exported from a
-**signed-in** browser) or a `cookies.txt` next to `server.js`. These still work for backward
-compatibility, but they are **deprecated**: account cookies expire, need re-exporting, and
-are no longer required — the guest session + PO token is the supported no-login path. If one
-of them is set, the server logs a deprecation warning and uses it instead of the guest jar.
-Remove them to go fully cookie-free.
+**signed-in** browser) or a `cookies.txt` next to `server.js`. Those are **retired**: account
+cookies expire and get rotated by YouTube, and the anonymous guest session + PO token is the
+only supported path. If `COOKIES_B64` or `cookies.txt` is still present, the server logs a
+warning and **ignores it** — the guest cookiejar is always used. You can delete them.
 
 ## Notes
 

@@ -1,6 +1,9 @@
 package com.muddassir.clearview
 
 import android.app.Activity
+import android.app.NotificationManager
+import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -50,6 +53,22 @@ open class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Android notification channels are permanent once created — they
+        // persist across app updates and never clean up on their own. Older
+        // builds registered channels that are no longer created (or duplicated
+        // the "Channel updates" name), so remove them on every startup:
+        //   - "media_badge": a second channel that shared the "Channel
+        //     updates" name (the launcher-badge notification now reuses
+        //     media_updates); deleting it collapses the duplicate entries in
+        //     system notification settings.
+        //   - "protection_monitor": retired from the code long ago.
+        // Both calls are idempotent no-ops on devices that never had them.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.deleteNotificationChannel("media_badge")
+            nm.deleteNotificationChannel("protection_monitor")
+        }
 
         // Quran Reminder: ensure the initial download + 6-hour refresh work is
         // scheduled the first time the app opens (idempotent). The widget also

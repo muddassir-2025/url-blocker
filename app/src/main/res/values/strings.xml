@@ -68,6 +68,8 @@
     <string name="quran_search_loading">Searching…</string>
     <string name="quran_search_mode_search">Search</string>
     <string name="quran_search_mode_surah">Surah</string>
+    <string name="quran_search_hint_surah">Search surahs by name or number</string>
+    <string name="quran_surah_no_matches">No surahs found</string>
     <string name="quran_bookmarks_loading">Loading bookmarks…</string>
     <plurals name="quran_search_results_count">
         <item quantity="one">%1$d result</item>

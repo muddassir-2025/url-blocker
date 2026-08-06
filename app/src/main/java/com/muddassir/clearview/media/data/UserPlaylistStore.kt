@@ -10,8 +10,8 @@ import java.util.UUID
  * Local persistence for user-created playlists. Everything is stored as JSON
  * in a single SharedPreferences file (videos keep their full metadata, so a
  * playlist renders even when the videos left the RSS feed — same trade as the
- * bookmarks store). All edits are functional: the store returns the updated
- * list so callers can refresh their UI state atomically.
+ * hidden/manual library stores). All edits are functional: the store returns
+ * the updated list so callers can refresh their UI state atomically.
  */
 class UserPlaylistStore(context: Context) {
 

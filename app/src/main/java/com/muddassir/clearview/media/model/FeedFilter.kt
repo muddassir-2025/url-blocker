@@ -44,16 +44,14 @@ enum class FeedWatchStatus(val label: String) {
     PARTIALLY_WATCHED("Partially watched")
 }
 
-/** Library filter: every video vs bookmarked only. */
-enum class FeedLibraryFilter(val label: String) {
-    ALL("All"),
-    BOOKMARKED("Bookmarked")
-}
-
 /**
  * The Media tab's All Feed filters. Defaults: All time + All content +
  * Newest first. [customStartEpochMillis] / [customEndEpochMillis] only apply
  * when [date] is [FeedDateFilter.CUSTOM] (both are local start-of-day millis).
+ *
+ * The former Library filter (bookmarks) was removed — user playlists replaced
+ * it. A persisted "library" key from an older build is simply ignored on
+ * decode, so no stale filter can lock the feed.
  */
 data class FeedFilter(
     val date: FeedDateFilter = FeedDateFilter.ALL_TIME,
@@ -62,7 +60,6 @@ data class FeedFilter(
     // Unwatched by default: the feed leads with videos the user hasn't seen,
     // rather than everything mixed together.
     val watchStatus: FeedWatchStatus = FeedWatchStatus.UNWATCHED,
-    val library: FeedLibraryFilter = FeedLibraryFilter.ALL,
     val customStartEpochMillis: Long? = null,
     val customEndEpochMillis: Long? = null
 ) {
@@ -71,8 +68,7 @@ data class FeedFilter(
         get() = date != FeedDateFilter.ALL_TIME ||
             content != FeedContentFilter.ALL ||
             sort != FeedSortOrder.NEWEST_FIRST ||
-            watchStatus != FeedWatchStatus.UNWATCHED ||
-            library != FeedLibraryFilter.ALL
+            watchStatus != FeedWatchStatus.UNWATCHED
 }
 
 /** Local start-of-day (midnight) for [epochMillis] in the device's time zone. */

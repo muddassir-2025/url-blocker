@@ -3,6 +3,7 @@ package com.muddassir.clearview.ui
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -50,6 +51,18 @@ class BlockOverlayActivity : ComponentActivity() {
      *  onBackPressed can all fire; only the first may navigate). */
     private var exited = false
 
+    /**
+     * Stray-input guard. The blocking sequence (closing tabs, sending back
+     * presses) is still settling for a couple of seconds after the overlay
+     * appears, and a stray accessibility click/back can land on this screen in
+     * that window — observed as the overlay dismissing itself ~1.3s after
+     * showing with no user input at all. Dismissals inside the grace window are
+     * ignored; a real user can't read and reach a control that fast (the
+     * fade-in alone is 150ms).
+     */
+    private val createdAt = SystemClock.elapsedRealtime()
+    private val dismissalGraceMs = 2_000L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -86,11 +99,24 @@ class BlockOverlayActivity : ComponentActivity() {
      */
     private fun exitToDestination() {
         if (exited) return
+        // Ignore dismissals inside the grace window (see [createdAt]) — a stray
+        // input from the still-settling blocking sequence must not close the
+        // overlay before the user has even seen it.
+        if (SystemClock.elapsedRealtime() - createdAt < dismissalGraceMs) {
+            Log.d(TAG, "Dismiss ignored (grace window)")
+            return
+        }
         exited = true
         exitToHome()
     }
 
     private fun exitToHome() {
+        // Never navigate from an already-finishing/destroyed activity (a second
+        // rapid tap, or a config-change recreate mid-exit).
+        if (isFinishing || isDestroyed) {
+            Log.d(TAG, "Exit skipped (finishing/destroyed)")
+            return
+        }
         Log.i(TAG, "Exiting to Home")
         try {
             val intent = Intent(Intent.ACTION_MAIN).apply {
@@ -99,20 +125,34 @@ class BlockOverlayActivity : ComponentActivity() {
                         Intent.FLAG_ACTIVITY_CLEAR_TASK or
                         Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
             }
-            startActivity(intent)
-            // No enter animation for the launcher: prevents the "floating app
-            // icon" fly animation some launchers play when Home appears.
-            overridePendingTransition(0, 0)
+            // Only launch Home if a home activity actually resolves (launcher
+            // disabled/updating, kiosk mode…). If none, fall straight through
+            // to the graceful fallback below instead of relying on the catch.
+            if (intent.resolveActivity(packageManager) != null) {
+                startActivity(intent)
+                // No enter animation for the launcher: prevents the "floating
+                // app icon" fly animation some launchers play when Home appears.
+                overridePendingTransition(0, 0)
+            } else {
+                Log.w(TAG, "No home activity resolved; dismissing overlay only")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to exit to Home: ${e.message}")
         }
-        finish()
-        // No exit animation for the overlay either — the theme's alpha-only
-        // windowAnimationStyle is a second line of defense (see
-        // Theme.Urlblocker.Overlay); this call kills the animation for the
-        // finish() above in one go, so the transition back to the launcher is
-        // a clean, immediate hand-off with no icon animation.
-        overridePendingTransition(0, 0)
+        // Graceful fallback: whatever happened above, always finish so the user
+        // is never stuck on a dead overlay. Wrapped so a window/teardown quirk
+        // (e.g. an OEM launcher) can never take the process down.
+        try {
+            finish()
+            // No exit animation for the overlay either — the theme's alpha-only
+            // windowAnimationStyle is a second line of defense (see
+            // Theme.Urlblocker.Overlay); this call kills the animation for the
+            // finish() above in one go, so the transition back to the launcher
+            // is a clean, immediate hand-off with no icon animation.
+            overridePendingTransition(0, 0)
+        } catch (e: Exception) {
+            Log.w(TAG, "Finish/transition failed: ${e.message}")
+        }
     }
 
     @Deprecated("Suppress deprecated flag usage", ReplaceWith(""))

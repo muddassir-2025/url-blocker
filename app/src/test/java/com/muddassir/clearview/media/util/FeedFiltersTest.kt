@@ -3,7 +3,6 @@ package com.muddassir.clearview.media.util
 import com.muddassir.clearview.media.model.FeedContentFilter
 import com.muddassir.clearview.media.model.FeedDateFilter
 import com.muddassir.clearview.media.model.FeedFilter
-import com.muddassir.clearview.media.model.FeedLibraryFilter
 import com.muddassir.clearview.media.model.FeedSortOrder
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
@@ -219,16 +218,6 @@ class FeedFiltersTest {
     }
 
     @Test
-    fun `bookmarked filter keeps only bookmarked videos`() {
-        val all = listOf(video("a", now - day), video("b", now - 2 * day))
-        val result = applyFeedFilter(
-            all, FeedFilter(library = FeedLibraryFilter.BOOKMARKED), now,
-            bookmarkedOf = { it == "b" }
-        )
-        assertEquals(listOf("b"), result.map { it.videoId })
-    }
-
-    @Test
     fun `date plus watch status combine`() {
         val all = listOf(
             video("today-watched", now - 2 * 60 * 60 * 1000),
@@ -265,35 +254,44 @@ class FeedFiltersTest {
         assertEquals(FeedDateFilter.TODAY, decoded?.date)
         // New default: Unwatched (old persisted values without the key inherit it).
         assertEquals(FeedWatchStatus.UNWATCHED, decoded?.watchStatus)
-        assertEquals(FeedLibraryFilter.ALL, decoded?.library)
     }
 
     @Test
-    fun `summary includes watch status and library when set`() {
+    fun `summary includes watch status when set`() {
         val summary = feedFilterSummary(
             FeedFilter(
                 date = FeedDateFilter.TODAY,
-                watchStatus = FeedWatchStatus.UNWATCHED,
-                library = FeedLibraryFilter.BOOKMARKED
+                watchStatus = FeedWatchStatus.UNWATCHED
             ),
             resultCount = 2
         )
-        assertEquals("Today · Unwatched · Bookmarked · 2 videos", summary)
+        assertEquals("Today · Unwatched · 2 videos", summary)
     }
 
     @Test
-    fun `isActive is true for watch status and library filters`() {
+    fun `isActive is true for watch status filters`() {
         assertTrue(FeedFilter(watchStatus = FeedWatchStatus.WATCHED).isActive)
-        assertTrue(FeedFilter(library = FeedLibraryFilter.BOOKMARKED).isActive)
     }
 
     @Test
     fun `feed filter round-trip keeps new fields`() {
         val filter = FeedFilter(
             date = FeedDateFilter.LAST_7_DAYS,
-            watchStatus = FeedWatchStatus.PARTIALLY_WATCHED,
-            library = FeedLibraryFilter.BOOKMARKED
+            watchStatus = FeedWatchStatus.PARTIALLY_WATCHED
         )
         assertEquals(filter, decodeFeedFilter(encodeFeedFilter(filter)))
+    }
+
+    @Test
+    fun `persisted library key from an old build is ignored`() {
+        // The Bookmark feature was removed (user playlists replaced it). A
+        // filter saved by an older build still holds a "library" key — decoding
+        // must ignore it so the feed never locks to a dead filter.
+        val oldJson = "{\"date\":\"TODAY\",\"content\":\"ALL\"," +
+            "\"sort\":\"NEWEST_FIRST\",\"watchStatus\":\"ALL\"," +
+            "\"library\":\"BOOKMARKED\"}"
+        val decoded = decodeFeedFilter(oldJson)
+        assertEquals(FeedDateFilter.TODAY, decoded?.date)
+        assertEquals(FeedWatchStatus.ALL, decoded?.watchStatus)
     }
 }

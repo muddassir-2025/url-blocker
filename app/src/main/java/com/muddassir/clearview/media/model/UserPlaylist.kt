@@ -10,7 +10,7 @@ package com.muddassir.clearview.media.model
  * @property name     Display name.
  * @property videos   The videos in their current playlist order (full
  *                    metadata is persisted so playlists render offline, like
- *                    bookmarks do).
+ *                    manually added videos do).
  * @property createdAtEpochMillis  When the playlist was created.
  */
 data class UserPlaylist(

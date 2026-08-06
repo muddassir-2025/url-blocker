@@ -6,7 +6,7 @@ import org.json.JSONObject
 
 /**
  * Pure helpers for persisting [MediaVideo] lists — used by the library store
- * (bookmarks / hidden / manually added). Kept free of Android dependencies so
+ * (hidden / manually added). Kept free of Android dependencies so
  * the round-trip logic is unit-testable on the JVM. Mirrors the per-channel
  * cache encoding in [com.muddassir.clearview.media.data.MediaRepository].
  */
@@ -70,7 +70,7 @@ object MediaVideos {
     /**
      * Merges two video lists by id, newest first. [authoritative] wins when the
      * same id appears in both (an RSS copy carries fresher metadata than a
-     * stored bookmark/manual copy).
+     * stored manual copy).
      */
     fun merge(
         primary: List<MediaVideo>,
