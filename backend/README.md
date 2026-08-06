@@ -26,7 +26,9 @@ GET /api/audio?url=… → app retries on 503 (cold boot / queue busy)
         └─ 2. Rate-limited extraction queue (token bucket, single-flight):
               a. yt-dlp with the persistent guest cookiejar (--cookies) +
                  PRIMARY chain  mweb,web + fetch_pot=always + PO token
-              b. fallback chains (mobile innertube clients, then defaults)
+              b. fallback chains (mobile innertube clients + PO token, tv,
+                 then defaults; the dead web chain is auto-demoted after
+                 repeated bot-checks so requests skip straight to a working one)
               c. one retry with backoff on transient bot-check / 429 failures
               d. if all chains fail → ytdl-core fallback (same queue slot)
               e. cache the fresh stream URL, then pipe it to the client
@@ -53,8 +55,17 @@ yt-dlp populates it; **no login/account cookies ever go in it**.
   token plugin. `mweb,web` is currently the recommended no-login pairing; `web_embedded`
   is excluded (returned `LOGIN_REQUIRED` in testing). Override the list with `YTDLP_CLIENTS`
   when YouTube shifts its trust signals.
-- **FALLBACK**: mobile innertube clients (`android_vr,android,ios,web_safari,web_music`) —
-  direct signed URLs, no PO token needed.
+- **FALLBACK**: mobile innertube clients (`android_vr,android,ios,web_safari,web_music`)
+  with `fetch_pot=always` + the PO token (newer YouTube builds block those clients without
+  a GVS token), then the same clients **tokenless** as insurance (a failed token fetch must
+  never kill the mobile path), then the `tv_embedded,tv` family — a separate trust path
+  that historically survives datacenter-IP blocks. The lists override via
+  `YTDLP_MOBILE_CLIENTS` / `YTDLP_TV_CLIENTS`.
+- **ADAPTIVE DEMOTION**: on IPs where YouTube permanently bot-blocks web clients
+  (LOGIN_REQUIRED even with a valid PO token), the web chain is moved to the END of the
+  rotation after `YTDLP_PO_DEMOTE_STREAK` (3) consecutive bot-block verdicts, so requests
+  don't burn 5–30 s on it every time. The cooldown (`YTDLP_PO_DEMOTE_MINUTES`, 30) re-tests
+  it and a success re-promotes it immediately.
 - **LAST**: yt-dlp's default client set.
 
 ### PO-token provider
@@ -68,8 +79,8 @@ build time (cold solves on Render take 20–70 s).
 
 ### Boot check (self-test)
 
-At boot the server probes extraction with **both chains across several videos** — not just one
-smoke-test id. The default set mixes the classic yt-dlp canary (`jNQXAC9IVRw` — hammered by
+At boot the server probes extraction with **both the PRIMARY (web+PO) and MOBILE (+PO)
+chains across several videos** — not just one smoke-test id. The default set mixes the classic yt-dlp canary (`jNQXAC9IVRw` — hammered by
 CI traffic, so it must never be the *only* signal) with an ordinary public video and two real
 videos from the RSS feeds this app actually serves (Makkah + Madinah channels):
 
@@ -164,6 +175,10 @@ bash scripts/local-e2e-test.sh
 |----------|---------|---------|
 | `AUDIO_TOKEN` | (none) | Shared secret — the app must send it (`X-Audio-Token`). Protects your bandwidth from strangers. |
 | `YTDLP_CLIENTS` | `mweb,web` | Primary client list for the PO chain (e.g. `android_vr,ios,web_safari` if YouTube shifts trust signals). |
+| `YTDLP_MOBILE_CLIENTS` | `android_vr,android,ios,web_safari,web_music` | Fallback mobile innertube clients (tried with a PO token, then tokenless). |
+| `YTDLP_TV_CLIENTS` | `tv_embedded,tv` | TV-family fallback clients. |
+| `YTDLP_PO_DEMOTE_STREAK` | `3` | Consecutive bot-block verdicts before the dead web chain is demoted to the end of the rotation. |
+| `YTDLP_PO_DEMOTE_MINUTES` | `30` | How long the demoted web chain stays at the end before it is re-tested. |
 | `RATE_LIMIT_PER_HOUR` | `250` | Extraction budget/hour — keep under ~300 (guest-session ceiling). |
 | `RATE_LIMIT_BURST` | `5` | Token-bucket burst capacity. |
 | `QUEUE_MAX_WAIT_MS` | `12000` | How long a request queues before the server answers 503 + Retry-After. |
@@ -214,7 +229,7 @@ for this app because the RSS feeds it serves are public content.
   (real request failures are `[yt-dlp]`, `[extract]`, `[cache]`, `[rate-limit]` lines).
   Set `DEBUG_BOOT_CHECK=false` to skip the extraction probes entirely (the provider warmup
   still runs). Every probe logs a per-video verdict line
-  (`PRIMARY chain … extraction OK/FAILED`, `FALLBACK mobile chain … extraction OK/FAILED`),
+  (`PRIMARY chain … extraction OK/FAILED`, `MOBILE chain … extraction OK/FAILED`),
   and **both** probe types dump their verbose output tail on failure — a failure is always
 diagnosable from the log without a re-run.
 - `[cache] HIT <id>` — a repeat download served from the cache (no YouTube call).

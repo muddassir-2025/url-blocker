@@ -157,9 +157,11 @@ fun VideoPlayerScreen(
     var errorCode by remember(video.videoId) { mutableStateOf<Int?>(null) }
     var timedOut by remember(video.videoId) { mutableStateOf(false) }
     var retryToken by remember { mutableStateOf(0) }
-    // Whether the current source has EVER reached a ready/playing state. The
-    // blurred loading placeholder shows only until that first start — buffering
-    // caused by a forward/backward seek must NOT re-blur the video.
+    // Whether the current source has EVER started PLAYING (not merely become
+    // ready): see onPlayerState — a ready-but-paused source (autoplay blocked)
+    // keeps this false so the blurred placeholder stays up for Shorts. The
+    // placeholder shows only until that first start — buffering caused by a
+    // forward/backward seek must NOT re-blur the video.
     var sourceStarted by remember(video.videoId) { mutableStateOf(false) }
 
     // ── Blurred-loading backdrop (smooth video transitions) ─────────
@@ -416,6 +418,15 @@ fun VideoPlayerScreen(
     // button, shown ONLY once the video is actually ready.
     val showPlayOverlay = errorCode == null && !timedOut && !isBuffering &&
         playerState == YtState.PAUSED
+    // Ready-but-paused BEFORE this source ever started playing (autoplay
+    // blocked — e.g. Android data-saver). The blurred placeholder must stay up
+    // here too so the embed's grey play button can never show; the app's own
+    // centered play overlay (Shorts only) is the play affordance on top. Long
+    // videos keep their reachable embed controls, so they are NOT blurred in
+    // this state. Guarded against errors/timeouts so the blur can never cover
+    // an error card.
+    val pausedNotStarted = errorCode == null && !timedOut &&
+        video.isShort && playerState == YtState.PAUSED
 
     Column(
         modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
@@ -443,9 +454,18 @@ fun VideoPlayerScreen(
                 modifier = Modifier.fillMaxSize(),
                 onMuteState = { muted -> isMuted = muted },
                 onPlayerState = { s ->
-                    // Late connection: playback finally started — drop any timeout card.
+                    // Late connection: the source is now usable — drop any
+                    // timeout card.
                     if (s == YtState.PLAYING || s == YtState.PAUSED) {
                         timedOut = false
+                    }
+                    // sourceStarted flips ONLY on PLAYING: a ready-but-paused
+                    // video (autoplay blocked before it ever started) must keep
+                    // the blurred placeholder + the app's own play overlay
+                    // (Shorts) instead of exposing the embed's grey play
+                    // button. A mid-playback pause still has sourceStarted =
+                    // true, so it never re-blurs.
+                    if (s == YtState.PLAYING) {
                         sourceStarted = true
                     }
                     playerState = s
@@ -661,9 +681,11 @@ fun VideoPlayerScreen(
             // #loading-cover in youtube_player.html backstops it too). Only
             // visible until the source has started once (sourceStarted):
             // buffering during a forward/backward seek re-uses the real
-            // frames and must never be covered by it.
+            // frames and must never be covered by it. The ready-but-paused
+            // state (autoplay blocked before start) is covered too, so the
+            // embed's grey play button never shows there either.
             LoadingPlaceholderOverlay(
-                visible = !sourceStarted && isBuffering,
+                visible = !sourceStarted && (isBuffering || pausedNotStarted),
                 thumbnailUrl = placeholderThumbnail,
                 onThumbnailLoaded = { if (video.thumbnailUrl == placeholderThumbnail) {
                     currentThumbnailReady = true
