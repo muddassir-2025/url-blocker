@@ -71,6 +71,22 @@ const path = require('path');
 const app = express();
 app.disable('x-powered-by');
 
+// ── Per-request logging ───────────────────────────────────────────────────
+// Every request (including early-return paths: 400 / 401 / silent warm-up
+// 503s) is logged with status + duration, so Render's logs always show when
+// the app actually reaches the server. Without this, a download tap that gets
+// a 503 while the instance warms up looks exactly like "no logs at all" — the
+// request never arriving.
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - startedAt;
+    const target = String(req.originalUrl || req.url || '').slice(0, 160);
+    console.log(`[req] ${req.method} ${target} -> ${res.statusCode} in ${ms}ms`);
+  });
+  next();
+});
+
 const PORT = process.env.PORT || 3000;
 const TOKEN = process.env.AUDIO_TOKEN || '';
 // Kept at 2 to leave headroom for the PO-token provider's BotGuard process
@@ -203,20 +219,20 @@ const SERVER_START = Date.now();
 const STARTUP_WINDOW_MS = 180 * 1000;
 const RESTART_WINDOW_MS = 60 * 1000;
 // Boot check runs AFTER the provider is ready: direct /get_pot probe (cold
-// solve, up to 45 s) + yt-dlp probes across every BOOT_CHECK_VIDEOS entry
+// solve, up to 70 s) + yt-dlp probes across every BOOT_CHECK_VIDEOS entry
 // (probe A up to 60 s each, then probe B). Until the FIRST probe A finishes
 // (which warms the provider's minter + guest jar under the real keys),
 // requests are 503-gated for this window too (time-capped like the others).
-// NOTE: the plugin's solve timeout is patched to 45 s at build time
-// (scripts/fetch-pot-provider.js), which is what makes 20-45 s cold solves
+// NOTE: the plugin's solve timeout is patched to 70 s at build time
+// (scripts/fetch-pot-provider.js), which is what makes 20-70 s cold solves
 // survivable for real yt-dlp requests.
-// Worst case to the gate opening ≈ 90 s ready-wait + 45 s /get_pot + 120 s
-// first probe A ≈ 255 s, so 280 s keeps the gate aligned. The remaining
+// Worst case to the gate opening ≈ 90 s ready-wait + 70 s /get_pot + 120 s
+// first probe A ≈ 280 s, so 300 s keeps the gate aligned. The remaining
 // videos' probes run in the BACKGROUND after the gate opens (throwaway jars —
 // never racing real requests on the shared guest jar). The gate self-opens
 // regardless (time cap), and the probes are skipped entirely when
 // DEBUG_BOOT_CHECK=false (the /get_pot warmup always runs).
-const BOOT_WINDOW_MS = 280 * 1000;
+const BOOT_WINDOW_MS = 300 * 1000;
 let potEverReady = false;
 let potDownAt = null;
 let potBootCheckDone = false;
@@ -374,10 +390,10 @@ function verifyPotWiring() {
   // failure on the provider's solve path rather than the yt-dlp plugin wiring.
   // The probe also acts as a WARMUP: it seeds the provider's session cache, so
   // the first real request doesn't pay the slow cold solve.
-  // NOTE: the plugin's own solve timeout is patched to 45 s at build time
-  // (scripts/fetch-pot-provider.js), so a cold solve up to ~40 s survives real
+  // NOTE: the plugin's own solve timeout is patched to 70 s at build time
+  // (scripts/fetch-pot-provider.js), so a cold solve up to ~65 s survives real
   // requests; the logged duration makes the verdict interpretable
-  // ("200 in 2 s" = fine; "200 in 44 s" = right at the cap, real requests risk
+  // ("200 in 2 s" = fine; "200 in 68 s" = right at the cap, real requests risk
   // timing out until the warm minter kicks in).
   // Guard: runYtDlpProbe (declared below) must run exactly once, after this
   // probe has completed (or failed/timeout) — never concurrently with it.
@@ -398,17 +414,17 @@ function verifyPotWiring() {
         const ok = res.statusCode === 200;
         const ms = Date.now() - probeStartedAt;
         if (ok) {
-          // The plugin's /get_pot solve timeout is patched to 45 s at build
+          // The plugin's /get_pot solve timeout is patched to 70 s at build
           // time (scripts/fetch-pot-provider.js rebuilds the plugin zip with
-          // _GETPOT_TIMEOUT = 45.0). The probe's own timeout is also 45 s, so
-          // only solves above ~40 s are cutting it close.
-          if (ms / 1000 > 40) {
+          // _GETPOT_TIMEOUT = 70.0). The probe's own timeout is also 70 s, so
+          // only solves above ~65 s are cutting it close.
+          if (ms / 1000 > 65) {
             // The cold BotGuard solve is a one-time cost: the provider caches
             // the solved session (minter) for ~12h, and this probe IS the
             // warmup, so later /get_pot calls mint tokens fast. The warning
-            // still matters — a solve this slow is right at the 45 s cap.
+            // still matters — a solve this slow is right at the 70 s cap.
             console.warn(
-              `[boot-check] direct /get_pot probe -> HTTP 200 in ${(ms / 1000).toFixed(1)}s — solve is very slow (near the 45s plugin/probe timeout); this probe WARMS the provider, so later token requests should be fast (see the yt-dlp probe verdicts below)`
+              `[boot-check] direct /get_pot probe -> HTTP 200 in ${(ms / 1000).toFixed(1)}s — solve is very slow (near the 70s plugin/probe timeout); this probe WARMS the provider, so later token requests should be fast (see the yt-dlp probe verdicts below)`
             );
           } else {
             console.log(
@@ -430,9 +446,9 @@ function verifyPotWiring() {
     console.warn(`[boot-check] direct /get_pot probe FAILED: ${e.message}`);
     runYtDlpProbe();
   });
-  getPotProbe.setTimeout(45000, () => {
+  getPotProbe.setTimeout(70000, () => {
     getPotProbe.destroy();
-    console.warn('[boot-check] direct /get_pot probe timed out after 45s');
+    console.warn('[boot-check] direct /get_pot probe timed out after 70s');
     runYtDlpProbe();
   });
   getPotProbe.write('{}');
@@ -1044,7 +1060,7 @@ app.get('/api/audio', async (req, res) => {
   }
   // Provider is up, but the boot check hasn't finished yet: its yt-dlp probe is
   // what warms the provider's minter under the SAME cache key real requests
-  // use. A request now could pay the slow cold BotGuard solve (20-45 s on
+  // use. A request now could pay the slow cold BotGuard solve (20-70 s on
   // Render) and hit the plugin's solve timeout — 503 instead.
   const inBootCheckWindow = !potBootCheckDone && Date.now() - SERVER_START < BOOT_WINDOW_MS;
   if (PROVIDER_BUILT && inBootCheckWindow) {

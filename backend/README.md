@@ -63,8 +63,8 @@ YouTube also bot-blocks datacenter IPs at the *IP* level. The bundled
 [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) solves
 YouTube's BotGuard attestation **on the server's own IP** and hands yt-dlp a proof-of-origin
 (PO) token, which is exactly the bypass that works from flagged IPs. It is spawned at boot as
-a local HTTP server on `127.0.0.1:4416`; the plugin's solve timeout is patched to 45 s at
-build time (cold solves on Render take 20–45 s).
+a local HTTP server on `127.0.0.1:4416`; the plugin's solve timeout is patched to 70 s at
+build time (cold solves on Render take 20–70 s).
 
 ### Boot check (self-test)
 
@@ -205,6 +205,11 @@ for this app because the RSS feeds it serves are public content.
 
 ## Reading the logs
 
+- Every HTTP request is logged as **`[req] METHOD /path -> STATUS in Nms`** — including the
+  silent early-return paths (400 bad URL, 401 token mismatch, 503 while the instance is
+  warming up). If the app taps Download and you see **no `[req]` line at all**, the request
+  never reached this service — check the app's Server URL in **Downloads → Server settings**
+  (Test connection) matches the service whose logs you're watching.
 - Boot-check lines are prefixed **`[boot-check]`** so monitoring/alerting can exclude them
   (real request failures are `[yt-dlp]`, `[extract]`, `[cache]`, `[rate-limit]` lines).
   Set `DEBUG_BOOT_CHECK=false` to skip the extraction probes entirely (the provider warmup

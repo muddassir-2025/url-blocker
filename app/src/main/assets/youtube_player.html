@@ -37,10 +37,30 @@
     width: 100vw;
     height: 100vh;
   }
+  /* Loading cover: an opaque black layer ABOVE the player iframe, shown from
+     page load and while any video loads, so YouTube's own grey play-button
+     poster can NEVER flash during Shorts swipes. The app's blurred-thumbnail
+     placeholder draws above the WebView, so when that is up this is just a
+     black backdrop behind it; when a stale event clears the app placeholder
+     early, this cover is the fallback that hides the grey button. It is
+     removed only once the CURRENT video is actually playing (or ready/paused/
+     errored) — see setCover() / isCoverForCurrentVideo(). pointer-events:none
+     so taps fall through to the player. */
+  #loading-cover {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: #000;
+    z-index: 10;
+    pointer-events: none;
+    display: block;
+  }
 </style>
 </head>
 <body>
 <div id="player"></div>
+<div id="loading-cover"></div>
 
 <script>
   // ── JS → Android bridge ─────────────────────────────────────────
@@ -269,6 +289,35 @@
   // never overridden).
   var recentLoadAt = 0;
 
+  // ── Loading cover control ────────────────────────────────────────
+  // Shows/hides the opaque #loading-cover layer. On from page load and while
+  // any video loads; OFF once the CURRENT video actually starts (or is ready
+  // but paused / errored). The getVideoData() guard means a late PLAYING from
+  // a short we already swiped away from can never lift the cover early and
+  // expose the next short's grey play-button poster while it buffers.
+  var coverUp = true;
+  function setCover(up) {
+    if (coverUp === up) return;
+    coverUp = up;
+    var c = document.getElementById('loading-cover');
+    if (c) c.style.display = up ? 'block' : 'none';
+  }
+  // True when the player's current video is the one we asked for (so its
+  // events may lift the cover). When we can't tell (no data yet), assume the
+  // current video so the cover is never stuck over a playing video.
+  function isCoverForCurrentVideo() {
+    try {
+      if (!player || typeof player.getVideoData !== 'function') return true;
+      var d = player.getVideoData();
+      if (!d || !d.video_id) return true;  // can't tell → treat as current
+      if (!pending) return true;           // no requested video → current
+      return d.video_id === pending;       // exact match → current
+    } catch (e) { return true; }
+  }
+  // Monotonic token per loadVideo: a stale safety timer from a previous load
+  // can never lift the cover while a newer load is still in flight.
+  var loadToken = 0;
+
   function onYouTubeIframeAPIReady() {
     apiReady = true;
     if (pending) createPlayer(pending);
@@ -344,13 +393,21 @@
             // new video started muted (autoplay-safe); restore the user's
             // preferred sound state now that playing is guaranteed.
             if (Date.now() - recentLoadAt < 2500) applyPreferredMuted();
+            // Lift the loading cover ONLY for the currently requested video:
+            // a stale PLAYING from the previous short must not expose the
+            // next short's grey play-button poster while it buffers.
+            if (isCoverForCurrentVideo()) setCover(false);
           }
           if (e.data === 2) {
             lastPauseAt = Date.now();
             stopProgressTimer(true); // paused → final position
+            // A pause means the video is READY (autoplay blocked or user
+            // paused) — show it normally instead of the black cover.
+            if (isCoverForCurrentVideo()) setCover(false);
           }
           if (e.data === 0) {
             stopProgressTimer(true); // ended → position == duration (100%)
+            if (isCoverForCurrentVideo()) setCover(false);
           }
           logSizes('STATE=' + e.data);
           notify('onStateChange', e.data);
@@ -360,9 +417,15 @@
           // RAW value BEFORE any mapping/processing — proves on-device where
           // the code actually comes from (YouTube's own event.data).
           console.log('YT_ON_ERROR_RAW value=' + e.data + ' typeof=' + (typeof e.data));
+          setCover(false); // let the app's error card show over real content
           notify('onError', e.data);
         },
-        onAutoplayBlocked: function () { notify('onAutoplayBlocked'); }
+        onAutoplayBlocked: function () {
+          // The video is ready but autoplay was blocked — show it (poster +
+          // play button) instead of the black cover.
+          setCover(false);
+          notify('onAutoplayBlocked');
+        }
       }
     });
   }
@@ -463,6 +526,17 @@
     pending = id;
     pendingResume = (typeof seconds === 'number' && seconds > 0) ? seconds : 0;
     if (typeof muted === 'boolean') preferredMuted = muted;
+    var token = ++loadToken;
+    setCover(true); // cover the grey play-button poster for the new load
+    // Safety net: if this load NEVER reaches PLAYING / PAUSED / ENDED / error
+    // (e.g. an offline live stream that just sits there, or a silent
+    // autoplay block), lift the cover after ~25 s so it can't stay black
+    // forever — the app shows its own timeout card around then anyway. The
+    // token guard means a timer from a load we already swiped away from is a
+    // no-op. A genuine PLAYING/Pause/error always lifts the cover earlier.
+    setTimeout(function () {
+      if (token === loadToken && coverUp) setCover(false);
+    }, 25000);
     if (!apiReady) return;
     if (player && typeof player.loadVideoById === 'function') {
       recentLoadAt = Date.now();
