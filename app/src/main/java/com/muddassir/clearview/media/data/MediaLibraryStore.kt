@@ -5,43 +5,21 @@ import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.util.MediaVideos
 
 /**
- * The user's media library: bookmarks, hidden videos, and manually added
- * videos. All three are persisted as full [MediaVideo] metadata lists in a
- * single SharedPreferences file so bookmarked / hidden / manual videos survive
- * restarts — and bookmarked or manual videos stay available even when they are
- * no longer present in the latest RSS feed.
+ * The user's media library: hidden videos and manually added videos,
+ * persisted as full [MediaVideo] metadata lists in a single SharedPreferences
+ * file so hidden / manual videos survive restarts — and manual videos stay
+ * available even when they are no longer present in the latest RSS feed.
  *
  * Hidden videos also keep their metadata so the management UI can list them
  * for unhiding.
+ *
+ * The old bookmark feature was removed (user playlists replaced it); its
+ * "bookmarks" prefs key is simply never read anymore.
  */
 class MediaLibraryStore(context: Context) {
 
     private val prefs =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    // ── Bookmarks ──────────────────────────────────────────────────
-
-    fun isBookmarked(videoId: String): Boolean =
-        getBookmarkedVideos().any { it.videoId == videoId }
-
-    fun getBookmarkedVideos(): List<MediaVideo> =
-        MediaVideos.decode(prefs.getString(KEY_BOOKMARKS, null))
-
-    /** Toggles the bookmark for [video]; returns the NEW state (true = bookmarked). */
-    fun toggleBookmark(video: MediaVideo): Boolean {
-        val current = getBookmarkedVideos()
-        return if (current.any { it.videoId == video.videoId }) {
-            saveBookmarks(current.filterNot { it.videoId == video.videoId })
-            false
-        } else {
-            saveBookmarks(listOf(video) + current)
-            true
-        }
-    }
-
-    private fun saveBookmarks(videos: List<MediaVideo>) {
-        prefs.edit().putString(KEY_BOOKMARKS, MediaVideos.encode(videos)).apply()
-    }
 
     // ── Hidden videos ──────────────────────────────────────────────
 
@@ -97,7 +75,6 @@ class MediaLibraryStore(context: Context) {
 
     private companion object {
         const val PREFS_NAME = "media_library"
-        const val KEY_BOOKMARKS = "bookmarks"
         const val KEY_HIDDEN = "hidden"
         const val KEY_MANUAL = "manual"
     }

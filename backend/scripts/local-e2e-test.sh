@@ -28,22 +28,41 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-# 4. Wait for the boot check to FINISH (cold solve can take up to ~120s).
-#    End-of-boot markers: the probe A / probe B verdict lines, or the
-#    DEBUG_BOOT_CHECK=false skip line. The early /ping + version lines are NOT
-#    enough — the 503 boot-window gate stays closed until probe A completes.
-echo 'waiting for boot-check verdicts (cold BotGuard solve up to ~120s)...'
+# 4a. Wait for the FIRST probe A verdict (the 503 gate opens right after it).
+#     The early /ping + version lines are NOT enough. Cold solve up to ~120s.
+echo 'waiting for the first probe-A verdict (cold BotGuard solve up to ~120s)...'
 for i in $(seq 1 60); do
-  if grep -qE '\[boot-check\] (PRIMARY|FALLBACK) chain .*extraction|DEBUG_BOOT_CHECK=false|provider GENERATED|provider saw NO token' "$LOG" 2>/dev/null; then
-    echo "boot check finished after ~$((i * 3))s"
+  if grep -qE '\[boot-check\] PRIMARY chain .*extraction|DEBUG_BOOT_CHECK=false' "$LOG" 2>/dev/null; then
+    echo "boot check (gate) finished after ~$((i * 3))s"
     break
   fi
   sleep 3
 done
+
+# 4b. Wait for ALL videos' probe-A verdicts (they run in the background, so
+#     the per-video summary below is complete). Skipped when probes are off.
+if grep -q 'DEBUG_BOOT_CHECK=false' "$LOG" 2>/dev/null; then
+  echo 'probes skipped (DEBUG_BOOT_CHECK=false) — skipping the per-video wait'
+else
+  PROBE_COUNT=$(grep -oE 'probing [0-9]+ video' "$LOG" | grep -oE '[0-9]+' | head -1)
+  PROBE_COUNT=${PROBE_COUNT:-4}
+  echo "waiting for all $PROBE_COUNT probe-A verdicts..."
+  for i in $(seq 1 50); do
+    DONE=$(grep -cE '\[boot-check\] PRIMARY chain .*extraction' "$LOG" 2>/dev/null || echo 0)
+    if [ "${DONE:-0}" -ge "$PROBE_COUNT" ]; then
+      echo "all $PROBE_COUNT probe-A verdicts in after ~$((i * 3))s"
+      break
+    fi
+    sleep 3
+  done
+fi
 sleep 2
 
 echo '=== boot-check / provider lines ==='
-grep -E 'boot-check|PO-token provider|get_pot probe|Generating POT|guest cookiejar|version' "$LOG" | head -20
+grep -E 'boot-check|PO-token provider|get_pot probe|Generating POT|guest cookiejar|version' "$LOG" | head -25
+
+echo '=== per-video probe verdicts ==='
+grep -E 'probing [0-9]+ video|PRIMARY chain .*extraction|FALLBACK mobile chain .*extraction|provider GENERATED|provider saw NO token|output tail' "$LOG"
 
 echo '=== /health ==='
 curl -s -m 5 http://127.0.0.1:3000/health
@@ -57,6 +76,10 @@ grep -i 'x-audio-source\|x-audio-error-code' /tmp/audio_test_headers.txt
 echo '=== /api/audio test 2 (must be a CACHE hit — no extraction) ==='
 curl -s -m 30 'http://127.0.0.1:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DjNQXAC9IVRw' -o /tmp/audio_test2.m4a -D /tmp/audio_test_headers2.txt -w 'HTTP %{http_code} size %{size_download}\n'
 grep -i 'x-audio-source\|x-audio-error-code' /tmp/audio_test_headers2.txt
+
+echo '=== /api/audio test 3 (a REAL video from the RSS feed this app serves) ==='
+time curl -s -m 180 'http://127.0.0.1:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DC_iHHP8LfGk' -o /tmp/audio_feed.m4a -D /tmp/audio_feed_headers.txt -w 'HTTP %{http_code} size %{size_download}\n'
+grep -i 'x-audio-source\|x-audio-error-code' /tmp/audio_feed_headers.txt
 
 echo '=== guest cookiejar (should now contain visitor cookies) ==='
 GUEST_JAR="$(node -e "console.log(require('os').tmpdir() + '/clearview-guest-cookies.txt')")"

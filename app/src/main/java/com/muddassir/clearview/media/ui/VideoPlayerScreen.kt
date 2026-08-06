@@ -32,7 +32,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Forward10
@@ -40,8 +39,10 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
@@ -50,12 +51,12 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -94,6 +95,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muddassir.clearview.R
 import com.muddassir.clearview.media.data.MediaLibraryStore
+import com.muddassir.clearview.media.data.UserPlaylistStore
 import com.muddassir.clearview.media.data.VideoProgress
 import com.muddassir.clearview.media.data.WatchProgressStore
 import com.muddassir.clearview.media.download.AudioDownloads
@@ -118,10 +120,11 @@ import kotlinx.coroutines.withContext
  * code) when playback fails, and a gentle hint when autoplay was blocked.
  *
  * Portrait shows a dedicated control panel BELOW the video (title, Continue
- * Watching / Watch Again, Copy, Share, Speed, Bookmark, Hide, Mark as
- * watched) — the video itself stays uncluttered. Vertical fullscreen is a
- * Shorts-style viewer: swipe up/down to navigate the [shortsQueue] (when it
- * has more than one item), exit via the on-screen button or back.
+ * Watching / Watch Again, Share, Speed, Add to playlist, Hide, Mark as
+ * watched, Download audio) — the video itself stays uncluttered. Vertical
+ * fullscreen is a Shorts-style viewer: swipe up/down to navigate the
+ * [shortsQueue] (when it has more than one item), exit via the on-screen
+ * button or back.
  */
 @Composable
 fun VideoPlayerScreen(
@@ -301,9 +304,15 @@ fun VideoPlayerScreen(
         playerPrefs.edit().putFloat(KEY_PLAYBACK_RATE, rate.toFloat()).apply()
     }
 
-    // Bookmark state for this video.
-    var isBookmarked by remember(video.videoId) {
-        mutableStateOf(libraryStore.isBookmarked(video.videoId))
+    // User playlists (shared with the Media tab's local library). Re-read
+    // fresh whenever the picker opens — the player is the only screen on top,
+    // so an edit made here is picked up by the Media tab on its next
+    // composition. Playlists replaced the old Bookmark feature.
+    val userPlaylistStore = remember { UserPlaylistStore(context.applicationContext) }
+    var showPlaylistPicker by remember { mutableStateOf(false) }
+    var showCreatePlaylistDialog by remember { mutableStateOf(false) }
+    val playerPlaylists = remember(showPlaylistPicker) {
+        if (showPlaylistPicker) userPlaylistStore.getPlaylists() else emptyList()
     }
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showHideConfirm by remember { mutableStateOf(false) }
@@ -772,7 +781,6 @@ fun VideoPlayerScreen(
                 isWatched = isWatched,
                 hasPartialProgress = hasPartialProgress,
                 playbackRate = playbackRate,
-                isBookmarked = isBookmarked,
                 showSpeedMenu = showSpeedMenu,
                 downloadStatus = downloadStatus,
                 isOffline = isOffline,
@@ -784,20 +792,21 @@ fun VideoPlayerScreen(
                     AudioDownloads.delete(video.videoId)
                     Toast.makeText(context, "Download deleted", Toast.LENGTH_SHORT).show()
                 },
+                onDownloadMenuAction = {
+                    if (downloadStatus is DownloadStatus.Preparing ||
+                        downloadStatus is DownloadStatus.Downloading
+                    ) {
+                        AudioDownloads.cancel(video.videoId)
+                    } else {
+                        AudioDownloads.download(video, AudioDownloads.sourceFor(video))
+                    }
+                },
+                onAddToPlaylist = { showPlaylistPicker = true },
                 onSpeedMenuToggle = { showSpeedMenu = !showSpeedMenu },
                 onSpeedSelect = { setPlaybackRate(it); showSpeedMenu = false },
                 onContinue = { requestSeek(resumeFromSeconds) },
                 onWatchAgain = { requestSeek(0.0) },
                 onShare = { shareVideo() },
-                onToggleBookmark = {
-                    val nowBookmarked = libraryStore.toggleBookmark(video)
-                    isBookmarked = nowBookmarked
-                    Toast.makeText(
-                        context,
-                        if (nowBookmarked) "Bookmarked" else "Bookmark removed",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                },
                 onHide = { showHideConfirm = true },
                 onMarkWatched = {
                     progressStore.set(video.videoId, 1f)
@@ -827,13 +836,51 @@ fun VideoPlayerScreen(
             }
         )
     }
+
+    // ── Add to playlist (Playlist button / ⋮ menu) ──────────────────
+    // Reuses the Media tab's picker + name dialog (same package). Adding a
+    // video here is instantly visible in the Media tab's playlist feed.
+    if (showPlaylistPicker) {
+        AddToPlaylistSheet(
+            video = video,
+            playlists = playerPlaylists,
+            onAdd = { playlist ->
+                userPlaylistStore.addVideos(playlist.id, listOf(video))
+                showPlaylistPicker = false
+                Toast.makeText(context, "Added to ${playlist.name}", Toast.LENGTH_SHORT).show()
+            },
+            onCreateNew = {
+                showPlaylistPicker = false
+                showCreatePlaylistDialog = true
+            },
+            onDismiss = { showPlaylistPicker = false }
+        )
+    }
+    if (showCreatePlaylistDialog) {
+        PlaylistNameDialog(
+            initial = "",
+            title = "New playlist",
+            confirmLabel = "Create",
+            onSubmit = { name ->
+                userPlaylistStore.createPlaylist(name, listOf(video))
+                showCreatePlaylistDialog = false
+                Toast.makeText(
+                    context,
+                    "Created \"$name\" with this video",
+                    Toast.LENGTH_SHORT
+                ).show()
+            },
+            onDismiss = { showCreatePlaylistDialog = false }
+        )
+    }
 }
 
 /**
  * The dedicated controls area BELOW the video (portrait): title + channel,
  * the primary Continue Watching / Watch Again action, and a four-button
- * action row (⋮ More with Hide / Mark as watched, Share, Speed, Bookmark).
- * Keeps every secondary action off the video itself.
+ * action row (⋮ More with Add to playlist / Download audio / Hide / Mark as
+ * watched, Share, Speed, Playlist). Keeps every secondary action off the
+ * video itself.
  */
 @Composable
 private fun PlayerControlPanel(
@@ -843,19 +890,20 @@ private fun PlayerControlPanel(
     isWatched: Boolean,
     hasPartialProgress: Boolean,
     playbackRate: Double,
-    isBookmarked: Boolean,
     showSpeedMenu: Boolean,
     downloadStatus: DownloadStatus?,
     isOffline: Boolean,
     onDownloadAudio: () -> Unit,
     onPlayOffline: () -> Unit,
     onDeleteDownload: () -> Unit,
+    /** ⋮ menu download entry: cancel while active, else start/retry. */
+    onDownloadMenuAction: () -> Unit,
+    onAddToPlaylist: () -> Unit,
     onSpeedMenuToggle: () -> Unit,
     onSpeedSelect: (Double) -> Unit,
     onContinue: () -> Unit,
     onWatchAgain: () -> Unit,
     onShare: () -> Unit,
-    onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
     onMarkWatched: () -> Unit
 ) {
@@ -954,12 +1002,32 @@ private fun PlayerControlPanel(
                     expanded = showMoreMenu,
                     onDismissRequest = { showMoreMenu = false }
                 ) {
+                    DropdownMenuItem(
+                        text = { Text("Add to playlist…") },
+                        onClick = {
+                            showMoreMenu = false
+                            onAddToPlaylist()
+                        }
+                    )
                     if (isOffline) {
                         DropdownMenuItem(
                             text = { Text("Delete download") },
                             onClick = {
                                 showMoreMenu = false
                                 onDeleteDownload()
+                            }
+                        )
+                    }
+                    // Audio download with its stateful label, mirroring the feed
+                    // cards' ⋮ menu (Download audio / Cancel / Retry). Hidden once
+                    // offline (Play Offline owns that state) and for live streams
+                    // (they can't be downloaded).
+                    if (!isOffline && !isLive) {
+                        DropdownMenuItem(
+                            text = { Text(downloadMenuLabel(downloadStatus, false)) },
+                            onClick = {
+                                showMoreMenu = false
+                                onDownloadMenuAction()
                             }
                         )
                     }
@@ -1013,12 +1081,9 @@ private fun PlayerControlPanel(
                 }
             }
             PanelAction(
-                icon = if (isBookmarked) Icons.Filled.Bookmark
-                else Icons.Outlined.BookmarkBorder,
-                label = if (isBookmarked) "Bookmarked" else "Bookmark",
-                onClick = onToggleBookmark,
-                tint = if (isBookmarked) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
+                icon = Icons.Filled.PlaylistAdd,
+                label = "Playlist",
+                onClick = onAddToPlaylist,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -1029,12 +1094,12 @@ private fun PlayerControlPanel(
         if (!isLive) {
             Spacer(Modifier.height(10.dp))
             when {
-                isOffline -> OutlinedButton(
+                isOffline -> FilledTonalButton(
                     onClick = onPlayOffline,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(
-                        Icons.Filled.PlayArrow,
+                        Icons.Filled.MusicNote,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
@@ -1102,7 +1167,9 @@ private fun PlayerControlPanel(
                         maxLines = 2
                     )
                 }
-                else -> Button(
+                // Tonal (not primary-filled like Continue Watching) so the audio
+                // action reads as a separate, secondary step.
+                else -> FilledTonalButton(
                     onClick = onDownloadAudio,
                     modifier = Modifier.fillMaxWidth()
                 ) {

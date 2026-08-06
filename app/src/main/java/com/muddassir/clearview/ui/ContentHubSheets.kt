@@ -383,7 +383,14 @@ fun QuranSearchScreen(state: ContentHubState, onDismiss: () -> Unit) {
                         value = query,
                         onValueChange = { query = it },
                         modifier = Modifier.weight(1f).focusRequester(focusRequester),
-                        placeholder = { Text(stringResource(R.string.quran_search_hint)) },
+                        placeholder = {
+                            Text(
+                                stringResource(
+                                    if (mode == QuranSearchMode.SURAH) R.string.quran_search_hint_surah
+                                    else R.string.quran_search_hint
+                                )
+                            )
+                        },
                         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                         trailingIcon = {
                             if (query.isNotBlank()) {
@@ -424,6 +431,7 @@ fun QuranSearchScreen(state: ContentHubState, onDismiss: () -> Unit) {
                 when (mode) {
                     QuranSearchMode.SURAH -> SurahBrowseList(
                         state = state,
+                        query = query,
                         onOpenVerse = {
                             state.goToVerse(it)
                             onDismiss()
@@ -514,19 +522,52 @@ fun QuranSearchScreen(state: ContentHubState, onDismiss: () -> Unit) {
 }
 
 /**
- * All 114 surahs with number + transliterated name + translation; tapping one
- * opens its first verse (via the reference search, so it also enriches the
- * Arabic text). The names come from [QuranJsonParser] — pure, no network — so
- * the list renders immediately; only the jump needs the translation cache.
+ * All 114 surahs with number + transliterated name + translation, filtered
+ * live by the shared search field ([query]); tapping one opens its first
+ * verse (via the reference search, so it also enriches the Arabic text). The
+ * names come from [QuranJsonParser] — pure, no network — so the list renders
+ * and filters immediately; only the jump needs the translation cache.
  */
 @Composable
 private fun SurahBrowseList(
     state: ContentHubState,
+    query: String,
     onOpenVerse: (QuranVerse) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val surahs = remember { (1..114).toList() }
+
+    // Filter the 114 surahs by the shared search field: a blank query shows
+    // all of them; a pure number matches the surah number exactly ("2" →
+    // Surah 2); anything else is a case-insensitive substring match on the
+    // transliterated name or the English translation (e.g. "baqara", "cow",
+    // "ya"). All from [QuranJsonParser] — pure local data, so filtering is
+    // instant with no I/O.
+    val q = query.trim()
+    val surahs = remember(q) {
+        if (q.isEmpty()) {
+            (1..114).toList()
+        } else {
+            val lower = q.lowercase()
+            val numeric = q.all { it.isDigit() }
+            (1..114).filter { number ->
+                (numeric && number.toString() == q) ||
+                    QuranJsonParser.surahName(number).lowercase().contains(lower) ||
+                    QuranJsonParser.surahTranslation(number).lowercase().contains(lower)
+            }
+        }
+    }
+
+    if (surahs.isEmpty()) {
+        Text(
+            text = stringResource(R.string.quran_surah_no_matches),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 24.dp)
+        )
+        return
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)

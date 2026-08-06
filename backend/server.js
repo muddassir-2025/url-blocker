@@ -203,16 +203,18 @@ const SERVER_START = Date.now();
 const STARTUP_WINDOW_MS = 180 * 1000;
 const RESTART_WINDOW_MS = 60 * 1000;
 // Boot check runs AFTER the provider is ready: direct /get_pot probe (cold
-// solve, up to 45 s) + yt-dlp probe (up to 60 s). Until it finishes, the
-// provider may not yet have a warm minter under the key real requests use, so
+// solve, up to 45 s) + yt-dlp probes across every BOOT_CHECK_VIDEOS entry
+// (probe A up to 60 s each, then probe B). Until the FIRST probe A finishes
+// (which warms the provider's minter + guest jar under the real keys),
 // requests are 503-gated for this window too (time-capped like the others).
 // NOTE: the plugin's solve timeout is patched to 45 s at build time
 // (scripts/fetch-pot-provider.js), which is what makes 20-45 s cold solves
 // survivable for real yt-dlp requests.
-// Two sequential yt-dlp probes (primary mweb,web+PO, then mobile fallback)
-// after the /get_pot probe: worst case ≈ 90 s ready-wait + 45 s /get_pot +
-// 60 s + 60 s probes ≈ 255 s, so the gate stays aligned at ~280 s. It
-// self-opens regardless (time cap), and the probes are skipped entirely when
+// Worst case to the gate opening ≈ 90 s ready-wait + 45 s /get_pot + 120 s
+// first probe A ≈ 255 s, so 280 s keeps the gate aligned. The remaining
+// videos' probes run in the BACKGROUND after the gate opens (throwaway jars —
+// never racing real requests on the shared guest jar). The gate self-opens
+// regardless (time cap), and the probes are skipped entirely when
 // DEBUG_BOOT_CHECK=false (the /get_pot warmup always runs).
 const BOOT_WINDOW_MS = 280 * 1000;
 let potEverReady = false;
@@ -328,14 +330,16 @@ function waitForPotReady(maxMs) {
   });
 }
 
-// Boot-time self-check: run one real extraction with the plugin and confirm
-// yt-dlp sees the bgutil PO-token provider (its verbose output lists it). This
-// makes a wiring regression visible in the logs instead of silent bot-check 500s.
-// IMPORTANT: it only runs AFTER the provider is actually listening — earlier
-// deploys probed too early and logged bogus ECONNREFUSED verdicts.
+// Boot-time self-check: run real extractions (one per BOOT_CHECK_VIDEOS entry)
+// with the plugin and confirm yt-dlp sees the bgutil PO-token provider (its
+// verbose output lists it). This makes a wiring regression visible in the logs
+// instead of silent bot-check 500s. IMPORTANT: it only runs AFTER the provider
+// is actually listening — earlier deploys probed too early and logged bogus
+// ECONNREFUSED verdicts.
 function verifyPotWiring() {
   const { execFile } = require('child_process');
-  const probeUrl = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
+  // Probe video set lives in runYtDlpProbe (BOOT_CHECK_VIDEOS override + the
+  // default canary/ordinary/real-feed mix) — see below.
 
   // 1) Exact yt-dlp version — version drift between the local binary and the
   //    build-cached binary on Render has caused silent PO-token differences
@@ -434,19 +438,22 @@ function verifyPotWiring() {
   getPotProbe.write('{}');
   getPotProbe.end();
 
-  // 4) Two yt-dlp extraction probes, run SEQUENTIALLY after the /get_pot probe
-  //    above (runYtDlpProbe) so they benefit from its warm minter and the
-  //    potActivity delta is unambiguous. Both use the EXACT same arguments as
-  //    real requests — INCLUDING the guest cookiejar (the old boot check ran
-  //    with no --cookies at all, which is precisely why it got bot-checked
-  //    while real requests were fine) — and both are gated behind
-  //    DEBUG_BOOT_CHECK so boot-time output is never mistaken for real request
-  //    failures in monitoring.
-  //    Probe A — the PRIMARY chain (mweb,web + PO token + guest session): what
-  //      real requests try first. Also validates the bgutil provider wiring
-  //      end-to-end and WARMS the guest cookiejar for the first real request.
+  // 4) yt-dlp extraction probes, run SEQUENTIALLY after the /get_pot probe
+  //    (runYtDlpProbe) so they benefit from its warm minter and the potActivity
+  //    delta is unambiguous. They probe SEVERAL videos — not just the classic
+  //    jNQXAC9IVRw canary, which is hammered by CI/automation traffic and must
+  //    not be the only signal. The set is BOOT_CHECK_VIDEOS (comma-separated
+  //    URLs or bare 11-char ids; defaults below) and every probe is gated
+  //    behind DEBUG_BOOT_CHECK so boot-time output is never mistaken for real
+  //    request failures in monitoring.
+  //    Probe A — the PRIMARY chain (CLIENT_LIST + PO token + guest session):
+  //      exactly what real requests use. The FIRST video's probe A also WARMS
+  //      the real guest cookiejar and the provider's minter, and opens the 503
+  //      gate when it finishes.
   //    Probe B — the FALLBACK mobile chain (direct signed URLs, no PO token):
-  //      proves the fallback still works even if the provider is unhappy.
+  //      proves the fallback still works even if the provider is unhappy. Runs
+  //      with -v and ALWAYS dumps its output tail on failure, so a broken
+  //      fallback is diagnosable from the log alone.
   function runYtDlpProbe() {
     if (ytDlpProbeStarted) return;
     ytDlpProbeStarted = true;
@@ -456,129 +463,209 @@ function verifyPotWiring() {
       return;
     }
 
-    // ---- Probe A: PRIMARY chain (guest cookiejar + CLIENT_LIST + PO token) ----
-    // Uses cookiesPath (the guest jar by default, legacy account cookies if
-    // explicitly configured) — exactly what real requests get.
+    const DEFAULT_PROBE_VIDEOS = [
+      'https://www.youtube.com/watch?v=jNQXAC9IVRw', // "Me at the zoo" (classic smoke-test canary)
+      'https://www.youtube.com/watch?v=aqz-KE-bpKQ', // Big Buck Bunny — ordinary public video
+      'https://www.youtube.com/watch?v=C_iHHP8LfGk', // real video from the Madinah feed this app serves
+      'https://www.youtube.com/watch?v=jK6wgG6C4PY', // real video from the Makkah feed this app serves
+    ];
+    const probeItems = (process.env.BOOT_CHECK_VIDEOS || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    const probeVideos = (probeItems.length ? probeItems : DEFAULT_PROBE_VIDEOS)
+      .map((item) => (/^[A-Za-z0-9_-]{11}$/.test(item)
+        ? `https://www.youtube.com/watch?v=${item}` : item));
     console.log(
-      `[boot-check] probe A (PRIMARY ${CLIENT_LIST}+PO chain): ${BIN_PATH} --cookies ${cookiesPath} --plugin-dirs ${PLUGINS_DIR} --no-warnings --no-check-certificates --no-update --socket-timeout 20 ` +
-      `--extractor-args "youtube:player_client=${CLIENT_LIST};fetch_pot=always" --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}" --print title -v ${probeUrl}`
+      `[boot-check] probing ${probeVideos.length} video(s) with both chains` +
+      (probeItems.length ? ' (BOOT_CHECK_VIDEOS override)' : ' (default set)') + ':'
     );
-    const before = potActivity;
-    execFile(
-      BIN_PATH,
-      [
-        '--cookies', cookiesPath,
-        '--plugin-dirs', PLUGINS_DIR,
-        '--no-warnings', '--no-check-certificates', '--no-update',
-        '--socket-timeout', '20',
-        // IMPORTANT: keep the plugin base_url in its OWN flag (different
-        // extractor key: youtubepot-bgutilhttp:). player_client + fetch_pot must
-        // share the youtube: flag (joined with ';') — a separate second
-        // `youtube:` flag would silently override player_client (only the last
-        // flag per extractor key survives), and a single flag mixing
-        // "youtube:...;youtubepot-bgutilhttp:..." swallows the base_url
-        // (yt-dlp parses ';' within one extractor key only; verified against
-        // yt-dlp 2026.07.04 + plugin 1.3.1).
-        '--extractor-args', `youtube:player_client=${CLIENT_LIST};fetch_pot=always`,
-        '--extractor-args', `youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
-        '--print', 'title',
-        '-v',
-        probeUrl,
-      ],
-      { timeout: 60000, encoding: 'utf8' },
-      (errA, stdoutA, stderrA) => {
-        // Probe A is the one that WARMS the provider's minter under the real
-        // cache key — open the 503 gate as soon as it finishes (probe B is
-        // purely informational). Set first so a stray exception below can
-        // never leave the gate closed past its time cap.
-        potBootCheckDone = true;
-        const outA = `${stdoutA || ''}\n${stderrA || ''}`;
-        const titleA = String(stdoutA || '').trim();
-        const potLines = potActivity - before;
-        const httpProviderUsed = /\[pot:bgutil:http\]\s+Generating a .*PO Token for/.test(outA);
-        const tokenRetrieved = /Retrieved a .*PO Token/.test(outA);
-        if (!errA && titleA) {
-          console.log(`[boot-check] PRIMARY chain (${CLIENT_LIST}+PO, guest session) extraction OK — "${titleA.slice(0, 60)}"`);
-        } else {
-          console.warn(
-            `[boot-check] PRIMARY chain extraction FAILED (${String((errA && errA.message) || 'no title').slice(0, 120)}) — real requests will fall back to the mobile chain`
-          );
-        }
-        // PO-pipeline verdict (the provider is only used by probe A). The
-        // script-node / script-deno "Script path doesn't exist" lines are
-        // EXPECTED noise from yt-dlp's availability checks and appear even in
-        // fully working runs — they do NOT mean the HTTP provider was skipped.
-        if (httpProviderUsed) {
-          console.log('[boot-check] bgutil HTTP provider WAS USED to generate PO tokens');
-        } else if (/bgutil:http/.test(outA)) {
-          // NB: the plugin's registration line ("PO Token Providers: bgutil:http-1.3.1
-          // (external), ...") always contains bgutil:http, so this branch means the
-          // plugin loaded but no token generation was observed — not that it was skipped.
-          console.warn('[boot-check] bgutil HTTP provider loaded but NO token generation was observed during probe A');
-        } else {
-          console.warn('[boot-check] bgutil NOT detected in yt-dlp verbose output — PO tokens will not be attached');
-        }
-        console.log(
-          potLines > 0
-            ? `[boot-check] provider GENERATED ${potLines} token generation(s) during probe A — PO pipeline works end-to-end`
-            : '[boot-check] provider saw NO token request during probe A — the plugin did not reach it (or the token was served from the provider cache)'
-        );
-        if (tokenRetrieved) {
-          console.log('[boot-check] yt-dlp RETRIEVED at least one PO token from the provider');
-        }
-        if (errA && !tokenRetrieved) {
-          console.warn(`[boot-check] probe A extraction failed (${String((errA && errA.message) || errA).slice(0, 120)})`);
-        }
-        // When probe A did NOT use the HTTP provider, dump its verbose output
-        // tail — the decisive evidence for WHY (e.g. HTTP 403 on the webpage,
-        // plugin "Error reaching GET .../ping", "failed to get token", or a
-        // "Sign in to confirm you're not a bot" page from the datacenter IP).
-        if (!httpProviderUsed || errA) {
-          const probeLines = String(outA).trim().split(/\r?\n/).filter(Boolean);
-          console.log(`[boot-check] probe A output tail (last ${Math.min(15, probeLines.length)} of ${probeLines.length} lines):`);
-          for (const line of probeLines.slice(-15)) {
-            console.log(`[boot-check]   | ${line.slice(0, 220)}`);
-          }
-        }
-        runMobileProbe();
-      }
-    );
+    for (const u of probeVideos) console.log(`[boot-check]   - ${u}`);
 
-    // ---- Probe B: FALLBACK mobile chain (direct URLs, no PO token) ----
-    function runMobileProbe() {
-      // Throwaway cookiejar of its own: probe B only VALIDATES the mobile chain
-      // (probe A already warmed the real guest jar), and since the gate opens
-      // after probe A, its yt-dlp run must never race real requests writing
-      // the shared jar.
-      const probeBPath = path.join(require('os').tmpdir(), 'clearview-probe-b-cookies.txt');
+    // Throwaway cookiejar for probes that must never touch the shared guest
+    // jar: probe A for videos 2+ and every probe B run happen AFTER the 503
+    // gate opens, when real requests could be writing the shared jar — a
+    // concurrent read/modify/write would race it. These jars start empty and
+    // yt-dlp populates them exactly like the guest jar (still no login).
+    const throwawayJar = (name) => {
+      const p = path.join(require('os').tmpdir(), `clearview-${name}-cookies.txt`);
       try {
-        if (!fs.existsSync(probeBPath)) fs.writeFileSync(probeBPath, '# Netscape HTTP Cookie File\n');
+        if (!fs.existsSync(p)) fs.writeFileSync(p, '# Netscape HTTP Cookie File\n');
       } catch (_) { /* best effort */ }
-      const MOBILE_ARGS = 'youtube:player_client=android_vr,android,ios,web_safari,web_music';
-      console.log(`[boot-check] probe B (FALLBACK mobile chain): ${BIN_PATH} --cookies ${probeBPath} --no-warnings --no-check-certificates --no-update --socket-timeout 20 --extractor-args "${MOBILE_ARGS}" --print title ${probeUrl}`);
+      return p;
+    };
+    const label = (url) =>
+      `video #${probeVideos.indexOf(url) + 1} (${videoIdFromUrl(url) || url})`;
+    // Parses a probe's --print '%(id)s|%(title)s' stdout into the printed id,
+    // the title (may be blank on some platforms for non-ASCII text), and a
+    // success flag keyed on the id — ASCII and encoding-proof.
+    const parseProbePrint = (stdout, url) => {
+      const printed = String(stdout || '').trim();
+      const id = printed.split('|')[0].trim();
+      const title = printed.split('|').slice(1).join('|').trim();
+      const expected = videoIdFromUrl(url);
+      return { id, title, ok: id.length > 0 && id === (expected || id) };
+    };
+    const MOBILE_ARGS = 'youtube:player_client=android_vr,android,ios,web_safari,web_music';
+    let probeIndex = 0;
+
+    // ---- Probe A: PRIMARY chain (guest cookiejar + CLIENT_LIST + PO token) ----
+    // The FIRST video's probe A uses the REAL guest jar (the gate is still
+    // closed, so no real request can race it) — this is what warms the guest
+    // session for the first real request. Videos 2+ use throwaway jars. Every
+    // run passes the exact same args as real requests: guest jar + CLIENT_LIST
+    // + fetch_pot=always + the POT plugin.
+    function runProbeA(url) {
+      const isFirst = probeIndex === 0;
+      const jar = isFirst ? GUEST_COOKIES_PATH : throwawayJar('probe-a');
+      const tag = label(url);
+      console.log(
+        `[boot-check] probe A (PRIMARY ${CLIENT_LIST}+PO chain) ${tag}: ${BIN_PATH} --cookies ${jar} --plugin-dirs ${PLUGINS_DIR} --no-warnings --no-check-certificates --no-update --socket-timeout 20 ` +
+        `--extractor-args "youtube:player_client=${CLIENT_LIST};fetch_pot=always" --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}" --print "%(id)s|%(title)s" -v ${url}`
+      );
+      const before = potActivity;
       execFile(
         BIN_PATH,
         [
-          '--cookies', probeBPath,
+          '--cookies', jar,
+          '--plugin-dirs', PLUGINS_DIR,
           '--no-warnings', '--no-check-certificates', '--no-update',
           '--socket-timeout', '20',
-          '--extractor-args', MOBILE_ARGS,
-          '--print', 'title',
-          probeUrl,
+          // IMPORTANT: keep the plugin base_url in its OWN flag (different
+          // extractor key: youtubepot-bgutilhttp:). player_client + fetch_pot must
+          // share the youtube: flag (joined with ';') — a separate second
+          // `youtube:` flag would silently override player_client (only the last
+          // flag per extractor key survives), and a single flag mixing
+          // "youtube:...;youtubepot-bgutilhttp:..." swallows the base_url
+          // (yt-dlp parses ';' within one extractor key only; verified against
+          // yt-dlp 2026.07.04 + plugin 1.3.1).
+          '--extractor-args', `youtube:player_client=${CLIENT_LIST};fetch_pot=always`,
+          '--extractor-args', `youtubepot-bgutilhttp:base_url=http://127.0.0.1:${POT_PORT}`,
+          '--print', '%(id)s|%(title)s',
+          '-v',
+          url,
         ],
-        { timeout: 60000, encoding: 'utf8' },
-        (errB, stdoutB) => {
-          // Idempotent with probe A — belt and braces.
-          potBootCheckDone = true;
-          const titleB = String(stdoutB || '').trim();
-          if (!errB && titleB) {
-            console.log(`[boot-check] FALLBACK mobile chain extraction OK — "${titleB.slice(0, 60)}" (direct URLs, no PO token needed)`);
+        // 120 s (not 60): probes 2+ run concurrently with real requests, which
+        // slows YouTube enough that 60 s could kill a working extraction.
+        // PYTHONUNBUFFERED flushes the --print output to the pipe immediately,
+        // so even a timeout-killed probe still reports the id it extracted.
+        { timeout: 120000, encoding: 'utf8', env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' } },
+        (errA, stdoutA, stderrA) => {
+          // The FIRST probe A is what WARMS the provider's minter under the
+          // real cache key — open the 503 gate as soon as it finishes (probe B
+          // and the later videos are purely informational). Set first so a
+          // stray exception below can never leave the gate closed past its cap.
+          if (isFirst) potBootCheckDone = true;
+          const outA = `${stdoutA || ''}\n${stderrA || ''}`;
+          // Success signal = the printed video ID: ASCII and encoding-proof.
+          // Non-ASCII titles can print as blank/spaces on some platforms (a
+          // local-Windows quirk — the title field itself is fine), so the
+          // verdict must NOT depend on the title text.
+          const probePrint = parseProbePrint(stdoutA, url);
+          const extractedId = probePrint.id;
+          const titleA = probePrint.title;
+          const okA = !errA && probePrint.ok;
+          const potLines = potActivity - before;
+          const httpProviderUsed = /\[pot:bgutil:http\]\s+Generating a .*PO Token for/.test(outA);
+          const tokenRetrieved = /Retrieved a .*PO Token/.test(outA);
+          if (okA) {
+            console.log(`[boot-check] PRIMARY chain (${CLIENT_LIST}+PO, guest session) extraction OK — "${(titleA || extractedId).slice(0, 60)}" (${tag})`);
           } else {
-            console.warn(`[boot-check] FALLBACK mobile chain extraction FAILED (${String((errB && errB.message) || 'no title').slice(0, 120)})`);
+            console.warn(
+              `[boot-check] PRIMARY chain extraction FAILED (${String((errA && errA.message) || 'no id extracted').slice(0, 120)}) — ${tag}; real requests will fall back to the mobile chain`
+            );
           }
+          // PO-pipeline verdict (the provider is only used by probe A). The
+          // script-node / script-deno "Script path doesn't exist" lines are
+          // EXPECTED noise from yt-dlp's availability checks and appear even in
+          // fully working runs — they do NOT mean the HTTP provider was skipped.
+          if (httpProviderUsed) {
+            console.log(`[boot-check] ${tag}: bgutil HTTP provider WAS USED to generate PO tokens`);
+          } else if (/bgutil:http/.test(outA)) {
+            // NB: the plugin's registration line ("PO Token Providers: bgutil:http-1.3.1
+            // (external), ...") always contains bgutil:http, so this branch means the
+            // plugin loaded but no token generation was observed — not that it was skipped.
+            console.warn(`[boot-check] ${tag}: bgutil HTTP provider loaded but NO token generation was observed`);
+          } else {
+            console.warn(`[boot-check] ${tag}: bgutil NOT detected in yt-dlp verbose output — PO tokens will not be attached`);
+          }
+          console.log(
+            potLines > 0
+              ? `[boot-check] ${tag}: provider GENERATED ${potLines} token generation(s) during probe A — PO pipeline works end-to-end`
+              : `[boot-check] ${tag}: provider saw NO token request during probe A — the plugin did not reach it (or the token was served from the provider cache)`
+          );
+          if (tokenRetrieved) {
+            console.log(`[boot-check] ${tag}: yt-dlp RETRIEVED at least one PO token from the provider`);
+          }
+          // Dump the verbose output tail whenever the verdict was NOT ok (or
+          // the provider was not actually used) — the decisive evidence for
+          // WHY (e.g. HTTP 403 on the webpage, plugin "Error reaching GET
+          // .../ping", "failed to get token", or a "Sign in to confirm you're
+          // not a bot" page). The condition is on the VERDICT, not on errA:
+          // an exit-0-with-no-id probe used to log "FAILED" with no evidence.
+          if (!okA || !httpProviderUsed) {
+            const probeLines = String(outA).trim().split(/\r?\n/).filter(Boolean);
+            console.log(`[boot-check] ${tag} probe A output tail (last ${Math.min(15, probeLines.length)} of ${probeLines.length} lines):`);
+            for (const line of probeLines.slice(-15)) {
+              console.log(`[boot-check]   | ${line.slice(0, 220)}`);
+            }
+          }
+          runProbeB(url);
         }
       );
     }
+
+    // ---- Probe B: FALLBACK mobile chain (direct URLs, no PO token) ----
+    // Throwaway jar of its own (the gate is open by now), -v, and the output
+    // tail is ALWAYS dumped on failure — the old code logged only the error
+    // message and cut off with no detail.
+    function runProbeB(url) {
+      const jar = throwawayJar('probe-b');
+      const tag = label(url);
+      console.log(
+        `[boot-check] probe B (FALLBACK mobile chain) ${tag}: ${BIN_PATH} --cookies ${jar} --no-warnings --no-check-certificates --no-update --socket-timeout 20 --extractor-args "${MOBILE_ARGS}" --print "%(id)s|%(title)s" -v ${url}`
+      );
+      execFile(
+        BIN_PATH,
+        [
+          '--cookies', jar,
+          '--no-warnings', '--no-check-certificates', '--no-update',
+          '--socket-timeout', '20',
+          '--extractor-args', MOBILE_ARGS,
+          '--print', '%(id)s|%(title)s',
+          '-v',
+          url,
+        ],
+        // Same robustness as probe A: 120 s + unbuffered stdout (id survives
+        // a timeout kill) + encoding forced to UTF-8.
+        { timeout: 120000, encoding: 'utf8', env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' } },
+        (errB, stdoutB, stderrB) => {
+          // Idempotent with probe A — belt and braces.
+          potBootCheckDone = true;
+          const outB = `${stdoutB || ''}\n${stderrB || ''}`;
+          // Same id-based success signal as probe A (ASCII, encoding-proof).
+          const probePrint = parseProbePrint(stdoutB, url);
+          const extractedId = probePrint.id;
+          const titleB = probePrint.title;
+          const okB = !errB && probePrint.ok;
+          if (okB) {
+            console.log(`[boot-check] FALLBACK mobile chain extraction OK — "${(titleB || extractedId).slice(0, 60)}" (${tag}, direct URLs, no PO token needed)`);
+          } else {
+            console.warn(`[boot-check] FALLBACK mobile chain extraction FAILED (${String((errB && errB.message) || 'no id extracted').slice(0, 120)}) — ${tag}`);
+            // ALWAYS dump the output tail on failure (the old code logged only
+            // the message and cut off with no detail) — including the
+            // exit-0-no-id case, where the tail is the only evidence.
+            const probeLines = String(outB).trim().split(/\r?\n/).filter(Boolean);
+            console.log(`[boot-check] ${tag} probe B output tail (last ${Math.min(15, probeLines.length)} of ${probeLines.length} lines):`);
+            for (const line of probeLines.slice(-15)) {
+              console.log(`[boot-check]   | ${line.slice(0, 220)}`);
+            }
+          }
+          probeIndex++;
+          if (probeIndex < probeVideos.length) runProbeA(probeVideos[probeIndex]);
+        }
+      );
+    }
+
+    runProbeA(probeVideos[0]);
   }
 }
 
@@ -596,21 +683,19 @@ async function runBootCheck() {
 runBootCheck();
 
 // ── YouTube session identity ─────────────────────────────────────────────
-// DEFAULT: the anonymous guest cookiejar (GUEST_COOKIES_PATH above). yt-dlp
-// is ALWAYS passed --cookies <path> — an empty jar it creates and reuses — so
-// YouTube's own visitor markers persist between calls. This is the fix for
-// the old cookie-less pattern: running with NO --cookies at all made every
-// request look like a brand-new client and is exactly what drew the
-// "Sign in to confirm you're not a bot" check.
+// The ANONYMOUS GUEST SESSION is the ONLY identity path. yt-dlp is ALWAYS
+// passed --cookies <guest jar> — an empty Netscape jar it creates and reuses —
+// so YouTube's own visitor markers (VISITOR_INFO1_LIVE, …) persist between
+// calls instead of every request looking like a brand-new, unrelated client
+// (which is exactly what drew the "Sign in to confirm you're not a bot" check
+// in the old cookie-less pattern).
 //
-// LEGACY OPT-IN (deprecated): COOKIES_B64 (base64 of a Netscape cookies.txt
-// exported from a signed-in browser) or a cookies.txt next to server.js still
-// work for backward compatibility, but they are ACCOUNT cookies — they
-// expire, need re-exporting, and are NOT required anymore. Prefer removing
-// them and letting the guest session do its job.
-const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
+// Account cookies are RETIRED. Older builds could opt in via COOKIES_B64
+// (base64 of a signed-in browser's cookies.txt) or a cookies.txt next to
+// server.js — those expire, get rotated by YouTube, and were never required.
+// If either is detected it is now IGNORED (a warning is logged) and the guest
+// jar is used; no login cookies ever go in the jar.
 let cookiesPath = GUEST_COOKIES_PATH;
-let legacyAccountCookies = false;
 try {
   // Seed an empty Netscape-format jar so yt-dlp always has a valid file to
   // load and save back to, even before its first extraction.
@@ -618,55 +703,20 @@ try {
     fs.writeFileSync(GUEST_COOKIES_PATH, '# Netscape HTTP Cookie File\n');
   }
   if (process.env.COOKIES_B64) {
-    const tmp = path.join(require('os').tmpdir(), 'clearview-account-cookies.txt');
-    fs.writeFileSync(tmp, Buffer.from(process.env.COOKIES_B64, 'base64').toString('utf8'));
-    try { fs.chmodSync(tmp, 0o600); } catch (_) { /* best effort */ }
-    cookiesPath = tmp;
-    legacyAccountCookies = true;
     console.warn(
-      '[server] DEPRECATED: COOKIES_B64 account cookies configured. The guest-session ' +
-        'cookiejar is the supported no-login path; account cookies are kept only for ' +
-        'backward compatibility (and still pair fine with PO tokens).'
+      '[server] WARNING: COOKIES_B64 is set but account cookies are RETIRED — ignoring it ' +
+        'and using the anonymous guest cookiejar (no login needed). Remove COOKIES_B64.'
     );
-  } else if (fs.existsSync(COOKIES_FILE)) {
-    cookiesPath = COOKIES_FILE;
-    legacyAccountCookies = true;
+  } else if (fs.existsSync(path.join(__dirname, 'cookies.txt'))) {
     console.warn(
-      '[server] DEPRECATED: cookies.txt found. The guest-session cookiejar is the ' +
-        'supported no-login path; account cookies are kept only for backward compatibility.'
+      '[server] WARNING: cookies.txt found but account cookies are RETIRED — ignoring it ' +
+        'and using the anonymous guest cookiejar (no login needed). Delete cookies.txt.'
     );
-  } else {
-    console.log(`[server] using anonymous guest cookiejar at ${GUEST_COOKIES_PATH} (no login needed)`);
   }
+  console.log(`[server] using anonymous guest cookiejar at ${GUEST_COOKIES_PATH} (no login needed)`);
 } catch (e) {
-  console.warn('[server] could not prepare session cookies, using the guest cookiejar:', e.message);
+  console.warn('[server] could not prepare the guest cookiejar:', e.message);
   cookiesPath = GUEST_COOKIES_PATH;
-}
-
-// Diagnostics only for the legacy ACCOUNT cookies (the guest jar is empty by
-// design — a "no signed-in markers" warning there would be meaningless).
-if (legacyAccountCookies) {
-  try {
-    const raw = fs.readFileSync(cookiesPath, 'utf8');
-    const lines = raw.split(/\r?\n/).filter((l) => l && !l.trimStart().startsWith('#'));
-    const names = new Set(
-      lines.map((l) => (l.split('\t')[5] || '').trim()).filter(Boolean)
-    );
-    const markers = ['__Secure-3PSID', '__Secure-1PSID', 'SAPISID', 'LOGIN_INFO'];
-    const present = markers.filter((k) => names.has(k));
-    console.log(
-      `[server] cookies: ${lines.length} entries, signed-in markers: [${present.join(', ') || 'NONE'}]`
-    );
-    if (!present.length) {
-      console.warn(
-        '[server] WARNING: no signed-in cookies found — YouTube may still bot-block ' +
-          'the server. Re-export cookies from a SIGNED-IN YouTube session and update ' +
-          'COOKIES_B64, or remove COOKIES_B64 and rely on the guest session + PO token.'
-      );
-    }
-  } catch (e) {
-    console.warn('[server] could not inspect cookies:', e.message);
-  }
 }
 
 let activeStreams = 0;
@@ -827,13 +877,15 @@ async function extractWithYtDlp(url, videoId) {
       // returning a token (look for "PO Token Providers:", "Getting POT",
       // "Generating POT", and the provider's own [pot] lines in the server log).
       if (idx === 0) {
+        // Set verbose BEFORE building the logged command line so the FULL
+        // COMMAND log actually shows --verbose when it is passed.
+        if (isPoChain) opts.verbose = true;
         try {
           const argv = [url].concat(buildArgs(opts));
           console.log(`[yt-dlp] FULL COMMAND: ${BIN_PATH} ${argv.join(' ')}`);
         } catch (e) {
           console.warn(`[yt-dlp] could not build command line: ${e.message}`);
         }
-        if (isPoChain) opts.verbose = true;
       }
 
       try {
@@ -1120,7 +1172,4 @@ process.on('unhandledRejection', (err) => {
 
 app.listen(PORT, () => {
   console.log(`clearview-audio backend listening on port ${PORT}`);
-  if (fs.existsSync('./cookies.json')) {
-    console.log('cookies.json found — not used automatically; set COOKIES_FILE to enable');
-  }
 });

@@ -1,6 +1,5 @@
 package com.muddassir.clearview.media.data
 
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -10,6 +9,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.muddassir.clearview.LauncherActivity
 import com.muddassir.clearview.R
+import com.muddassir.clearview.media.worker.MediaNotifier
 
 /**
  * Drives the LAUNCHER app-icon badge (the small bubble on the home screen)
@@ -24,12 +24,15 @@ import com.muddassir.clearview.R
  *
  * Fallback: if the reflection call is rejected (OEM ROMs), a single SILENT
  * badge notification is posted instead — it drives the launcher bubble with a
- * count without disturbing the user — and cancelled at count 0.
+ * count without disturbing the user — and cancelled at count 0. It reuses the
+ * app's single "Channel updates" channel ([MediaNotifier.CHANNEL_ID]) with
+ * [NotificationCompat.Builder.setSilent], so no extra channel is ever
+ * registered (a second "Channel updates" entry used to appear in system
+ * notification settings via the old "media_badge" channel).
  */
 object MediaBadge {
 
     private const val TAG = "MediaBadge"
-    private const val BADGE_CHANNEL_ID = "media_badge"
     private const val BADGE_NOTIFICATION_ID = 0xBAD6E
 
     private val badgeCountMethod by lazy {
@@ -59,7 +62,10 @@ object MediaBadge {
         if (c == 0) {
             runCatching { manager.cancel(BADGE_NOTIFICATION_ID) }
         } else {
-            ensureChannel(context, manager)
+            // Single creation path for the "Channel updates" channel — the
+            // badge fallback posts silently on the same channel the update
+            // notifications use, keeping the channel list clean.
+            MediaNotifier.ensureChannel(context)
             val intent = PendingIntent.getActivity(
                 context,
                 0,
@@ -67,7 +73,7 @@ object MediaBadge {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
-            val notification = NotificationCompat.Builder(context, BADGE_CHANNEL_ID)
+            val notification = NotificationCompat.Builder(context, MediaNotifier.CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_widget_copy)
                 .setContentTitle(
                     context.resources.getQuantityString(
@@ -87,21 +93,6 @@ object MediaBadge {
             // never let it crash a background worker over a launcher bubble.
             runCatching { manager.notify(BADGE_NOTIFICATION_ID, notification) }
                 .onFailure { Log.w(TAG, "Badge notification blocked: ${it.message}") }
-        }
-    }
-
-    private fun ensureChannel(context: Context, manager: NotificationManager) {
-        if (manager.getNotificationChannel(BADGE_CHANNEL_ID) == null) {
-            manager.createNotificationChannel(
-                NotificationChannel(
-                    BADGE_CHANNEL_ID,
-                    context.getString(R.string.media_notification_channel),
-                    NotificationManager.IMPORTANCE_MIN
-                ).apply {
-                    description = context.getString(R.string.media_notification_channel_desc)
-                    // IMPORTANCE_MIN channels show badges by default.
-                }
-            )
         }
     }
 }

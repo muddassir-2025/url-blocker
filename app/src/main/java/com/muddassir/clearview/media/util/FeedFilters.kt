@@ -3,7 +3,6 @@ package com.muddassir.clearview.media.util
 import com.muddassir.clearview.media.model.FeedContentFilter
 import com.muddassir.clearview.media.model.FeedDateFilter
 import com.muddassir.clearview.media.model.FeedFilter
-import com.muddassir.clearview.media.model.FeedLibraryFilter
 import com.muddassir.clearview.media.model.FeedSortOrder
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
@@ -29,15 +28,13 @@ const val STARTED_FRACTION_THRESHOLD = 0.02f
  * already-loaded videos are filtered), using [now] as the reference time for
  * the relative date presets. Filtering uses each video's real publication
  * timestamp. [progressOf] reports the watched fraction (0..1, null = never
- * started) and [bookmarkedOf] whether a video is bookmarked — both needed for
- * the watch-status and bookmarked filters.
+ * started) — needed for the watch-status filter.
  */
 fun applyFeedFilter(
     videos: List<MediaVideo>,
     filter: FeedFilter,
     now: Long = System.currentTimeMillis(),
-    progressOf: (String) -> Float? = { null },
-    bookmarkedOf: (String) -> Boolean = { false }
+    progressOf: (String) -> Float? = { null }
 ): List<MediaVideo> {
     val start = when (filter.date) {
         FeedDateFilter.ALL_TIME -> null
@@ -69,9 +66,7 @@ fun applyFeedFilter(
             FeedWatchStatus.PARTIALLY_WATCHED ->
                 p != null && p >= STARTED_FRACTION_THRESHOLD && p < WATCHED_FRACTION_THRESHOLD
         }
-        val libOk =
-            filter.library == FeedLibraryFilter.ALL || bookmarkedOf(v.videoId)
-        afterStart && beforeEnd && typeOk && statusOk && libOk
+        afterStart && beforeEnd && typeOk && statusOk
     }
 
     return when (filter.sort) {
@@ -100,12 +95,10 @@ fun feedFilterSummary(
     val typePart = if (filter.content == FeedContentFilter.ALL) null else filter.content.label
     val statusPart =
         if (filter.watchStatus == FeedWatchStatus.ALL) null else filter.watchStatus.label
-    val libPart = if (filter.library == FeedLibraryFilter.ALL) null else filter.library.label
     return buildString {
         append(datePart)
         typePart?.let { append(" · ").append(it) }
         statusPart?.let { append(" · ").append(it) }
-        libPart?.let { append(" · ").append(it) }
         append(" · ").append(resultCount).append(if (resultCount == 1) " video" else " videos")
     }
 }
@@ -125,7 +118,6 @@ fun encodeFeedFilter(filter: FeedFilter): String =
         .put("content", filter.content.name)
         .put("sort", filter.sort.name)
         .put("watchStatus", filter.watchStatus.name)
-        .put("library", filter.library.name)
         .put("customStart", filter.customStartEpochMillis ?: JSONObject.NULL)
         .put("customEnd", filter.customEndEpochMillis ?: JSONObject.NULL)
         .toString()
@@ -133,7 +125,8 @@ fun encodeFeedFilter(filter: FeedFilter): String =
 /**
  * Decodes a persisted filter; null when the value is missing or corrupt, so
  * callers can fall back to the default [FeedFilter]. Older persisted values
- * without the watch-status / library keys decode to their defaults.
+ * without the watch-status key decode to its default, and the removed
+ * "library" (bookmarks) key is ignored entirely.
  */
 fun decodeFeedFilter(json: String?): FeedFilter? {
     if (json.isNullOrBlank()) return null
@@ -153,15 +146,11 @@ fun decodeFeedFilter(json: String?): FeedFilter? {
         val watchStatus = runCatching {
             FeedWatchStatus.valueOf(o.optString("watchStatus", ""))
         }.getOrNull() ?: FeedWatchStatus.UNWATCHED
-        val library = runCatching {
-            FeedLibraryFilter.valueOf(o.optString("library", ""))
-        }.getOrNull() ?: FeedLibraryFilter.ALL
         FeedFilter(
             date = date,
             content = content,
             sort = sort,
             watchStatus = watchStatus,
-            library = library,
             customStartEpochMillis = if (o.isNull("customStart")) null else o.optLong("customStart", 0L),
             customEndEpochMillis = if (o.isNull("customEnd")) null else o.optLong("customEnd", 0L)
         )

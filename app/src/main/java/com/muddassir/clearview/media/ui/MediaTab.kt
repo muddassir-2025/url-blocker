@@ -45,7 +45,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -55,7 +54,6 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -113,7 +111,6 @@ import com.muddassir.clearview.media.download.DownloadStatus
 import com.muddassir.clearview.media.model.FeedContentFilter
 import com.muddassir.clearview.media.model.FeedDateFilter
 import com.muddassir.clearview.media.model.FeedFilter
-import com.muddassir.clearview.media.model.FeedLibraryFilter
 import com.muddassir.clearview.media.model.FeedSortOrder
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
@@ -162,8 +159,8 @@ fun MediaTab(
     // Offline audio downloads: idempotent init (cheap after the first call);
     // the cards and the Downloads section read the state directly below.
     AudioDownloads.initialize(context.applicationContext)
-    // Bumped whenever the library changes (bookmark / hide / manual add) so
-    // the merged feed and the Continue Watching row recompute.
+    // Bumped whenever the library changes (hide / manual add / playlist edit)
+    // so the merged feed and the Continue Watching row recompute.
     var libraryRevision by remember { mutableIntStateOf(0) }
 
     var channels by remember { mutableStateOf(repository.getSavedChannels()) }
@@ -311,10 +308,9 @@ fun MediaTab(
         playlistLoading = false
     }
 
-    // The feed plus the user's library (bookmarked / manually added videos —
-    // which can be older than the RSS window), merged by id (RSS wins).
-    // Hidden videos are filtered out everywhere EXCEPT the Hidden manager.
-    val bookmarkedVideos = remember(libraryRevision) { libraryStore.getBookmarkedVideos() }
+    // The feed plus the user's library (manually added videos — which can be
+    // older than the RSS window), merged by id (RSS wins). Hidden videos are
+    // filtered out everywhere EXCEPT the Hidden manager.
     val manualVideos = remember(libraryRevision) { libraryStore.getManuallyAddedVideos() }
     val hiddenVideos = remember(libraryRevision) { libraryStore.getHiddenVideos() }
     // Hidden videos are scoped to the current feed context: in a channel feed
@@ -325,8 +321,8 @@ fun MediaTab(
         else hiddenVideos.filter { it.channelId == filterChannelId }
     }
     val hiddenIds = remember(hiddenVideos) { hiddenVideos.map { it.videoId }.toSet() }
-    val mergedVideos = remember(videos, bookmarkedVideos, manualVideos) {
-        MediaVideos.merge(videos, bookmarkedVideos + manualVideos)
+    val mergedVideos = remember(videos, manualVideos) {
+        MediaVideos.merge(videos, manualVideos)
     }
     val visibleVideos = remember(mergedVideos, hiddenIds) {
         mergedVideos.filterNot { it.videoId in hiddenIds }
@@ -363,8 +359,7 @@ fun MediaTab(
         else applyFeedFilter(
             channelVideos,
             feedFilter,
-            progressOf = { progressStore.get(it) },
-            bookmarkedOf = { libraryStore.isBookmarked(it) }
+            progressOf = { progressStore.get(it) }
         )
     }
     // Feed search: matches titles and channel names (case-insensitive) over
@@ -519,7 +514,10 @@ fun MediaTab(
                 filter = feedFilter,
                 resultCount = searchResults.size,
                 hiddenCount = contextHiddenVideos.size,
-                canAddVideo = filterChannelId != null,
+                // "Add video by URL" is available when a channel is selected
+                // OR when viewing one of the user's own playlists (the added
+                // video then lands in that playlist too).
+                canAddVideo = filterChannelId != null || feedIsUserPlaylist,
                 canEditPlaylist = feedIsUserPlaylist,
                 searchActive = searchActive,
                 searchQuery = searchQuery,
@@ -642,7 +640,6 @@ fun MediaTab(
                                     ShortCard(
                                         video = video,
                                         progressStore = progressStore,
-                                        isBookmarked = libraryStore.isBookmarked(video.videoId),
                                         isManual = libraryStore.isManuallyAdded(video.videoId),
                                         downloadStatus = AudioDownloads.statusFor(video.videoId),
                                         isOffline = AudioDownloads.isDownloaded(video.videoId),
@@ -652,10 +649,6 @@ fun MediaTab(
                                         },
                                         onCancelDownload = { AudioDownloads.cancel(video.videoId) },
                                         onDeleteDownload = { AudioDownloads.delete(video.videoId) },
-                                        onToggleBookmark = {
-                                            libraryStore.toggleBookmark(video)
-                                            libraryRevision++
-                                        },
                                         onHide = {
                                             libraryStore.hideVideo(video)
                                             libraryRevision++
@@ -682,7 +675,6 @@ fun MediaTab(
                             LongVideoCard(
                                 video = video,
                                 progressStore = progressStore,
-                                isBookmarked = libraryStore.isBookmarked(video.videoId),
                                 isManual = libraryStore.isManuallyAdded(video.videoId),
                                 downloadStatus = AudioDownloads.statusFor(video.videoId),
                                 isOffline = AudioDownloads.isDownloaded(video.videoId),
@@ -692,10 +684,6 @@ fun MediaTab(
                                 },
                                 onCancelDownload = { AudioDownloads.cancel(video.videoId) },
                                 onDeleteDownload = { AudioDownloads.delete(video.videoId) },
-                                onToggleBookmark = {
-                                    libraryStore.toggleBookmark(video)
-                                    libraryRevision++
-                                },
                                 onHide = {
                                     libraryStore.hideVideo(video)
                                     libraryRevision++
@@ -723,7 +711,6 @@ fun MediaTab(
                             LongVideoCard(
                                 video = video,
                                 progressStore = progressStore,
-                                isBookmarked = libraryStore.isBookmarked(video.videoId),
                                 isManual = libraryStore.isManuallyAdded(video.videoId),
                                 downloadStatus = AudioDownloads.statusFor(video.videoId),
                                 isOffline = AudioDownloads.isDownloaded(video.videoId),
@@ -733,10 +720,6 @@ fun MediaTab(
                                 },
                                 onCancelDownload = { AudioDownloads.cancel(video.videoId) },
                                 onDeleteDownload = { AudioDownloads.delete(video.videoId) },
-                                onToggleBookmark = {
-                                    libraryStore.toggleBookmark(video)
-                                    libraryRevision++
-                                },
                                 onHide = {
                                     libraryStore.hideVideo(video)
                                     libraryRevision++
@@ -745,7 +728,21 @@ fun MediaTab(
                                     libraryStore.removeManuallyAdded(video.videoId)
                                     libraryRevision++
                                 },
-                                onAddToPlaylist = { pendingAddToPlaylist = video }
+                                onAddToPlaylist = { pendingAddToPlaylist = video },
+                                // A video shown in this playlist's feed is by
+                                // definition in it — offer removing it straight
+                                // from the card (the feed updates instantly).
+                                onRemoveFromPlaylist = {
+                                    selectedUserPlaylist?.let { p ->
+                                        userPlaylistStore.removeVideo(p.id, video.videoId)
+                                        saveUserPlaylists()
+                                        Toast.makeText(
+                                            context,
+                                            "Removed from ${p.name}",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
                             )
                         }
                     }
@@ -811,6 +808,16 @@ fun MediaTab(
             repository = repository,
             libraryStore = libraryStore,
             channel = channels.firstOrNull { it.channelId == filterChannelId },
+            // While viewing one of your playlists, a by-URL video also lands
+            // in that playlist — that's the context the menu item appears in.
+            targetLabel = selectedUserPlaylist?.let { "your playlist \"${it.name}\"" },
+            onResolved = { video ->
+                selectedUserPlaylist?.let { p ->
+                    userPlaylistStore.addVideos(p.id, listOf(video))
+                    saveUserPlaylists()
+                    Toast.makeText(context, "Added to ${p.name}", Toast.LENGTH_SHORT).show()
+                }
+            },
             onAdded = { libraryRevision++ },
             onDismiss = { showAddVideoDialog = false }
         )
@@ -866,7 +873,10 @@ fun MediaTab(
                 showPlaylistsSheet = false
                 selectedUserPlaylistId = p.id
                 selectedPlaylistId = null
-                filterChannelId = null
+                // Keep the tab context (All Feed vs the selected channel): the
+                // playlist's Edit → Add videos picker then suggests the videos
+                // of whichever tab you opened the playlist from. Closing the
+                // playlist (✕) also lands you right back on that tab.
             },
             onCreate = {
                 showPlaylistsSheet = false
@@ -937,9 +947,15 @@ fun MediaTab(
     }
 
     // ── Add-videos picker for the open user playlist ───────────────
+    // The suggested candidates follow the tab the playlist was opened from:
+    // All Feed → every video; a channel tab → just that channel's videos.
+    val addVideosCandidates = remember(visibleVideos, filterChannelId) {
+        if (filterChannelId == null) visibleVideos
+        else visibleVideos.filter { it.channelId == filterChannelId }
+    }
     if (showAddVideosPicker && selectedUserPlaylist != null) {
         PlaylistAddVideosSheet(
-            candidates = visibleVideos,
+            candidates = addVideosCandidates,
             alreadyIn = selectedUserPlaylist!!.videos.map { it.videoId }.toSet(),
             onAdd = { videos ->
                 userPlaylistStore.addVideos(selectedUserPlaylist!!.id, videos)
@@ -1189,7 +1205,6 @@ private fun AddAvatar(onClick: () -> Unit) {
 private fun ShortCard(
     video: MediaVideo,
     progressStore: WatchProgressStore,
-    isBookmarked: Boolean,
     isManual: Boolean,
     downloadStatus: DownloadStatus?,
     isOffline: Boolean,
@@ -1197,7 +1212,6 @@ private fun ShortCard(
     onDownload: () -> Unit,
     onCancelDownload: () -> Unit,
     onDeleteDownload: () -> Unit,
-    onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
     onRemoveManual: () -> Unit,
     onAddToPlaylist: () -> Unit = {}
@@ -1294,16 +1308,14 @@ private fun ShortCard(
                 }
             }
             // Overflow menu (top-right, where the play badge used to be):
-            // bookmark / download / hide / remove manual / add to playlist.
+            // add to playlist / download / hide / remove manual.
             VideoCardMenu(
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
-                isBookmarked = isBookmarked,
                 isManual = isManual,
                 downloadLabel = downloadMenuLabel(downloadStatus, isOffline),
                 onDownloadAction = downloadMenuAction(
                     downloadStatus, isOffline, onDownload, onCancelDownload, onDeleteDownload
                 ),
-                onToggleBookmark = onToggleBookmark,
                 onHide = onHide,
                 onRemoveManual = onRemoveManual,
                 onAddToPlaylist = onAddToPlaylist
@@ -1390,7 +1402,6 @@ private fun ShortCard(
 private fun LongVideoCard(
     video: MediaVideo,
     progressStore: WatchProgressStore,
-    isBookmarked: Boolean,
     isManual: Boolean,
     downloadStatus: DownloadStatus?,
     isOffline: Boolean,
@@ -1398,10 +1409,11 @@ private fun LongVideoCard(
     onDownload: () -> Unit,
     onCancelDownload: () -> Unit,
     onDeleteDownload: () -> Unit,
-    onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
     onRemoveManual: () -> Unit,
-    onAddToPlaylist: () -> Unit = {}
+    onAddToPlaylist: () -> Unit = {},
+    /** When set (user-playlist feed), the ⋮ menu offers removing from it. */
+    onRemoveFromPlaylist: (() -> Unit)? = null
 ) {
     val fraction = remember(video.videoId) { progressStore.get(video.videoId) }
     // A live broadcast has no finite duration to complete — never show a
@@ -1462,20 +1474,19 @@ private fun LongVideoCard(
                         }
                     }
                 }
-                // Overflow menu (bookmark / download / hide / remove manual /
-                // add to playlist).
+                // Overflow menu (add to playlist / download / hide / remove
+                // manual / remove from playlist).
                 VideoCardMenu(
                     modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
-                    isBookmarked = isBookmarked,
                     isManual = isManual,
                     downloadLabel = downloadMenuLabel(downloadStatus, isOffline),
                     onDownloadAction = downloadMenuAction(
                         downloadStatus, isOffline, onDownload, onCancelDownload, onDeleteDownload
                     ),
-                    onToggleBookmark = onToggleBookmark,
                     onHide = onHide,
                     onRemoveManual = onRemoveManual,
-                    onAddToPlaylist = onAddToPlaylist
+                    onAddToPlaylist = onAddToPlaylist,
+                    onRemoveFromPlaylist = onRemoveFromPlaylist
                 )
             // Download progress: an animated bar pinned to the bottom of the
             // thumbnail while the audio downloads (see ShortCard for details).
@@ -1693,13 +1704,13 @@ private fun FeedHeader(
             if (canEditPlaylist && onEditPlaylist != null) {
                 IconButton(
                     onClick = onEditPlaylist,
-                    modifier = Modifier.size(36.dp)
+                    modifier = Modifier.size(40.dp)
                 ) {
                     Icon(
                         Icons.Filled.Edit,
                         contentDescription = "Edit playlist",
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
@@ -1707,26 +1718,26 @@ private fun FeedHeader(
             // (closing also clears the query via onToggleSearch).
             IconButton(
                 onClick = onToggleSearch,
-                modifier = Modifier.size(36.dp)
+                modifier = Modifier.size(40.dp)
             ) {
                 Icon(
                     if (searchActive) Icons.Filled.Close else Icons.Filled.Search,
                     contentDescription = if (searchActive) "Close search" else "Search feed",
                     tint = if (searchActive) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(22.dp)
                 )
             }
             Box {
                 IconButton(
                     onClick = { showMenu = true },
-                    modifier = Modifier.size(36.dp)
+                    modifier = Modifier.size(40.dp)
                 ) {
                     Icon(
                         Icons.Filled.MoreVert,
                         contentDescription = "More feed options",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
                 DropdownMenu(
@@ -1773,27 +1784,27 @@ private fun FeedHeader(
             }
             IconButton(
                 onClick = onOpenFilter,
-                modifier = Modifier.size(36.dp)
+                modifier = Modifier.size(40.dp)
             ) {
                 Icon(
                     Icons.Filled.FilterList,
                     contentDescription = "Filter feed",
                     tint = if (filter.isActive) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(22.dp)
                 )
             }
             // Exit the playlist context (imported or user playlist).
             if (onClose != null) {
                 IconButton(
                     onClick = onClose,
-                    modifier = Modifier.size(36.dp)
+                    modifier = Modifier.size(40.dp)
                 ) {
                     Icon(
                         Icons.Filled.Close,
                         contentDescription = "Close playlist",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
@@ -2006,23 +2017,6 @@ private fun FilterSheet(
                     )
                     Spacer(Modifier.width(4.dp))
                     Text(option.label, style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-
-            Spacer(Modifier.height(16.dp))
-            Text(
-                text = "Library",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FeedLibraryFilter.entries.forEach { option ->
-                    FilterChip(
-                        selected = draft.library == option,
-                        onClick = { draft = draft.copy(library = option) },
-                        label = { Text(option.label) }
-                    )
                 }
             }
 
@@ -2304,27 +2298,28 @@ private fun DownloadSweepBar(modifier: Modifier = Modifier) {
 }
 
 /**
- * Overflow menu on feed cards: Bookmark toggle, Hide video, and (for
- * manually added videos) Remove. Tapping any entry does NOT trigger the
- * card's own onClick (the inner clickable consumes the tap).
+ * Overflow menu on feed cards: Add to playlist, Download audio, Hide video,
+ * and (for manually added videos) Remove. In a user-playlist feed a
+ * "Remove from playlist" entry is offered too. Tapping any entry does NOT
+ * trigger the card's own onClick (the inner clickable consumes the tap).
  */
 @Composable
 private fun VideoCardMenu(
     modifier: Modifier = Modifier,
-    isBookmarked: Boolean,
     isManual: Boolean,
     downloadLabel: String? = null,
     onDownloadAction: (() -> Unit)? = null,
-    onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
     onRemoveManual: () -> Unit,
-    onAddToPlaylist: (() -> Unit)? = null
+    onAddToPlaylist: (() -> Unit)? = null,
+    /** When set (a user-playlist feed), the menu also offers removing from it. */
+    onRemoveFromPlaylist: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
     Box(modifier = modifier) {
         Surface(
             modifier = Modifier
-                .size(26.dp)
+                .size(30.dp)
                 .clip(CircleShape)
                 .clickable { showMenu = true },
             shape = CircleShape,
@@ -2334,26 +2329,28 @@ private fun VideoCardMenu(
                 Icons.Filled.MoreVert,
                 contentDescription = "Video options",
                 tint = Color.White,
-                modifier = Modifier.padding(4.dp)
+                modifier = Modifier.padding(5.dp)
             )
         }
         DropdownMenu(
             expanded = showMenu,
             onDismissRequest = { showMenu = false }
         ) {
-            DropdownMenuItem(
-                text = { Text(if (isBookmarked) "Remove bookmark" else "Bookmark") },
-                onClick = {
-                    showMenu = false
-                    onToggleBookmark()
-                }
-            )
             if (onAddToPlaylist != null) {
                 DropdownMenuItem(
                     text = { Text("Add to playlist…") },
                     onClick = {
                         showMenu = false
                         onAddToPlaylist()
+                    }
+                )
+            }
+            if (onRemoveFromPlaylist != null) {
+                DropdownMenuItem(
+                    text = { Text("Remove from playlist") },
+                    onClick = {
+                        showMenu = false
+                        onRemoveFromPlaylist()
                     }
                 )
             }
@@ -2387,7 +2384,7 @@ private fun VideoCardMenu(
 }
 
 /** The ⋮ menu label for a card's download entry, by state. */
-private fun downloadMenuLabel(status: DownloadStatus?, isOffline: Boolean): String = when {
+internal fun downloadMenuLabel(status: DownloadStatus?, isOffline: Boolean): String = when {
     isOffline -> "Delete download"
     status == null -> "Download audio"
     status is DownloadStatus.Preparing || status is DownloadStatus.Downloading -> "Cancel download"
@@ -2395,7 +2392,7 @@ private fun downloadMenuLabel(status: DownloadStatus?, isOffline: Boolean): Stri
 }
 
 /** The ⋮ menu action for a card's download entry, by state. */
-private fun downloadMenuAction(
+internal fun downloadMenuAction(
     status: DownloadStatus?,
     isOffline: Boolean,
     onDownload: () -> Unit,
@@ -2726,6 +2723,10 @@ private fun AddVideoDialog(
     repository: MediaRepository,
     libraryStore: MediaLibraryStore,
     channel: SavedChannel?,
+    /** Where the video will go, e.g. "your playlist \"X\"" — drives the copy. */
+    targetLabel: String? = null,
+    /** Fired with the resolved video once it's been added to the library. */
+    onResolved: (MediaVideo) -> Unit = {},
     onAdded: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2741,7 +2742,7 @@ private fun AddVideoDialog(
             Column {
                 Text(
                     text = "Paste a YouTube link. It will be added to " +
-                        (channel?.displayName ?: "your feed") +
+                        (targetLabel ?: channel?.displayName ?: "your feed") +
                         " as a manually added video.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2776,6 +2777,7 @@ private fun AddVideoDialog(
                         status = when (val result = repository.resolveVideoByUrl(input, channel)) {
                             is MediaRepository.ResolveVideoResult.Success -> {
                                 if (libraryStore.addManuallyAdded(result.video)) {
+                                    onResolved(result.video)
                                     onAdded()
                                     onDismiss()
                                     null
@@ -3134,7 +3136,7 @@ private fun UserPlaylistRow(
 
 /** Create / rename dialog for a user playlist (blank names are rejected). */
 @Composable
-private fun PlaylistNameDialog(
+internal fun PlaylistNameDialog(
     initial: String,
     title: String,
     confirmLabel: String,
@@ -3325,8 +3327,9 @@ private fun PlaylistEditorRow(
 }
 
 /**
- * Multi-select picker of every known video (feed + library), to add into the
- * open playlist. Only videos not already in the playlist are listed; already
+ * Multi-select picker of candidate videos to add into the open playlist — the
+ * candidates follow the tab context (All Feed → every video, a channel tab →
+ * that channel's). Only videos not already in the playlist are listed; already
  * present ones can never be duplicated.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -3460,13 +3463,13 @@ private fun PlaylistAddVideosSheet(
 }
 
 /**
- * "Add to playlist…" picker opened from a video card's ⋮ menu: tap a playlist
- * to append the video (deduped — it can't be added twice), or create a new
- * playlist seeded with it.
+ * "Add to playlist…" picker opened from a video card's ⋮ menu (or the video
+ * player's ⋮ / Playlist button): tap a playlist to append the video (deduped —
+ * it can't be added twice), or create a new playlist seeded with it.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AddToPlaylistSheet(
+internal fun AddToPlaylistSheet(
     video: MediaVideo,
     playlists: List<UserPlaylist>,
     onAdd: (UserPlaylist) -> Unit,
