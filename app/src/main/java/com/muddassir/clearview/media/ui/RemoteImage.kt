@@ -36,7 +36,9 @@ fun RemoteImage(
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
     /** When false, the loading state is a plain surface box (no spinner). */
-    showLoadingSpinner: Boolean = true
+    showLoadingSpinner: Boolean = true,
+    /** Fired once the bitmap for [url] is ready (or instantly when cached). */
+    onLoaded: (() -> Unit)? = null
 ) {
     var bitmap by remember(url) { mutableStateOf<Bitmap?>(null) }
 
@@ -45,6 +47,12 @@ fun RemoteImage(
         if (url != null) {
             bitmap = withContext(Dispatchers.IO) { ThumbnailCache.get(url) }
         }
+    }
+
+    // Report the load completion exactly once per URL — used by callers that
+    // want to swap in the real thumbnail the moment it's available.
+    LaunchedEffect(url, bitmap != null) {
+        if (bitmap != null) onLoaded?.invoke()
     }
 
     val bmp = bitmap

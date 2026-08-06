@@ -6,30 +6,100 @@ piped straight through to the phone.
 
 - **Primary engine:** [`youtube-dl-exec`](https://www.npmjs.com/package/youtube-dl-exec)
   (yt-dlp). Actively maintained and works against current YouTube.
-- **Bot-detection defense:** YouTube bot-blocks datacenter IPs (Render free
-  tier) with *"Sign in to confirm you're not a bot"* — even with valid signed-in
-  cookies, because the block is IP-level. The strongest defenses, in order:
-  1. **Mobile innertube clients** (`android_vr` → `android` → `ios` →
-     `web_safari`) are tried FIRST: they return direct signed googlevideo URLs
-     with no PO token needed, are far less bot-flagged than web clients, and
-     are yt-dlp's own default client set (2026.07.04: `('android_vr',
-     'web_safari')`).
-  2. **PO-token provider** ([bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)):
-     a local HTTP server that solves YouTube's BotGuard attestation **on the
-     server's own IP** and hands yt-dlp a proof-of-origin (PO) token. The
-     `web` client + PO token is the FALLBACK chain for videos the mobile
-     clients refuse (age-gated etc.). NB: even a valid PO token does NOT
-     unblock web clients on hard-flagged IPs (player response still answers
-     `LOGIN_REQUIRED`), so mobile-first is required.
-- **Client-chain retries:** each request walks the chain list until one returns
-  a playable URL; signed-in cookies are used on the non-PO chains when
-  `COOKIES_B64` is set.
+- **No login anywhere.** Downloads work with an **anonymous guest session** (below) plus a
+  PO token — no YouTube account, no cookie exporting, nothing to refresh.
 - **Automatic fallback:** [`@distube/ytdl-core`](https://www.npmjs.com/package/@distube/ytdl-core).
-  If every yt-dlp client fails, the server falls back to ytdl-core — no app
-  update needed.
+  If every yt-dlp client fails, the server falls back to ytdl-core — no app update needed.
 - The **yt-dlp binary and the PO-token provider are downloaded at install time**
-  (`scripts/fetch-ytdlp.js` + `scripts/fetch-pot-provider.js`, hooked into
-  `postinstall`) so a request never waits on a lazy download.
+  (`scripts/fetch-ytdlp.js` + `scripts/fetch-pot-provider.js`, hooked into `postinstall`),
+  and the binary is **auto-updated at runtime** (`scripts/update-ytdlp.js`) so YouTube
+  extractor breakage doesn't take the service down between deploys.
+
+## How a download works
+
+```
+GET /api/audio?url=… → app retries on 503 (cold boot / queue busy)
+        │
+        ├─ 1. Stream cache hit?  (keyed by video id, TTL ~3 h)
+        │       → pipe the cached direct URL. NO yt-dlp, NO PO-token call.
+        │
+        └─ 2. Rate-limited extraction queue (token bucket, single-flight):
+              a. yt-dlp with the persistent guest cookiejar (--cookies) +
+                 PRIMARY chain  mweb,web + fetch_pot=always + PO token
+              b. fallback chains (mobile innertube clients, then defaults)
+              c. one retry with backoff on transient bot-check / 429 failures
+              d. if all chains fail → ytdl-core fallback (same queue slot)
+              e. cache the fresh stream URL, then pipe it to the client
+```
+
+### Anonymous guest session (the fix for cookie-less bot checks)
+
+The old pattern ran yt-dlp with **no `--cookies` at all**, so every request looked like a
+brand-new, unrelated client — which is exactly what makes YouTube answer
+*"Sign in to confirm you're not a bot"* on datacenter IPs.
+
+The server now always passes `--cookies <tmpdir>/clearview-guest-cookies.txt` — a writable
+cookiejar that **yt-dlp creates and reuses across calls**. YouTube's own anonymous visitor
+cookies (`VISITOR_INFO1_LIVE`, …) persist between requests, so the service reads as one
+continuing guest session instead of a fresh stranger every time. The file starts empty and
+yt-dlp populates it; **no login/account cookies ever go in it**.
+
+> We deliberately do **not** pass `visitor_data` via `--extractor-args` + `player_skip`
+> (documented as less stable) — yt-dlp manages the guest session naturally through the jar.
+
+### Client chain
+
+- **PRIMARY** (configurable): `player_client=mweb,web` with `fetch_pot=always` + the PO
+  token plugin. `mweb,web` is currently the recommended no-login pairing; `web_embedded`
+  is excluded (returned `LOGIN_REQUIRED` in testing). Override the list with `YTDLP_CLIENTS`
+  when YouTube shifts its trust signals.
+- **FALLBACK**: mobile innertube clients (`android_vr,android,ios,web_safari,web_music`) —
+  direct signed URLs, no PO token needed.
+- **LAST**: yt-dlp's default client set.
+
+### PO-token provider
+
+YouTube also bot-blocks datacenter IPs at the *IP* level. The bundled
+[bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) solves
+YouTube's BotGuard attestation **on the server's own IP** and hands yt-dlp a proof-of-origin
+(PO) token, which is exactly the bypass that works from flagged IPs. It is spawned at boot as
+a local HTTP server on `127.0.0.1:4416`; the plugin's solve timeout is patched to 45 s at
+build time (cold solves on Render take 20–45 s).
+
+### Guest-session rate ceiling + queue
+
+YouTube's documented guideline for a guest session is **~300 requests/hour per session/IP**.
+The server enforces a global token bucket (per-process = the only IP on Render's free tier),
+default budget **250/hour**, and runs extractions through a **single-flight FIFO queue**
+(which also keeps the shared cookiejar free of concurrent write races). Requests past the
+budget queue; if they are still queued after `QUEUE_MAX_WAIT_MS` (12 s) the server answers
+**503** with `Retry-After`, `X-Audio-Queue-Position` and `X-Audio-Queue-Wait-Ms` — the app
+retries automatically and shows the queue position if it keeps failing. Cache hits never
+touch the queue.
+
+### Stream cache
+
+The extracted direct URL (or the ytdl-core fallback URL) is cached **keyed by video id** for
+`STREAM_CACHE_TTL_MINUTES` (default 180 — stream URLs stay valid for a few hours). Repeat
+downloads of the same video — very common for popular RSS episodes — are served **without
+touching yt-dlp or the PO-token provider at all**. This is the main lever for staying under
+the guest-session ceiling under multi-user load.
+
+### Error handling
+
+Total failures return a **clean, user-facing message** (never a stack trace) plus a
+machine-readable header `X-Audio-Error-Code`:
+
+| Code | HTTP | Meaning | App behaviour |
+|------|------|---------|---------------|
+| `login` | 403 | Private / age-restricted / members-only — needs sign-in | Shown immediately, not retried |
+| `botcheck` | 503 | YouTube blocking the server right now | Retried automatically |
+| `transient` | 502 | Network/timeout hiccup | Retried automatically |
+| `queue` | 503 | Rate-limit queue backed up | Retried automatically (Retry-After) |
+| `unknown` | 500 | Generic failure | Retried automatically |
+
+Full yt-dlp stderr is logged server-side (STDERR TAIL) for debugging; the app only ever sees
+the short message.
 
 ## Run locally
 
@@ -46,122 +116,98 @@ curl "http://localhost:3000/health"
 curl "http://localhost:3000/api/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DVIDEO_ID" -o test.m4a
 ```
 
+Run the unit tests for the pipeline (rate limiter, cache, error classifiers):
+
+```bash
+node test/extraction-pipeline.test.js
+```
+
+Run the full local end-to-end test (starts the server + provider, does a real download and
+a cache hit):
+
+```bash
+bash scripts/local-e2e-test.sh
+```
+
 ## Deploy to Render (free tier)
 
 1. Push this repository to GitHub.
 2. Render → **New → Web Service** → connect the repo.
 3. Settings:
    - **Root Directory:** `backend`
-   - **Build Command:** `npm install` (also fetches the pinned yt-dlp binary
-     via the postinstall script)
+   - **Build Command:** `npm install` (also fetches the pinned yt-dlp binary and the
+     PO-token provider via the postinstall scripts)
    - **Start Command:** `npm start`
    - **Instance Type:** Free
-4. Optional **Environment Variables**:
-   - `AUDIO_TOKEN` — a shared secret. When set, the app must send it
-     (`X-Audio-Token` header); protects your free-tier bandwidth from strangers.
-   - `YTDL_NO_UPDATE=1` — skips yt-dlp's periodic update check (recommended;
-     the pinned binary is refreshed on every fresh deploy).
-   - `YTDLP_FORCE=1` — forces the postinstall scripts to re-download the
-     yt-dlp binary and the PO-token provider even if they already exist (use
-     if a build cache carried older artifacts over and downloads start failing).
-   - `COOKIES_B64` — optional base64 of a Netscape-format `cookies.txt` (see
-     below). When set, cookies are passed to yt-dlp **on top of** the PO token
-     — the strongest combination.
-   - `POT_PORT` — optional port for the PO-token provider (default `4416`).
-5. Deploy. **Important:** after pushing this commit, open the Render dashboard
-   and trigger a new deploy (the changed build step must run to fetch the
-   yt-dlp binary). Copy the URL (`https://<your-app>.onrender.com`) and paste it
-   into the app: **Media → Downloads → Server settings**.
+4. Optional **Environment Variables** (all have safe defaults):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AUDIO_TOKEN` | (none) | Shared secret — the app must send it (`X-Audio-Token`). Protects your bandwidth from strangers. |
+| `YTDLP_CLIENTS` | `mweb,web` | Primary client list for the PO chain (e.g. `android_vr,ios,web_safari` if YouTube shifts trust signals). |
+| `RATE_LIMIT_PER_HOUR` | `250` | Extraction budget/hour — keep under ~300 (guest-session ceiling). |
+| `RATE_LIMIT_BURST` | `5` | Token-bucket burst capacity. |
+| `QUEUE_MAX_WAIT_MS` | `12000` | How long a request queues before the server answers 503 + Retry-After. |
+| `STREAM_CACHE_TTL_MINUTES` | `180` | How long extracted stream URLs stay cached. |
+| `STREAM_CACHE_MAX_ENTRIES` | `500` | Cache size cap (oldest evicted). |
+| `YTDLP_RETRY_BACKOFF_MS` | `3000` | Backoff before the single transient-failure retry pass. |
+| `PROXY` | (none) | Optional `--proxy` for yt-dlp — an escape hatch if the guest session + cache are ever rate-limited at scale; NOT required normally. |
+| `DEBUG_BOOT_CHECK` | `true` | `false` skips the boot-time yt-dlp extraction probes (the provider warmup still runs). |
+| `YTDLP_AUTO_UPDATE` | `true` | `false` disables the runtime yt-dlp updater. |
+| `YTDLP_UPDATE_CHECK_HOURS` | `24` | How often the updater may check GitHub (it also runs ~5 min after each boot). |
+| `YTDLP_FORCE` | — | Force postinstall scripts / the updater to re-download. |
+| `YTDLP_VERSION` | `2026.07.04` | Build-time pin for the yt-dlp binary. |
+| `POT_PORT` | `4416` | Port for the PO-token provider. |
+| `YTDL_NO_UPDATE=1` | — | Skips yt-dlp's own periodic update check (recommended; the pinned binary + auto-updater handle freshness). |
+
+5. Deploy. **Important:** after pushing this commit, open the Render dashboard and trigger a
+   new deploy (the changed build step must run to fetch the yt-dlp binary). Copy the URL
+   (`https://<your-app>.onrender.com`) and paste it into the app:
+   **Media → Downloads → Server settings**.
 
 ### Free-tier behaviour
 
-- The instance **sleeps after ~15 min idle** and cold-starts on the next request
-  (30–90 s). The app shows an animated **"Preparing…"** state the whole time and retries
-  if the server answers `503` while booting — just tap download and wait.
-- If it stays in "Preparing…" for over a minute, the instance may still be booting; tap
-  the download again or open the app's Server settings and press **Test connection**.
+- The instance **sleeps after ~15 min idle** and cold-starts on the next request (30–90 s).
+  The app shows an animated **"Preparing…"** state and retries if the server answers `503`
+  while booting — just tap download and wait.
+- If it stays in "Preparing…" for over a minute, the instance may still be booting; tap the
+  download again or open Server settings and press **Test connection**.
+- The yt-dlp auto-update runs ~5 min after each boot (and then on the 24 h interval while
+  awake) — the script's own gate file keeps a frequently cold-starting instance from
+  hammering the GitHub API.
+
+## Known trade-off (accepted)
+
+**Age-restricted, private, and members-only videos cannot be downloaded** — they require a
+YouTube sign-in, which this service deliberately never uses. Such videos answer with the
+`login` error (`HTTP 403`, *"This video requires a YouTube sign-in…"*). This is acceptable
+for this app because the RSS feeds it serves are public content.
+
+## Reading the logs
+
+- Boot-check lines are prefixed **`[boot-check]`** so monitoring/alerting can exclude them
+  (real request failures are `[yt-dlp]`, `[extract]`, `[cache]`, `[rate-limit]` lines).
+  Set `DEBUG_BOOT_CHECK=false` to skip the two extraction probes entirely.
+- `[cache] HIT <id>` — a repeat download served from the cache (no YouTube call).
+- `[rate-limit] queue full — 503 … (position #N)` — the guest-session ceiling is being hit.
+- `[pot:bgutil:script-node] Script path doesn't exist…` lines are **expected noise** from
+  yt-dlp's provider availability checks — they appear even in fully working runs.
+- The line proving the PO pipeline works is
+  `[boot-check] provider GENERATED N token generation(s) during probe A — PO pipeline works end-to-end`.
+- `[update-ytdlp]` lines report yt-dlp release checks / swaps.
+
+## Deprecated: account cookies (`COOKIES_B64` / `cookies.txt`)
+
+Older versions used `COOKIES_B64` (base64 of a Netscape `cookies.txt` exported from a
+**signed-in** browser) or a `cookies.txt` next to `server.js`. These still work for backward
+compatibility, but they are **deprecated**: account cookies expire, need re-exporting, and
+are no longer required — the guest session + PO token is the supported no-login path. If one
+of them is set, the server logs a deprecation warning and uses it instead of the guest jar.
+Remove them to go fully cookie-free.
 
 ## Notes
 
 - M4A (AAC) is preferred, then Opus/WebM — both play natively on Android (API 21+).
-- A short in-memory info cache avoids re-fetching video metadata for repeat downloads.
-- If you hit "Could not fetch this audio right now", trigger a **Manual Deploy**
-  from the Render dashboard — it re-runs `npm install` and refreshes the yt-dlp
-  binary.
-
-### How the PO-token provider works
-
-- At build time (`npm install`) `scripts/fetch-pot-provider.js` clones
-  `bgutil-ytdlp-pot-provider` (pinned tag `1.3.1`), installs it, and downloads
-  the matching yt-dlp plugin zip into `plugins/`.
-- The script then **rebuilds the plugin zip with a raised solve timeout**
-  (`_GETPOT_TIMEOUT` 20 s → 45 s, pure JS zip writer, no external tools):
-  cold BotGuard solves on Render's free tier can take 20-45 s, and at 20 s the
-  plugin gave up early, leaving yt-dlp tokenless and bot-blocked
-  ("Sign in to confirm you're not a bot").
-- At boot, `server.js` spawns the provider on `127.0.0.1:4416` (a child
-  process, ~100–150 MB). The Render log will show
-  `[pot] PO-token provider ready on port 4416`.
-- Every yt-dlp call walks the client chain list: **mobile clients first**
-  (`android_vr,android,ios,web_safari,web_music` — direct signed URLs, no PO
-  token, no provider round-trip), then the `web`/`web_embedded` chain with a
-  fresh PO token, then the default chain. Cookies (if set) are still passed on
-  the non-PO chains.
-- The `web`/`web_embedded` chain passes `youtube:fetch_pot=always` alongside
-  `player_client=web,web_embedded` (same extractor-args flag, joined with
-  `;`). This is required for that chain: it forces yt-dlp to mint a **player**
-  PO token and attach it to the player API request itself. Without it, yt-dlp
-  only fetches the **gvs** token lazily after a successful player response —
-  but on a flagged datacenter IP the tokenless player request is bot-blocked
-  (HTTP 403 / LOGIN_REQUIRED / "Sign in to confirm you're not a bot"), so
-  formats are never processed, the gvs token is never requested, and the boot
-  check logs "provider saw NO token request during the probe".
-  IMPORTANT: player_client and fetch_pot must share the SAME `youtube:` flag
-  (joined with `;`) — a separate second `youtube:` flag would override the
-  first (only the last flag per extractor key survives).
-- If the provider fails to build or start, the server logs a warning and runs
-  without PO tokens (client chains + ytdl-core), exactly like before.
-
-### Reading the boot check / PO-token logs
-
-During boot the server runs a self-check that ends with a verdict like
-`provider GENERATED N token generation(s) during the probe — PO pipeline works
-end-to-end`. Two log patterns are easy to misread:
-
-- `[pot:bgutil:script-node] No server_home...` / `Script path doesn't exist...`
-  are **expected noise**: yt-dlp checks every registered provider's availability,
-  including the script-based ones you're not using. They appear even in fully
-  working runs and do **not** mean the HTTP provider was skipped.
-- The line that proves the HTTP provider is being used is
-  `[pot:bgutil:http] Generating a ... PO Token for ... via bgutil HTTP server`.
-- `direct /get_pot probe -> HTTP 200 in Ns`: cold BotGuard solves on Render
-  take 10-45 s. The plugin's solve timeout is patched to 45 s at build time
-  (`scripts/fetch-pot-provider.js` rebuilds the plugin zip with
-  `_GETPOT_TIMEOUT = 45.0`), so solves up to ~40 s are fine; only a solve
-  near the 45 s cap (or a probe timeout) is a problem.
-- If the verdict says `bgutil HTTP provider loaded but NO token generation was
-  observed`, the boot check dumps the yt-dlp probe's output tail. That dump is
-  the decisive clue: look for `Error reaching GET .../ping` (plugin can't reach
-  the provider), `HTTP Error 403` / `Sign in to confirm you're not a bot`
-  (YouTube blocking the requests before a token was attached), or
-  `failed to get token` (solve too slow).
-
-### Setting up cookies (optional, on top of the PO token)
-
-1. On your computer (desktop Chrome), install the **"Get cookies.txt LOCALLY"**
-   extension. Open an **incognito window**, go to https://www.youtube.com and
-   **sign in** to your Google account, then click the extension icon and
-   **Export** — save the file (it's in Netscape format).
-2. Convert it to base64 and paste into Render as the `COOKIES_B64` env var:
-
-   ```bash
-   base64 -w0 cookies.txt   # Linux/Mac  → copy the output
-   # Windows PowerShell:
-   # [Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.txt"))
-   ```
-
-3. Render → your service → **Environment** → add `COOKIES_B64` with that value
-   → **Deploy** (env changes restart the service).
-
-   Cookie files expire; re-export and update `COOKIES_B64` when downloads stop
-   working again. Keep the file private — it grants access to your account.
+- If you hit `unknown` errors that persist, trigger a **Manual Deploy** (re-runs
+  `npm install`, refreshing the yt-dlp binary) or check the `[update-ytdlp]` logs — a yt-dlp
+  version lag is the most common cause of sudden breakage, and the auto-updater is the fix.

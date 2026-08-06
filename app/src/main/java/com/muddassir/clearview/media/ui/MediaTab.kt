@@ -1,6 +1,7 @@
 package com.muddassir.clearview.media.ui
 
 import android.text.format.DateUtils
+import android.widget.Toast
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -8,6 +9,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,9 +30,11 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,11 +43,17 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material3.AlertDialog
@@ -95,6 +105,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muddassir.clearview.media.data.MediaLibraryStore
 import com.muddassir.clearview.media.data.MediaRepository
+import com.muddassir.clearview.media.data.UserPlaylistStore
 import com.muddassir.clearview.media.data.WatchProgressStore
 import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.download.DownloadItem
@@ -107,6 +118,8 @@ import com.muddassir.clearview.media.model.FeedSortOrder
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.model.SavedChannel
+import com.muddassir.clearview.media.model.SavedPlaylist
+import com.muddassir.clearview.media.model.UserPlaylist
 import com.muddassir.clearview.media.model.datePickerMillisToLocalStart
 import com.muddassir.clearview.media.util.MediaVideos
 import com.muddassir.clearview.media.util.applyFeedFilter
@@ -189,6 +202,38 @@ fun MediaTab(
         repository.setFeedFilter(f, filterChannelId)
     }
 
+    // ── Imported YouTube playlists (added by URL) ─────────────────
+    var playlists by remember { mutableStateOf(repository.getSavedPlaylists()) }
+    var selectedPlaylistId by remember { mutableStateOf<String?>(null) }
+    var playlistVideos by remember { mutableStateOf<List<MediaVideo>>(emptyList()) }
+    var playlistLoading by remember { mutableStateOf(false) }
+    var playlistError by remember { mutableStateOf<String?>(null) }
+    var playlistRefreshedAt by remember { mutableStateOf(0L) }
+    var showAddPlaylistDialog by remember { mutableStateOf(false) }
+    var pendingPlaylistRemove by remember { mutableStateOf<SavedPlaylist?>(null) }
+
+    // ── User-created playlists (local library) ────────────────────
+    val userPlaylistStore = remember { UserPlaylistStore(context.applicationContext) }
+    // Bumped whenever a user playlist is created / renamed / deleted / edited.
+    var playlistRevision by remember { mutableIntStateOf(0) }
+    var showPlaylistsSheet by remember { mutableStateOf(false) }
+    var selectedUserPlaylistId by remember { mutableStateOf<String?>(null) }
+    var showPlaylistEditor by remember { mutableStateOf(false) }
+    var showAddVideosPicker by remember { mutableStateOf(false) }
+    // Name dialog: null target = create a new playlist, non-null = rename it.
+    var showPlaylistNameDialog by remember { mutableStateOf(false) }
+    var playlistNameTarget by remember { mutableStateOf<UserPlaylist?>(null) }
+    // A video the user tapped "Add to playlist…" on in a card's ⋮ menu.
+    var pendingAddToPlaylist by remember { mutableStateOf<MediaVideo?>(null) }
+    // A video the user chose to seed a NEW playlist with (via the ⋮ menu's
+    // "New playlist with this video" — routed through the name dialog).
+    var pendingCreateWithVideo by remember { mutableStateOf<MediaVideo?>(null) }
+    val userPlaylists = remember(playlistRevision) { userPlaylistStore.getPlaylists() }
+    val selectedUserPlaylist = remember(userPlaylists, selectedUserPlaylistId) {
+        userPlaylists.firstOrNull { it.id == selectedUserPlaylistId }
+    }
+    val saveUserPlaylists: () -> Unit = { playlistRevision++ }
+
     // The user opened the Media tab — its channel updates count as seen.
     LaunchedEffect(Unit) { onMediaOpened() }
 
@@ -243,6 +288,29 @@ fun MediaTab(
         if (withAvatars != null) channels = withAvatars
     }
 
+    // Playlist load: the selected imported playlist's cached videos first
+    // (instant), then a background refresh of the playlist page. Runs when the
+    // selection changes or the pull-to-refresh token bumps.
+    LaunchedEffect(selectedPlaylistId, refreshToken) {
+        val id = selectedPlaylistId ?: return@LaunchedEffect
+        playlistLoading = true
+        playlistError = null
+        val cached = withContext(Dispatchers.IO) { repository.getCachedPlaylistVideos(id) }
+        if (cached?.first?.isNotEmpty() == true) playlistVideos = cached.first
+        val fresh = repository.refreshPlaylistVideos(id)
+        when {
+            fresh == null && cached?.first?.isNotEmpty() != true ->
+                playlistError = "Couldn't load this playlist. Check your connection."
+            fresh != null && fresh.isEmpty() && cached?.first?.isNotEmpty() != true ->
+                playlistError = "This playlist is private or unavailable."
+            fresh != null && fresh.isNotEmpty() -> {
+                playlistVideos = fresh
+                playlistRefreshedAt = System.currentTimeMillis()
+            }
+        }
+        playlistLoading = false
+    }
+
     // The feed plus the user's library (bookmarked / manually added videos —
     // which can be older than the RSS window), merged by id (RSS wins).
     // Hidden videos are filtered out everywhere EXCEPT the Hidden manager.
@@ -264,14 +332,35 @@ fun MediaTab(
         mergedVideos.filterNot { it.videoId in hiddenIds }
     }
 
-    // Channel strip filter + the All Feed filters are applied locally to the
-    // already-loaded videos — no refetching.
-    val channelVideos = remember(visibleVideos, filterChannelId) {
-        if (filterChannelId == null) visibleVideos
-        else visibleVideos.filter { it.channelId == filterChannelId }
+    // Feed source: a selected imported YouTube playlist, a selected user
+    // playlist, or the normal channel feed (All Feed / a single channel).
+    // Only one context can be active at a time.
+    val feedIsPlaylist = selectedPlaylistId != null
+    val feedIsUserPlaylist = selectedUserPlaylistId != null
+    val playlistContextVideos = remember(playlistVideos, hiddenIds) {
+        playlistVideos.filterNot { it.videoId in hiddenIds }
     }
-    val displayed = remember(channelVideos, feedFilter, libraryRevision) {
-        applyFeedFilter(
+    val userPlaylistVideos = selectedUserPlaylist?.videos.orEmpty()
+    val baseVideos = when {
+        feedIsUserPlaylist -> userPlaylistVideos
+        feedIsPlaylist -> playlistContextVideos
+        else -> visibleVideos
+    }
+    // Channel strip filter + the All Feed filters are applied locally to the
+    // already-loaded videos — no refetching. Playlist contexts bypass the
+    // channel strip entirely.
+    val channelVideos = remember(baseVideos, filterChannelId, feedIsPlaylist, feedIsUserPlaylist) {
+        when {
+            feedIsPlaylist || feedIsUserPlaylist -> baseVideos
+            filterChannelId == null -> baseVideos
+            else -> baseVideos.filter { it.channelId == filterChannelId }
+        }
+    }
+    // User playlists keep their hand-picked ORDER — the feed filters (date /
+    // content / watch status) don't apply; search still filters on top.
+    val displayed = remember(channelVideos, feedFilter, libraryRevision, feedIsUserPlaylist) {
+        if (feedIsUserPlaylist) channelVideos
+        else applyFeedFilter(
             channelVideos,
             feedFilter,
             progressOf = { progressStore.get(it) },
@@ -296,9 +385,13 @@ fun MediaTab(
 
     // ── Continue Watching: partially watched LONG videos in the current
     // channel context, capped so the section stays compact (Shorts never
-    // appear here — they're meant to be watched in one sitting).
-    val continueWatching = remember(channelVideos, hiddenIds, libraryRevision) {
-        channelVideos
+    // appear here — they're meant to be watched in one sitting). Hidden in
+    // playlist contexts — those are curated, ordered lists.
+    val continueWatching = remember(
+        channelVideos, hiddenIds, libraryRevision, feedIsPlaylist, feedIsUserPlaylist
+    ) {
+        if (feedIsPlaylist || feedIsUserPlaylist) emptyList()
+        else channelVideos
             .filter { v ->
                 !v.isShort && !v.isLive &&
                     (progressStore.get(v.videoId)?.let {
@@ -335,7 +428,12 @@ fun MediaTab(
             item(key = "all") {
                 AllAvatar(
                     selected = filterChannelId == null,
-                    onClick = { filterChannelId = null }
+                    onClick = {
+                        filterChannelId = null
+                        // Leaving a playlist context: the channel strip always wins.
+                        selectedPlaylistId = null
+                        selectedUserPlaylistId = null
+                    }
                 )
             }
             items(channels, key = { it.channelId }) { channel ->
@@ -345,6 +443,9 @@ fun MediaTab(
                     onClick = {
                         filterChannelId =
                             if (filterChannelId == channel.channelId) null else channel.channelId
+                        // Leaving a playlist context: the channel strip always wins.
+                        selectedPlaylistId = null
+                        selectedUserPlaylistId = null
                     },
                     onRemove = { pendingRemove = channel }
                 )
@@ -354,29 +455,89 @@ fun MediaTab(
             }
         }
 
+        // ── Imported YouTube playlist strip (below the channels) ──
+        // A horizontal row of the user's imported playlists (tap to view its
+        // videos as a feed, tap again / ✕ to deselect) ending in an add chip.
+        if (playlists.isNotEmpty()) {
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+            ) {
+                items(playlists, key = { it.playlistId }) { playlist ->
+                    val count = remember(playlist.playlistId, selectedPlaylistId, playlistVideos.size) {
+                        if (selectedPlaylistId == playlist.playlistId) playlistVideos.size
+                        else repository.getCachedPlaylistVideos(playlist.playlistId)
+                            ?.first?.size ?: 0
+                    }
+                    PlaylistChip(
+                        playlist = playlist,
+                        selected = selectedPlaylistId == playlist.playlistId,
+                        videoCount = count,
+                        onClick = {
+                            if (selectedPlaylistId == playlist.playlistId) {
+                                selectedPlaylistId = null
+                            } else {
+                                // Only one feed context at a time. Clear any
+                                // previously loaded playlist videos so the new
+                                // playlist's feed never flashes the old one's
+                                // content under the new title.
+                                selectedPlaylistId = playlist.playlistId
+                                playlistVideos = emptyList()
+                                playlistError = null
+                                selectedUserPlaylistId = null
+                                filterChannelId = null
+                            }
+                        },
+                        onRemove = { pendingPlaylistRemove = playlist }
+                    )
+                }
+                item(key = "add-playlist") {
+                    AddPlaylistChip(onClick = { showAddPlaylistDialog = true })
+                }
+            }
+        }
+
         Spacer(Modifier.height(4.dp))
 
         // ── All Feed header: filter button (highlighted when active) + summary ──
         // Shown whenever there is a feed at all — including when a filter hides
-        // every video (so it can always be reset). Hidden during the empty
-        // no-channels / loading states.
-        if (videos.isNotEmpty()) {
+        // every video (so it can always be reset), and in playlist contexts.
+        // Hidden during the empty no-channels / loading states.
+        if (videos.isNotEmpty() || feedIsPlaylist || feedIsUserPlaylist) {
+            // "Updated Xm ago" comes from whichever source feeds the screen:
+            // the channel feeds in normal mode, the playlist page otherwise.
+            val sourceRefreshedAt = if (feedIsPlaylist) playlistRefreshedAt else lastRefreshedAt
+            val sourceLoading = if (feedIsPlaylist) playlistLoading else isLoading
+            val headerTitle = when {
+                feedIsUserPlaylist -> selectedUserPlaylist?.name ?: "My Playlist"
+                feedIsPlaylist -> playlists.firstOrNull { it.playlistId == selectedPlaylistId }
+                    ?.title ?: "Playlist"
+                else -> "All Feed"
+            }
             FeedHeader(
+                title = headerTitle,
                 filter = feedFilter,
                 resultCount = searchResults.size,
                 hiddenCount = contextHiddenVideos.size,
                 canAddVideo = filterChannelId != null,
+                canEditPlaylist = feedIsUserPlaylist,
                 searchActive = searchActive,
                 searchQuery = searchQuery,
                 // "Updated Xm ago" — recomputed whenever a refresh lands OR
                 // the minute ticker bumps (clockTick read forces recompose).
-                updatedAgo = if (lastRefreshedAt > 0L && !isLoading && clockTick >= 0) {
+                updatedAgo = if (sourceRefreshedAt > 0L && !sourceLoading && clockTick >= 0) {
                     val ago = DateUtils.getRelativeTimeSpanString(
-                        lastRefreshedAt,
+                        sourceRefreshedAt,
                         System.currentTimeMillis(),
                         DateUtils.MINUTE_IN_MILLIS
                     ).toString()
                     if (ago.startsWith("0 min")) "Updated just now" else "Updated $ago"
+                } else null,
+                onClose = if (feedIsPlaylist || feedIsUserPlaylist) {
+                    {
+                        selectedPlaylistId = null
+                        selectedUserPlaylistId = null
+                    }
                 } else null,
                 onSearchQueryChange = { searchQuery = it },
                 onToggleSearch = {
@@ -386,7 +547,10 @@ fun MediaTab(
                 onOpenFilter = { showFilterSheet = true },
                 onReset = { saveFilter(FeedFilter()) },
                 onOpenHidden = { showHiddenDialog = true },
-                onAddVideo = { showAddVideoDialog = true }
+                onAddVideo = { showAddVideoDialog = true },
+                onAddPlaylist = { showAddPlaylistDialog = true },
+                onOpenMyPlaylists = { showPlaylistsSheet = true },
+                onEditPlaylist = { showPlaylistEditor = true }
             )
         }
 
@@ -394,7 +558,7 @@ fun MediaTab(
         // Pull-to-refresh wraps the whole feed (including skeleton + empty
         // states — each is scrollable so the gesture always engages).
         PullToRefreshBox(
-            isRefreshing = isLoading,
+            isRefreshing = isLoading || playlistLoading,
             onRefresh = { refreshToken++ },
             modifier = Modifier.weight(1f).fillMaxWidth()
         ) {
@@ -404,6 +568,16 @@ fun MediaTab(
                 downloadsFilter && !isSearching -> DownloadsSection(
                     onPlayAudio = onPlayAudio
                 )
+                // Imported playlist: loading / error / empty states.
+                feedIsPlaylist && playlistLoading && playlistVideos.isEmpty() -> SkeletonFeed()
+                feedIsPlaylist && playlistError != null && playlistVideos.isEmpty() ->
+                    ErrorCard(playlistError!!)
+                feedIsPlaylist && playlistVideos.isEmpty() && !playlistLoading -> ErrorCard(
+                    playlistError ?: "No videos in this playlist yet."
+                )
+                // User playlist: empty state (videos get added via Edit).
+                feedIsUserPlaylist && userPlaylistVideos.isEmpty() ->
+                    ErrorCard("This playlist is empty. Tap Edit to add videos.")
                 // First load: no channels → nothing to load (and nothing to
                 // refresh). Shown before the skeleton so a channel-less feed
                 // doesn't shimmer forever.
@@ -427,6 +601,9 @@ fun MediaTab(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
                 ) {
+                    // Section headers reflect whichever source loads the feed.
+                    val feedLoading = if (feedIsPlaylist) playlistLoading else isLoading
+                    val feedCached = !feedIsPlaylist && !feedIsUserPlaylist && showingCached
                     // ── Continue Watching: partially watched videos, in the
                     // current channel context (All Feed OR a selected channel).
                     // Auto-hides when none remain — and while a search is
@@ -451,12 +628,12 @@ fun MediaTab(
                             }
                         }
                     }
-                    if (shorts.isNotEmpty()) {
+                    if (shorts.isNotEmpty() && !feedIsUserPlaylist) {
                         item(key = "shorts-header") {
                             SectionHeader(
                                 title = "Shorts",
-                                isLoading = isLoading,
-                                showingCached = showingCached
+                                isLoading = feedLoading,
+                                showingCached = feedCached
                             )
                         }
                         item(key = "shorts-row") {
@@ -486,18 +663,19 @@ fun MediaTab(
                                         onRemoveManual = {
                                             libraryStore.removeManuallyAdded(video.videoId)
                                             libraryRevision++
-                                        }
+                                        },
+                                        onAddToPlaylist = { pendingAddToPlaylist = video }
                                     )
                                 }
                             }
                         }
                     }
-                    if (longs.isNotEmpty()) {
+                    if (longs.isNotEmpty() && !feedIsUserPlaylist) {
                         item(key = "videos-header") {
                             SectionHeader(
                                 title = "Videos",
-                                isLoading = isLoading,
-                                showingCached = showingCached
+                                isLoading = feedLoading,
+                                showingCached = feedCached
                             )
                         }
                         items(longs, key = { it.videoId }) { video ->
@@ -525,7 +703,49 @@ fun MediaTab(
                                 onRemoveManual = {
                                     libraryStore.removeManuallyAdded(video.videoId)
                                     libraryRevision++
-                                }
+                                },
+                                onAddToPlaylist = { pendingAddToPlaylist = video }
+                            )
+                        }
+                    }
+                    // ── User playlist: the hand-picked ORDER matters, so every
+                    // video renders as one ordered row list (no shorts/longs
+                    // split, no feed filters).
+                    if (feedIsUserPlaylist && searchResults.isNotEmpty()) {
+                        item(key = "playlist-videos-header") {
+                            SectionHeader(
+                                title = "Videos",
+                                isLoading = false,
+                                showingCached = false
+                            )
+                        }
+                        items(searchResults, key = { it.videoId }) { video ->
+                            LongVideoCard(
+                                video = video,
+                                progressStore = progressStore,
+                                isBookmarked = libraryStore.isBookmarked(video.videoId),
+                                isManual = libraryStore.isManuallyAdded(video.videoId),
+                                downloadStatus = AudioDownloads.statusFor(video.videoId),
+                                isOffline = AudioDownloads.isDownloaded(video.videoId),
+                                onClick = { playLong(video) },
+                                onDownload = {
+                                    AudioDownloads.download(video, AudioDownloads.sourceFor(video))
+                                },
+                                onCancelDownload = { AudioDownloads.cancel(video.videoId) },
+                                onDeleteDownload = { AudioDownloads.delete(video.videoId) },
+                                onToggleBookmark = {
+                                    libraryStore.toggleBookmark(video)
+                                    libraryRevision++
+                                },
+                                onHide = {
+                                    libraryStore.hideVideo(video)
+                                    libraryRevision++
+                                },
+                                onRemoveManual = {
+                                    libraryStore.removeManuallyAdded(video.videoId)
+                                    libraryRevision++
+                                },
+                                onAddToPlaylist = { pendingAddToPlaylist = video }
                             )
                         }
                     }
@@ -593,6 +813,163 @@ fun MediaTab(
             channel = channels.firstOrNull { it.channelId == filterChannelId },
             onAdded = { libraryRevision++ },
             onDismiss = { showAddVideoDialog = false }
+        )
+    }
+
+    // ── Add YouTube playlist by URL ────────────────────────────────
+    if (showAddPlaylistDialog) {
+        AddPlaylistDialog(
+            repository = repository,
+            onAdded = { playlist ->
+                showAddPlaylistDialog = false
+                playlists = repository.getSavedPlaylists()
+                // Jump straight into the new playlist's feed.
+                selectedPlaylistId = playlist.playlistId
+                selectedUserPlaylistId = null
+                filterChannelId = null
+                playlistVideos = emptyList()
+                playlistError = null
+            },
+            onDismiss = { showAddPlaylistDialog = false }
+        )
+    }
+
+    // ── Remove playlist confirmation ───────────────────────────────
+    pendingPlaylistRemove?.let { playlist ->
+        AlertDialog(
+            onDismissRequest = { pendingPlaylistRemove = null },
+            title = { Text("Remove playlist?") },
+            text = { Text("Remove \"${playlist.title}\"?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    repository.removePlaylist(playlist.playlistId)
+                    playlists = repository.getSavedPlaylists()
+                    if (selectedPlaylistId == playlist.playlistId) {
+                        selectedPlaylistId = null
+                        playlistVideos = emptyList()
+                        playlistError = null
+                    }
+                    pendingPlaylistRemove = null
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingPlaylistRemove = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // ── My playlists manager (user-created) ────────────────────────
+    if (showPlaylistsSheet) {
+        PlaylistsSheet(
+            playlists = userPlaylists,
+            onOpen = { p ->
+                showPlaylistsSheet = false
+                selectedUserPlaylistId = p.id
+                selectedPlaylistId = null
+                filterChannelId = null
+            },
+            onCreate = {
+                showPlaylistsSheet = false
+                playlistNameTarget = null
+                showPlaylistNameDialog = true
+            },
+            onRename = { p ->
+                playlistNameTarget = p
+                showPlaylistNameDialog = true
+            },
+            onDelete = { p ->
+                userPlaylistStore.deletePlaylist(p.id)
+                if (selectedUserPlaylistId == p.id) selectedUserPlaylistId = null
+                saveUserPlaylists()
+            },
+            onDismiss = { showPlaylistsSheet = false }
+        )
+    }
+
+    // ── Playlist name dialog (create / rename) ─────────────────────
+    if (showPlaylistNameDialog) {
+        PlaylistNameDialog(
+            initial = playlistNameTarget?.name ?: "",
+            title = if (playlistNameTarget == null) "New playlist" else "Rename playlist",
+            confirmLabel = if (playlistNameTarget == null) "Create" else "Rename",
+            onSubmit = { name ->
+                if (playlistNameTarget == null) {
+                    // Creating fresh — optionally seeded with the video the
+                    // user picked from a card's ⋮ menu.
+                    val seed = pendingCreateWithVideo?.let { listOf(it) } ?: emptyList()
+                    userPlaylistStore.createPlaylist(name, seed)
+                    if (pendingCreateWithVideo != null) {
+                        Toast.makeText(
+                            context,
+                            "Created \"$name\" with this video",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                } else {
+                    userPlaylistStore.renamePlaylist(playlistNameTarget!!.id, name)
+                }
+                pendingCreateWithVideo = null
+                showPlaylistNameDialog = false
+                saveUserPlaylists()
+            },
+            onDismiss = {
+                pendingCreateWithVideo = null
+                showPlaylistNameDialog = false
+            }
+        )
+    }
+
+    // ── Playlist editor (reorder / remove / add videos) ────────────
+    if (showPlaylistEditor && selectedUserPlaylist != null) {
+        PlaylistEditorSheet(
+            playlist = selectedUserPlaylist!!,
+            onMove = { from, to ->
+                userPlaylistStore.moveVideo(selectedUserPlaylist!!.id, from, to)
+                saveUserPlaylists()
+            },
+            onRemove = { videoId ->
+                userPlaylistStore.removeVideo(selectedUserPlaylist!!.id, videoId)
+                saveUserPlaylists()
+            },
+            onAddVideos = { showAddVideosPicker = true },
+            onDismiss = { showPlaylistEditor = false }
+        )
+    }
+
+    // ── Add-videos picker for the open user playlist ───────────────
+    if (showAddVideosPicker && selectedUserPlaylist != null) {
+        PlaylistAddVideosSheet(
+            candidates = visibleVideos,
+            alreadyIn = selectedUserPlaylist!!.videos.map { it.videoId }.toSet(),
+            onAdd = { videos ->
+                userPlaylistStore.addVideos(selectedUserPlaylist!!.id, videos)
+                saveUserPlaylists()
+                showAddVideosPicker = false
+            },
+            onDismiss = { showAddVideosPicker = false }
+        )
+    }
+
+    // ── Add-to-playlist picker (from a card's ⋮ menu) ──────────────
+    pendingAddToPlaylist?.let { video ->
+        AddToPlaylistSheet(
+            video = video,
+            playlists = userPlaylists,
+            onAdd = { playlist ->
+                userPlaylistStore.addVideos(playlist.id, listOf(video))
+                saveUserPlaylists()
+                Toast.makeText(context, "Added to ${playlist.name}", Toast.LENGTH_SHORT).show()
+                pendingAddToPlaylist = null
+            },
+            onCreateNew = {
+                // Route through the name dialog so the new playlist gets a
+                // real name (seeded with this video on submit).
+                pendingCreateWithVideo = video
+                pendingAddToPlaylist = null
+                playlistNameTarget = null
+                showPlaylistNameDialog = true
+            },
+            onDismiss = { pendingAddToPlaylist = null }
         )
     }
 
@@ -822,7 +1199,8 @@ private fun ShortCard(
     onDeleteDownload: () -> Unit,
     onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
-    onRemoveManual: () -> Unit
+    onRemoveManual: () -> Unit,
+    onAddToPlaylist: () -> Unit = {}
 ) {
     val fraction = remember(video.videoId) { progressStore.get(video.videoId) }
     // A live broadcast has no finite duration to complete — never show a
@@ -832,7 +1210,7 @@ private fun ShortCard(
     val live = video.isLive
     Card(
         onClick = onClick,
-        modifier = Modifier.width(150.dp),
+        modifier = Modifier.width(158.dp),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
@@ -916,9 +1294,9 @@ private fun ShortCard(
                 }
             }
             // Overflow menu (top-right, where the play badge used to be):
-            // bookmark / download / hide / remove manual.
+            // bookmark / download / hide / remove manual / add to playlist.
             VideoCardMenu(
-                modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
                 isBookmarked = isBookmarked,
                 isManual = isManual,
                 downloadLabel = downloadMenuLabel(downloadStatus, isOffline),
@@ -927,7 +1305,8 @@ private fun ShortCard(
                 ),
                 onToggleBookmark = onToggleBookmark,
                 onHide = onHide,
-                onRemoveManual = onRemoveManual
+                onRemoveManual = onRemoveManual,
+                onAddToPlaylist = onAddToPlaylist
             )
             // Download progress: an animated bar pinned to the bottom of the
             // thumbnail while the audio downloads (pulsing while the server
@@ -939,7 +1318,7 @@ private fun ShortCard(
             }
             // Bottom-end stack: status pills + duration pill.
             Column(
-                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp),
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -975,8 +1354,8 @@ private fun ShortCard(
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(10.dp)
-                    .padding(end = 8.dp)
+                    .padding(12.dp)
+                    .padding(end = 10.dp)
             ) {
                 Text(
                     text = video.title,
@@ -986,7 +1365,7 @@ private fun ShortCard(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(6.dp))
                 Text(
                     text = if (video.viewCount > 0L) {
                         formatViews(video.viewCount) + " views"
@@ -1021,7 +1400,8 @@ private fun LongVideoCard(
     onDeleteDownload: () -> Unit,
     onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
-    onRemoveManual: () -> Unit
+    onRemoveManual: () -> Unit,
+    onAddToPlaylist: () -> Unit = {}
 ) {
     val fraction = remember(video.videoId) { progressStore.get(video.videoId) }
     // A live broadcast has no finite duration to complete — never show a
@@ -1042,7 +1422,7 @@ private fun LongVideoCard(
             // ── Thumbnail + progress overlay ──
             Box(
                 modifier = Modifier
-                    .width(160.dp)
+                    .width(176.dp)
                     .aspectRatio(16f / 9f)
             ) {
                 RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
@@ -1082,9 +1462,10 @@ private fun LongVideoCard(
                         }
                     }
                 }
-                // Overflow menu (bookmark / download / hide / remove manual).
+                // Overflow menu (bookmark / download / hide / remove manual /
+                // add to playlist).
                 VideoCardMenu(
-                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
                     isBookmarked = isBookmarked,
                     isManual = isManual,
                     downloadLabel = downloadMenuLabel(downloadStatus, isOffline),
@@ -1093,7 +1474,8 @@ private fun LongVideoCard(
                     ),
                     onToggleBookmark = onToggleBookmark,
                     onHide = onHide,
-                    onRemoveManual = onRemoveManual
+                    onRemoveManual = onRemoveManual,
+                    onAddToPlaylist = onAddToPlaylist
                 )
             // Download progress: an animated bar pinned to the bottom of the
             // thumbnail while the audio downloads (see ShortCard for details).
@@ -1103,7 +1485,7 @@ private fun LongVideoCard(
             // Bottom-end stack: status pills + duration pill. Everything sits
             // above the watch-progress bar.
             Column(
-                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -1202,7 +1584,7 @@ private fun LongVideoCard(
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(10.dp)
+                    .padding(12.dp)
             ) {
                 Text(
                     text = video.title,
@@ -1211,7 +1593,7 @@ private fun LongVideoCard(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(6.dp))
                 Text(
                     text = buildString {
                         append(video.channelName.ifBlank { "YouTube" })
@@ -1245,20 +1627,29 @@ private fun LongVideoCard(
  */
 @Composable
 private fun FeedHeader(
+    /** The feed title: "All Feed", a playlist's title, or the search label. */
+    title: String = "All Feed",
     filter: FeedFilter,
     resultCount: Int,
     hiddenCount: Int,
     canAddVideo: Boolean,
+    /** Shows a pencil icon to open the user-playlist editor. */
+    canEditPlaylist: Boolean = false,
     searchActive: Boolean,
     searchQuery: String,
     /** "Updated Xm ago" text shown under the title row (null = hide). */
     updatedAgo: String? = null,
+    /** When set, an ✕ appears that exits the current playlist context. */
+    onClose: (() -> Unit)? = null,
     onSearchQueryChange: (String) -> Unit,
     onToggleSearch: () -> Unit,
     onOpenFilter: () -> Unit,
     onReset: () -> Unit,
     onOpenHidden: () -> Unit,
-    onAddVideo: () -> Unit
+    onAddVideo: () -> Unit,
+    onAddPlaylist: (() -> Unit)? = null,
+    onOpenMyPlaylists: (() -> Unit)? = null,
+    onEditPlaylist: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -1291,11 +1682,27 @@ private fun FeedHeader(
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = if (searchActive) "Search" else "All Feed",
+                text = if (searchActive) "Search" else title,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
+            // Edit playlist (user playlist context only).
+            if (canEditPlaylist && onEditPlaylist != null) {
+                IconButton(
+                    onClick = onEditPlaylist,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = "Edit playlist",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
             // Search toggle: a magnifier normally, an ✕ to close in search mode
             // (closing also clears the query via onToggleSearch).
             IconButton(
@@ -1339,6 +1746,22 @@ private fun FeedHeader(
                         }
                     )
                     DropdownMenuItem(
+                        text = { Text("My playlists") },
+                        enabled = onOpenMyPlaylists != null,
+                        onClick = {
+                            showMenu = false
+                            onOpenMyPlaylists?.invoke()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Add playlist by URL") },
+                        enabled = onAddPlaylist != null,
+                        onClick = {
+                            showMenu = false
+                            onAddPlaylist?.invoke()
+                        }
+                    )
+                    DropdownMenuItem(
                         text = { Text("Add video by URL") },
                         enabled = canAddVideo,
                         onClick = {
@@ -1359,6 +1782,20 @@ private fun FeedHeader(
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp)
                 )
+            }
+            // Exit the playlist context (imported or user playlist).
+            if (onClose != null) {
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Close playlist",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
         // Search field — shown only while search mode is active.
@@ -1505,19 +1942,23 @@ private fun FilterSheet(
                 fontWeight = FontWeight.SemiBold
             )
             Spacer(Modifier.height(8.dp))
-            // FlowRow: five chips (All / Videos / Shorts / Live / Downloads)
-            // wrap instead of overflowing on narrow screens.
+            // FlowRow of chips (All / Videos / Shorts / Downloads) wraps instead
+            // of overflowing on narrow screens. LIVE is deliberately excluded:
+            // the dedicated Live tab is the only live viewer, so a Live feed
+            // filter is no longer offered here.
             androidx.compose.foundation.layout.FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                FeedContentFilter.entries.forEach { option ->
-                    FilterChip(
-                        selected = draft.content == option,
-                        onClick = { draft = draft.copy(content = option) },
-                        label = { Text(option.label) }
-                    )
-                }
+                FeedContentFilter.entries
+                    .filterNot { it == FeedContentFilter.LIVE }
+                    .forEach { option ->
+                        FilterChip(
+                            selected = draft.content == option,
+                            onClick = { draft = draft.copy(content = option) },
+                            label = { Text(option.label) }
+                        )
+                    }
             }
 
             Spacer(Modifier.height(16.dp))
@@ -1674,7 +2115,7 @@ private fun ContinueWatchingCard(
     val progress = remember(video.videoId) { progressStore.getProgress(video.videoId) }
     Card(
         onClick = onClick,
-        modifier = Modifier.width(200.dp),
+        modifier = Modifier.width(210.dp),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
@@ -1716,7 +2157,7 @@ private fun ContinueWatchingCard(
                     )
                 }
             }
-            Column(modifier = Modifier.padding(10.dp)) {
+            Column(modifier = Modifier.padding(12.dp)) {
                 Text(
                     text = video.title,
                     style = MaterialTheme.typography.titleSmall,
@@ -1876,7 +2317,8 @@ private fun VideoCardMenu(
     onDownloadAction: (() -> Unit)? = null,
     onToggleBookmark: () -> Unit,
     onHide: () -> Unit,
-    onRemoveManual: () -> Unit
+    onRemoveManual: () -> Unit,
+    onAddToPlaylist: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
     Box(modifier = modifier) {
@@ -1906,6 +2348,15 @@ private fun VideoCardMenu(
                     onToggleBookmark()
                 }
             )
+            if (onAddToPlaylist != null) {
+                DropdownMenuItem(
+                    text = { Text("Add to playlist…") },
+                    onClick = {
+                        showMenu = false
+                        onAddToPlaylist()
+                    }
+                )
+            }
             if (downloadLabel != null && onDownloadAction != null) {
                 DropdownMenuItem(
                     text = { Text(downloadLabel) },
@@ -2355,4 +2806,760 @@ private fun initials(name: String): String {
         .take(2)
         .joinToString("")
         .ifBlank { name.take(1).uppercase() }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  Imported YouTube playlists (added by URL)
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * A pill-shaped chip for one imported YouTube playlist in the Media tab's
+ * playlist strip: icon + title + video count, with a small ✕ to remove (the
+ * ✕ consumes its own tap, so it never also opens the playlist).
+ */
+@Composable
+private fun PlaylistChip(
+    playlist: SavedPlaylist,
+    selected: Boolean,
+    videoCount: Int,
+    onClick: () -> Unit,
+    onRemove: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer
+        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 10.dp, top = 6.dp, bottom = 6.dp, end = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Filled.PlaylistPlay,
+                contentDescription = null,
+                tint = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+                else MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Column(modifier = Modifier.widthIn(max = 150.dp)) {
+                Text(
+                    text = playlist.title,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = if (videoCount > 0) "$videoCount videos" else "Loading…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
+            Spacer(Modifier.width(6.dp))
+            Box(
+                modifier = Modifier
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f))
+                    .clickable(onClick = onRemove),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Remove ${playlist.title}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(12.dp)
+                )
+            }
+        }
+    }
+}
+
+/** The "+" entry at the end of the playlist strip — opens the add-by-URL dialog. */
+@Composable
+private fun AddPlaylistChip(onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Filled.Add,
+                contentDescription = "Add playlist by URL",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = "Playlist",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * "Add playlist by URL": pastes a YouTube playlist link, resolves + fetches
+ * all its videos, and saves it. Invalid URLs, private playlists and network
+ * failures each show a friendly inline error instead of failing silently.
+ */
+@Composable
+private fun AddPlaylistDialog(
+    repository: MediaRepository,
+    onAdded: (SavedPlaylist) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var input by remember { mutableStateOf("") }
+    var status by remember { mutableStateOf<String?>(null) }
+    var adding by remember { mutableStateOf(false) }
+    val isError = status != null &&
+        (status!!.startsWith("Couldn't") ||
+            status!!.startsWith("This playlist") ||
+            status!!.startsWith("That") ||
+            status!!.startsWith("Enter"))
+
+    AlertDialog(
+        onDismissRequest = { if (!adding) onDismiss() },
+        title = { Text("Add playlist by URL") },
+        text = {
+            Column {
+                Text(
+                    text = "Paste a YouTube playlist link. All its videos will be fetched and shown like a normal feed.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it; status = null },
+                    singleLine = true,
+                    enabled = !adding,
+                    isError = isError,
+                    label = { Text("Playlist URL or id") }
+                )
+                if (status != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = status!!,
+                        color = if (isError) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !adding,
+                onClick = {
+                    adding = true
+                    status = null
+                    scope.launch {
+                        status = when (val result = repository.addPlaylist(input)) {
+                            is MediaRepository.AddPlaylistResult.Success -> {
+                                onAdded(result.playlist)
+                                null
+                            }
+                            is MediaRepository.AddPlaylistResult.Error -> result.message
+                        }
+                        adding = false
+                    }
+                }
+            ) { Text(if (adding) "Adding…" else "Add") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !adding) { Text("Cancel") }
+        }
+    )
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  User-created playlists (local library)
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * The "My Playlists" manager: every user-created playlist with open, rename
+ * and delete actions, plus a New playlist button. Tapping a playlist opens it
+ * as the current feed.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlaylistsSheet(
+    playlists: List<UserPlaylist>,
+    onOpen: (UserPlaylist) -> Unit,
+    onCreate: () -> Unit,
+    onRename: (UserPlaylist) -> Unit,
+    onDelete: (UserPlaylist) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.8f)
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
+            Text(
+                text = "My Playlists",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = onCreate,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("New playlist")
+            }
+            Spacer(Modifier.height(12.dp))
+            if (playlists.isEmpty()) {
+                Text(
+                    text = "No playlists yet. Create one to curate your own video list.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(playlists, key = { it.id }) { p ->
+                        UserPlaylistRow(
+                            playlist = p,
+                            onOpen = { onOpen(p) },
+                            onRename = { onRename(p) },
+                            onDelete = { onDelete(p) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One playlist row in the manager: leading thumbnail, name + count, rename / delete. */
+@Composable
+private fun UserPlaylistRow(
+    playlist: UserPlaylist,
+    onOpen: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Card(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(8.dp))
+            ) {
+                val first = playlist.videos.firstOrNull()
+                if (first != null) {
+                    RemoteImage(url = first.thumbnailUrl, modifier = Modifier.fillMaxSize())
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.PlaylistPlay,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = playlist.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${playlist.videos.size} video${if (playlist.videos.size == 1) "" else "s"}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            // Rename + delete consume their own taps (never open the playlist).
+            IconButton(onClick = onRename, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    Icons.Filled.Edit,
+                    contentDescription = "Rename playlist",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    Icons.Filled.Delete,
+                    contentDescription = "Delete playlist",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
+
+/** Create / rename dialog for a user playlist (blank names are rejected). */
+@Composable
+private fun PlaylistNameDialog(
+    initial: String,
+    title: String,
+    confirmLabel: String,
+    onSubmit: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf(initial) }
+    val focus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                label = { Text("Playlist name") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(
+                    onDone = { if (name.isNotBlank()) {
+                        onSubmit(name)
+                        keyboard?.hide()
+                    } }
+                )
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { if (name.isNotBlank()) onSubmit(name) },
+                enabled = name.isNotBlank()
+            ) { Text(confirmLabel) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+/**
+ * The playlist editor: every video in order with move-up / move-down / remove
+ * controls, plus an "Add videos" button that opens the picker. All edits save
+ * locally through the store and re-render instantly.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlaylistEditorSheet(
+    playlist: UserPlaylist,
+    onMove: (from: Int, to: Int) -> Unit,
+    onRemove: (videoId: String) -> Unit,
+    onAddVideos: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.92f)
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
+            Text(
+                text = playlist.name,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = "${playlist.videos.size} video${if (playlist.videos.size == 1) "" else "s"} · use ↑↓ to reorder",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(12.dp))
+            if (playlist.videos.isEmpty()) {
+                Text(
+                    text = "No videos yet. Tap Add videos to fill this playlist.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    itemsIndexed(playlist.videos, key = { _, v -> v.videoId }) { index, video ->
+                        PlaylistEditorRow(
+                            video = video,
+                            index = index,
+                            count = playlist.videos.size,
+                            onMoveUp = { onMove(index, index - 1) },
+                            onMoveDown = { onMove(index, index + 1) },
+                            onRemove = { onRemove(video.videoId) }
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = onAddVideos,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Filled.PlaylistAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Add videos")
+            }
+        }
+    }
+}
+
+/** One ordered row in the playlist editor: thumbnail, title, reorder + remove. */
+@Composable
+private fun PlaylistEditorRow(
+    video: MediaVideo,
+    index: Int,
+    count: Int,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onRemove: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(8.dp))
+            ) {
+                RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = video.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${index + 1} · ${video.channelName.ifBlank { "YouTube" }}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Row {
+                    IconButton(onClick = onMoveUp, enabled = index > 0, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            Icons.Filled.ArrowUpward,
+                            contentDescription = "Move up",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    IconButton(onClick = onMoveDown, enabled = index < count - 1, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            Icons.Filled.ArrowDownward,
+                            contentDescription = "Move down",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+                IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "Remove from playlist",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Multi-select picker of every known video (feed + library), to add into the
+ * open playlist. Only videos not already in the playlist are listed; already
+ * present ones can never be duplicated.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlaylistAddVideosSheet(
+    candidates: List<MediaVideo>,
+    alreadyIn: Set<String>,
+    onAdd: (List<MediaVideo>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedIds by remember { mutableStateOf(setOf<String>()) }
+    val available = remember(candidates, alreadyIn) {
+        candidates.filterNot { it.videoId in alreadyIn }
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.9f)
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
+            Text(
+                text = "Add videos",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = "${available.size} video${if (available.size == 1) "" else "s"} available · ${selectedIds.size} selected",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(12.dp))
+            if (available.isEmpty()) {
+                Text(
+                    text = "Nothing left to add — every known video is already in this playlist.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(available, key = { it.videoId }) { video ->
+                        val isSelected = video.videoId in selectedIds
+                        Surface(
+                            onClick = {
+                                selectedIds = if (isSelected) selectedIds - video.videoId
+                                else selectedIds + video.videoId
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isSelected)
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                            else
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                ) {
+                                    RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = video.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = video.channelName.ifBlank { "YouTube" },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .size(22.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(
+                                            if (isSelected) MaterialTheme.colorScheme.primary
+                                            else Color.Transparent
+                                        )
+                                        .border(
+                                            1.5.dp,
+                                            if (isSelected) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.outline,
+                                            RoundedCornerShape(6.dp)
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (isSelected) {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onPrimary,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = { onAdd(available.filter { it.videoId in selectedIds }) },
+                enabled = selectedIds.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    "Add ${selectedIds.size} video${if (selectedIds.size == 1) "" else "s"}"
+                )
+            }
+        }
+    }
+}
+
+/**
+ * "Add to playlist…" picker opened from a video card's ⋮ menu: tap a playlist
+ * to append the video (deduped — it can't be added twice), or create a new
+ * playlist seeded with it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AddToPlaylistSheet(
+    video: MediaVideo,
+    playlists: List<UserPlaylist>,
+    onAdd: (UserPlaylist) -> Unit,
+    onCreateNew: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
+            Text(
+                text = "Add to playlist",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = video.title,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(12.dp))
+            if (playlists.isEmpty()) {
+                Text(
+                    text = "No playlists yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                // heightIn keeps the list bounded inside the sheet (a plain
+                // LazyColumn must never measure against infinite height).
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.heightIn(max = 380.dp)
+                ) {
+                    items(playlists, key = { it.id }) { p ->
+                        Surface(
+                            onClick = { onAdd(p) },
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color.Transparent,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Filled.PlaylistPlay,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = p.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "${p.videos.size} video${if (p.videos.size == 1) "" else "s"}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Icon(
+                                    Icons.Filled.Add,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onCreateNew,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Filled.PlaylistAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("New playlist with this video")
+            }
+        }
+    }
 }

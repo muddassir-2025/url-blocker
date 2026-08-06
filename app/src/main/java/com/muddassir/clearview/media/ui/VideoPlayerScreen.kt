@@ -10,6 +10,7 @@ import android.text.format.DateUtils
 import android.util.Log
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -66,6 +67,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -78,6 +80,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -96,7 +99,9 @@ import com.muddassir.clearview.media.data.WatchProgressStore
 import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.download.DownloadStatus
 import com.muddassir.clearview.media.model.MediaVideo
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * In-app video player built on the YouTube IFrame Player API.
@@ -147,6 +152,47 @@ fun VideoPlayerScreen(
     // blurred loading placeholder shows only until that first start — buffering
     // caused by a forward/backward seek must NOT re-blur the video.
     var sourceStarted by remember { mutableStateOf(false) }
+
+    // ── Blurred-loading backdrop (smooth video transitions) ─────────
+    // While a NEW source loads (opening a video, swiping through Shorts), the
+    // loading placeholder must never flash blank. It shows the blurred
+    // thumbnail of the video we JUST LEFT — already in the in-memory cache,
+    // so it renders instantly — until the new video's own thumbnail has
+    // loaded, then crossfades to it. The thumbnails are tracked manually
+    // (SideEffect runs after every recomposition): when [video] changes,
+    // lastThumbnailUrl still holds the OLD video's thumbnail, so it is
+    // promoted to previousThumbnailUrl before the new URL takes over.
+    var lastThumbnailUrl by remember { mutableStateOf(video.thumbnailUrl) }
+    var previousThumbnailUrl by remember { mutableStateOf<String?>(null) }
+    // True once THIS video's thumbnail bitmap is ready (or already cached).
+    // Reset on every video change so the previous thumbnail leads the way.
+    var currentThumbnailReady by remember(video.videoId) { mutableStateOf(false) }
+    SideEffect {
+        if (lastThumbnailUrl != video.thumbnailUrl) {
+            previousThumbnailUrl = lastThumbnailUrl
+            lastThumbnailUrl = video.thumbnailUrl
+        }
+    }
+    // The backdrop URL to show: the new thumbnail once it's loaded, otherwise
+    // the previous video's (cached → instant, no blank frame).
+    val placeholderThumbnail = if (currentThumbnailReady) video.thumbnailUrl
+        else previousThumbnailUrl ?: video.thumbnailUrl
+    // Prefetch the NEW video's thumbnail while the previous one is on screen:
+    // the placeholder only ever DISPLAYS one URL at a time, so without this
+    // warm-up the new thumbnail would never load and the backdrop could never
+    // crossfade to it (it would show the previous video's blur until playback
+    // starts). Warm the shared cache so the crossfade fires the moment the new
+    // thumb is ready. A failed fetch just keeps the previous blurred backdrop.
+    LaunchedEffect(video.videoId, video.thumbnailUrl) {
+        val loaded = if (video.thumbnailUrl.isNotBlank()) {
+            withContext(Dispatchers.IO) {
+                ThumbnailCache.get(video.thumbnailUrl) != null
+            }
+        } else {
+            false
+        }
+        if (loaded) currentThumbnailReady = true
+    }
     // The "Open in YouTube app" option appears only after an in-app Retry has
     // already failed (per spec: "if the error persists after retrying once").
     var hasRetried by remember { mutableStateOf(false) }
@@ -579,7 +625,10 @@ fun VideoPlayerScreen(
             if (!sourceStarted) {
                 LoadingPlaceholderOverlay(
                     visible = isBuffering,
-                    thumbnailUrl = video.thumbnailUrl,
+                    thumbnailUrl = placeholderThumbnail,
+                    onThumbnailLoaded = { if (video.thumbnailUrl == placeholderThumbnail) {
+                        currentThumbnailReady = true
+                    } },
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -1183,11 +1232,16 @@ private fun VideoDownloadOverlay(
  * Fades the loading placeholder in/out. Wrapped in its own composable so the
  * [AnimatedVisibility] call resolves to the top-level overload (inside the
  * video Box the ColumnScope extension would otherwise be ambiguous).
+ *
+ * [thumbnailUrl] switches between the previous video's thumbnail (while the
+ * new one loads) and the new one (once ready) — a [Crossfade] inside makes the
+ * swap a smooth blur-to-blur transition instead of a blank/flashing frame.
  */
 @Composable
 private fun LoadingPlaceholderOverlay(
     visible: Boolean,
-    thumbnailUrl: String,
+    thumbnailUrl: String?,
+    onThumbnailLoaded: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     AnimatedVisibility(
@@ -1196,19 +1250,29 @@ private fun LoadingPlaceholderOverlay(
         exit = fadeOut(animationSpec = tween(400)),
         modifier = modifier
     ) {
-        VideoLoadingPlaceholder(thumbnailUrl = thumbnailUrl)
+        Crossfade(
+            targetState = thumbnailUrl,
+            animationSpec = tween(300),
+            label = "loading-placeholder-blur"
+        ) { url ->
+            VideoLoadingPlaceholder(
+                thumbnailUrl = url.orEmpty(),
+                onLoaded = onThumbnailLoaded
+            )
+        }
     }
 }
 
 /**
  * The loading placeholder shown over the player until the video is ready: a
- * blurred, darkened thumbnail of the actual video poster (no icon, no spinner,
- * no text) or a plain dark box when no thumbnail is available. The video fades
- * in beneath it, so there's no layout shift.
+ * blurred, darkened thumbnail of the video poster (no icon, no spinner,
+ * no text) or a plain dark gradient when no thumbnail is available. The video
+ * fades in beneath it, so there's no layout shift.
  */
 @Composable
 private fun VideoLoadingPlaceholder(
     thumbnailUrl: String,
+    onLoaded: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Box(modifier = modifier.background(Color.Black)) {
@@ -1216,6 +1280,7 @@ private fun VideoLoadingPlaceholder(
             RemoteImage(
                 url = thumbnailUrl,
                 showLoadingSpinner = false,
+                onLoaded = onLoaded,
                 modifier = Modifier
                     .fillMaxSize()
                     .scale(1.15f) // cover the blur's soft edges
@@ -1226,6 +1291,19 @@ private fun VideoLoadingPlaceholder(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black.copy(alpha = 0.45f))
+            )
+        } else {
+            // No thumbnail yet — a soft dark gradient instead of a flat,
+            // jarring black screen.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0f to Color(0xFF141414),
+                            1f to Color(0xFF000000)
+                        )
+                    )
             )
         }
     }

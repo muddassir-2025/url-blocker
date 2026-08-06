@@ -141,8 +141,13 @@ fun decodeFeedFilter(json: String?): FeedFilter? {
         val o = JSONObject(json)
         val date = runCatching { FeedDateFilter.valueOf(o.optString("date", "")) }.getOrNull()
             ?: return null
-        val content = runCatching { FeedContentFilter.valueOf(o.optString("content", "")) }.getOrNull()
+        var content = runCatching { FeedContentFilter.valueOf(o.optString("content", "")) }.getOrNull()
             ?: return null
+        // The Live content filter was removed from the UI (Filter → Content); a
+        // filter saved by an older build could still hold it, which would leave
+        // the user with an active filter they can no longer reach. Migrate it to
+        // All so the feed never silently locks to a hidden filter.
+        if (content == FeedContentFilter.LIVE) content = FeedContentFilter.ALL
         val sort = runCatching { FeedSortOrder.valueOf(o.optString("sort", "")) }.getOrNull()
             ?: return null
         val watchStatus = runCatching {

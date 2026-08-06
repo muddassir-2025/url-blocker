@@ -100,10 +100,19 @@ class BlockOverlayActivity : ComponentActivity() {
                         Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
             }
             startActivity(intent)
+            // No enter animation for the launcher: prevents the "floating app
+            // icon" fly animation some launchers play when Home appears.
+            overridePendingTransition(0, 0)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to exit to Home: ${e.message}")
         }
         finish()
+        // No exit animation for the overlay either — the theme's alpha-only
+        // windowAnimationStyle is a second line of defense (see
+        // Theme.Urlblocker.Overlay); this call kills the animation for the
+        // finish() above in one go, so the transition back to the launcher is
+        // a clean, immediate hand-off with no icon animation.
+        overridePendingTransition(0, 0)
     }
 
     @Deprecated("Suppress deprecated flag usage", ReplaceWith(""))

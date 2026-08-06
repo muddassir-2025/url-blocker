@@ -6,9 +6,12 @@ import com.muddassir.clearview.media.model.FeedFilter
 import com.muddassir.clearview.media.model.MediaChannelUpdate
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.model.SavedChannel
+import com.muddassir.clearview.media.model.SavedPlaylist
 import com.muddassir.clearview.media.util.MediaUpdates
+import com.muddassir.clearview.media.util.PlaylistPageParser
 import com.muddassir.clearview.media.util.decodeFeedFilter
 import com.muddassir.clearview.media.util.encodeFeedFilter
+import com.muddassir.clearview.media.util.extractYouTubePlaylistId
 import com.muddassir.clearview.media.util.extractYouTubeVideoId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -288,18 +291,8 @@ class MediaRepository(context: Context) {
      * when nothing is cached yet. Also surfaces the cache age so the UI can
      * show a "cached" hint.
      */
-    fun getCachedVideos(channelId: String): Pair<List<MediaVideo>, Long>? {
-        val file = cacheFile(channelId)
-        if (!file.exists()) return null
-        return try {
-            val obj = JSONObject(file.readText(Charsets.UTF_8))
-            val savedAt = obj.optLong("savedAt", 0L)
-            val videos = parseVideos(obj.optJSONArray("videos"))
-            if (videos.isEmpty()) null else videos to savedAt
-        } catch (e: Exception) {
-            null
-        }
-    }
+    fun getCachedVideos(channelId: String): Pair<List<MediaVideo>, Long>? =
+        readVideosFile(cacheFile(channelId))
 
     /**
      * Fetches the channel's RSS feed, parses the latest videos, updates the
@@ -600,6 +593,24 @@ class MediaRepository(context: Context) {
         File(appContext.filesDir, "media_videos_$channelId.json")
 
     private fun writeCache(channelId: String, videos: List<MediaVideo>) {
+        writeVideosFile(cacheFile(channelId), videos)
+    }
+
+    /** Shared cache reader for channel and playlist caches (same JSON layout). */
+    private fun readVideosFile(file: File): Pair<List<MediaVideo>, Long>? {
+        if (!file.exists()) return null
+        return try {
+            val obj = JSONObject(file.readText(Charsets.UTF_8))
+            val savedAt = obj.optLong("savedAt", 0L)
+            val videos = parseVideos(obj.optJSONArray("videos"))
+            if (videos.isEmpty()) null else videos to savedAt
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Shared cache writer for channel and playlist caches (same JSON layout). */
+    private fun writeVideosFile(file: File, videos: List<MediaVideo>) {
         val arr = JSONArray()
         videos.forEach { v ->
             arr.put(
@@ -619,7 +630,7 @@ class MediaRepository(context: Context) {
         val obj = JSONObject()
             .put("savedAt", System.currentTimeMillis())
             .put("videos", arr)
-        cacheFile(channelId).writeText(obj.toString(), Charsets.UTF_8)
+        file.writeText(obj.toString(), Charsets.UTF_8)
     }
 
     private fun parseVideos(arr: JSONArray?): List<MediaVideo> {
@@ -645,11 +656,185 @@ class MediaRepository(context: Context) {
         }
     }
 
+    // ── Saved playlists (imported by URL) ──────────────────────────
+
+    /**
+     * Saved YouTube playlists, oldest first. Unlike channels, a fresh install
+     * starts with NO playlists — they're purely user-imported.
+     */
+    fun getSavedPlaylists(): List<SavedPlaylist> {
+        val json = prefs.getString(KEY_PLAYLISTS, null) ?: return emptyList()
+        return parsePlaylists(json)
+    }
+
+    /** Result of adding a playlist: success (with the playlist) or an error message. */
+    sealed class AddPlaylistResult {
+        data class Success(val playlist: SavedPlaylist) : AddPlaylistResult()
+        data class Error(val message: String) : AddPlaylistResult()
+    }
+
+    /**
+     * Resolves [input] (playlist URL or bare id), fetches the playlist's
+     * videos, caches them and saves the playlist. Returns a friendly error for
+     * non-playlist input, unreachable / invalid playlists, private playlists
+     * and network failures.
+     */
+    suspend fun addPlaylist(input: String): AddPlaylistResult = withContext(Dispatchers.IO) {
+        val trimmed = input.trim()
+        if (trimmed.isEmpty()) {
+            return@withContext AddPlaylistResult.Error("Enter a YouTube playlist URL or id")
+        }
+        val playlistId = extractYouTubePlaylistId(trimmed)
+            ?: return@withContext AddPlaylistResult.Error(
+                "That doesn't look like a YouTube playlist URL."
+            )
+        if (getSavedPlaylists().any { it.playlistId == playlistId }) {
+            return@withContext AddPlaylistResult.Error("That playlist is already saved")
+        }
+        val info = fetchPlaylistInfo(playlistId)
+            ?: return@withContext AddPlaylistResult.Error(
+                "Couldn't load that playlist. Check the URL and your connection."
+            )
+        if (info.videos.isEmpty()) {
+            return@withContext AddPlaylistResult.Error(
+                "This playlist is private or unavailable."
+            )
+        }
+        val playlist = SavedPlaylist(
+            playlistId = playlistId,
+            title = info.title.ifBlank { "YouTube Playlist" },
+            sourceRef = trimmed
+        )
+        savePlaylists(getSavedPlaylists() + playlist)
+        writeVideosFile(playlistCacheFile(playlistId), info.videos)
+        AddPlaylistResult.Success(playlist)
+    }
+
+    fun removePlaylist(playlistId: String) {
+        savePlaylists(getSavedPlaylists().filterNot { it.playlistId == playlistId })
+        playlistCacheFile(playlistId).delete()
+    }
+
+    private fun savePlaylists(playlists: List<SavedPlaylist>) {
+        val arr = JSONArray()
+        playlists.forEach { p ->
+            arr.put(
+                JSONObject()
+                    .put("playlistId", p.playlistId)
+                    .put("title", p.title)
+                    .put("sourceRef", p.sourceRef)
+            )
+        }
+        prefs.edit().putString(KEY_PLAYLISTS, arr.toString()).apply()
+    }
+
+    private fun parsePlaylists(json: String): List<SavedPlaylist> {
+        return try {
+            val arr = JSONArray(json)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.getJSONObject(i)
+                SavedPlaylist(
+                    playlistId = o.getString("playlistId"),
+                    title = o.optString("title", "YouTube Playlist"),
+                    sourceRef = o.optString("sourceRef", o.getString("playlistId"))
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    // ── Playlist videos (page scrape + RSS fallback + cache) ──────
+
+    /** Cached videos for [playlistId] (never network). Null when nothing cached. */
+    fun getCachedPlaylistVideos(playlistId: String): Pair<List<MediaVideo>, Long>? =
+        readVideosFile(playlistCacheFile(playlistId))
+
+    /**
+     * Refetches the playlist's videos, updates its cache and returns them in
+     * playlist order. Returns null on a network/parse failure (UI falls back
+     * to the cache) and an EMPTY list when the playlist is definitively
+     * private / has no visible videos (UI shows the friendly message).
+     */
+    suspend fun refreshPlaylistVideos(playlistId: String): List<MediaVideo>? =
+        withContext(Dispatchers.IO) {
+            val info = fetchPlaylistInfo(playlistId) ?: return@withContext null
+            if (info.videos.isEmpty()) return@withContext emptyList()
+            writeVideosFile(playlistCacheFile(playlistId), info.videos)
+            info.videos
+        }
+
+    private fun playlistCacheFile(playlistId: String): File =
+        File(appContext.filesDir, "media_playlist_$playlistId.json")
+
+    /**
+     * Fetches the playlist page and parses its `ytInitialData`. A successful
+     * page load is authoritative — a private/unavailable playlist returns an
+     * info with an empty video list (no RSS fallback, that's the answer). Only
+     * when the page fetch itself fails does the RSS feed get tried (it returns
+     * the newest ~15 videos).
+     */
+    private fun fetchPlaylistInfo(playlistId: String): PlaylistPageParser.PlaylistInfo? {
+        val pageUrl = "https://www.youtube.com/playlist?list=$playlistId"
+        var connection: HttpURLConnection? = null
+        try {
+            connection = (URL(pageUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                requestMethod = "GET"
+                setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+                setRequestProperty(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
+                        "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+                )
+            }
+            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                val html = connection.inputStream.bufferedReader(Charsets.UTF_8).use {
+                    it.readText()
+                }
+                PlaylistPageParser.parsePage(html)?.let { return it }
+            }
+        } catch (e: Exception) {
+            // Page scrape failed — fall through to the RSS fallback.
+        } finally {
+            connection?.disconnect()
+        }
+        return fetchPlaylistRss(playlistId)
+    }
+
+    /** RSS fallback for playlists: `feeds/videos.xml?playlist_id=` (newest ~15). */
+    private fun fetchPlaylistRss(playlistId: String): PlaylistPageParser.PlaylistInfo? {
+        val url = "https://www.youtube.com/feeds/videos.xml?playlist_id=$playlistId"
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/atom+xml")
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val videos = YouTubeRssParser.parse(body, emptySet())
+            val title = Regex("""<title>(.*?)</title>""", RegexOption.DOT_MATCHES_ALL)
+                .find(body)?.groupValues?.getOrNull(1)?.trim()
+                ?.takeIf { it.isNotBlank() }
+            PlaylistPageParser.PlaylistInfo(title ?: "", videos)
+        } catch (e: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
     private companion object {
         const val TAG = "MediaRepository"
         const val PREFS_NAME = "media_prefs"
         const val KEY_CHANNELS = "saved_channels"
         const val KEY_SELECTED_CHANNEL = "selected_channel"
+        const val KEY_PLAYLISTS = "saved_playlists"
         const val KEY_MEDIA_NOTIFICATIONS_ENABLED = "media_notifications_enabled"
         const val KEY_NOTIFIED_VIDEOS = "notified_video_ids"
         const val KEY_UPDATES_HISTORY = "updates_history"
