@@ -309,6 +309,18 @@ class FeedFiltersTest {
     }
 
     @Test
+    fun `source by rss keeps only channel-feed videos`() {
+        val all = listOf(video("manual", now - day), video("auto", now - 2 * day))
+        val result = applyFeedFilter(
+            all,
+            FeedFilter(source = FeedSourceFilter.BY_RSS, watchStatus = FeedWatchStatus.ALL),
+            now,
+            isManual = { it == "manual" }
+        )
+        assertEquals(listOf("auto"), result.map { it.videoId })
+    }
+
+    @Test
     fun `source combines with watch status`() {
         val all = listOf(
             video("manual-watched", now - day),

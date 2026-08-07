@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ClearView monochrome layer (Android 13+ themed icons). The exact same
+     heart silhouette as the foreground; the system applies its own tint, only
+     the alpha channel is used. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M54,74.185 l-3.19,-2.904 C39.48,61.007 32,54.231 32,45.915 C32,39.139 37.324,33.815 44.1,33.815 c3.828,0 7.502,1.782 9.9,4.598 C56.398,35.597 60.072,33.815 63.9,33.815 C70.676,33.815 76,39.139 76,45.915 c0,8.316 -7.48,15.092 -18.81,25.388 L54,74.185z" />
+</vector>

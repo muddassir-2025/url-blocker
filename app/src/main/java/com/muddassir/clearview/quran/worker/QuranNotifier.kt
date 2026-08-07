@@ -62,7 +62,7 @@ object QuranNotifier {
 
         val quoted = "\u201C${verse.text}\u201D"
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_widget_copy)
+            .setSmallIcon(R.drawable.ic_stat_clearview)
             .setContentTitle(
                 context.getString(R.string.quran_new_verse_notification_title, verse.surahName)
             )

@@ -394,7 +394,7 @@ class AudioPlaybackService : Service() {
         val posSec = (OfflineAudioPlayer.positionMs.longValue / 1000L).toInt().coerceAtLeast(0)
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_audio_notification)
+            .setSmallIcon(R.drawable.ic_stat_clearview)
             .setContentTitle(currentTitle)
             .setContentText(currentChannel)
             .setContentIntent(contentIntent)

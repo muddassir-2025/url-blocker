@@ -770,7 +770,7 @@ fun contentHubNavItems(): List<ContentHubNavItem> = listOf(
  * the current context isn't an [Activity].
  */
 @Composable
-fun applyImmersiveIfNeeded(isFullscreen: Boolean) {
+fun ApplyImmersiveIfNeeded(isFullscreen: Boolean) {
     val context = LocalContext.current
     val activity = context as? Activity
     LaunchedEffect(isFullscreen) {

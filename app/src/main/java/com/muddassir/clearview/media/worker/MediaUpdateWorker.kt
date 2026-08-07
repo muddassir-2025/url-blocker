@@ -11,8 +11,17 @@ import com.muddassir.clearview.media.data.MediaRepository
  * media notification ("… has an update") for each channel with something new.
  *
  * No-ops fast when the media-notifications toggle is off or no channels are
- * saved. New videos are tracked by id so a video is only ever notified once
- * (the set is capped at [MediaRepository.MAX_NOTIFIED_VIDEOS]).
+ * saved. A video is only ever notified once, guarded by TWO independent
+ * conditions:
+ *
+ *  1. The persisted notified-id set — a video id is baselined when its channel
+ *     is added (and after every notification), so re-fetches of the same RSS
+ *     can never re-notify, across restarts and worker retries.
+ *  2. The channel's subscription timestamp — a video is only even eligible if
+ *     it was published at/after the channel was added. This is the safety net
+ *     for the add-time baseline: if that first fetch failed (offline etc.) and
+ *     no ids were baselined, the channel's pre-existing backlog still never
+ *     notifies. Legacy channels (addedAt == 0) are unaffected.
  */
 class MediaUpdateWorker(
     appContext: Context,
@@ -33,7 +42,17 @@ class MediaUpdateWorker(
         val fresh = repository.refreshAllVideos(channels) ?: return Result.success()
 
         val alreadyNotified = repository.getNotifiedVideoIds()
-        val newVideos = fresh.filter { it.videoId !in alreadyNotified }
+        // Videos only count as new when they were published at/after the moment
+        // the channel was subscribed AND their id was never seen before.
+        val addedAtByChannel = channels.associate { it.channelId to it.addedAtEpochMillis }
+        val newVideos = fresh.filter { v ->
+            isNotificationEligible(
+                videoId = v.videoId,
+                publishedAtEpochMillis = v.publishedAtEpochMillis,
+                addedAtEpochMillis = addedAtByChannel[v.channelId] ?: 0L,
+                alreadyNotified = alreadyNotified
+            )
+        }
         if (newVideos.isEmpty()) return Result.success()
 
         // One update per channel with a new video, newest channel first.
@@ -56,3 +75,20 @@ class MediaUpdateWorker(
         return Result.success()
     }
 }
+
+/**
+ * A video deserves a notification when its id was never seen before AND it was
+ * published at/after the moment its channel was subscribed. The timestamp
+ * guard is the safety net for the add-time baseline: if that first fetch
+ * failed (offline etc.) and no ids were baselined, a channel's pre-existing
+ * backlog must still never notify. Legacy channels carry [addedAtEpochMillis]
+ * == 0, which admits every video — exactly their pre-feature behavior.
+ */
+internal fun isNotificationEligible(
+    videoId: String,
+    publishedAtEpochMillis: Long,
+    addedAtEpochMillis: Long,
+    alreadyNotified: Set<String>
+): Boolean =
+    videoId !in alreadyNotified &&
+        publishedAtEpochMillis >= addedAtEpochMillis.coerceAtLeast(0L)

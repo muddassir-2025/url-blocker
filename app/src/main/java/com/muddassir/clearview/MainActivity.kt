@@ -42,7 +42,7 @@ import com.muddassir.clearview.ui.BlockTab
 import com.muddassir.clearview.ui.ContentHubTabContent
 import com.muddassir.clearview.ui.ContentHubTopBar
 import com.muddassir.clearview.ui.ContentTab
-import com.muddassir.clearview.ui.applyImmersiveIfNeeded
+import com.muddassir.clearview.ui.ApplyImmersiveIfNeeded
 import com.muddassir.clearview.ui.contentHubNavItems
 import com.muddassir.clearview.ui.isLandscape
 import com.muddassir.clearview.ui.rememberContentHubState
@@ -186,7 +186,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     val isFullscreen =
         (landscape && (hub.playingVideo != null || hub.selectedTab == ContentTab.LIVE)) ||
             (hub.playerFullscreen && hub.playingVideo != null)
-    applyImmersiveIfNeeded(isFullscreen)
+    ApplyImmersiveIfNeeded(isFullscreen)
 
     Scaffold(
         topBar = {

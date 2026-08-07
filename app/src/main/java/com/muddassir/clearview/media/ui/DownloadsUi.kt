@@ -128,9 +128,8 @@ fun DownloadsSection(
     searchQuery: String = "",
     onSearchQueryChange: (String) -> Unit = {},
     /**
-     * Source filter (All / By URL / From device / From channels / In
-     * playlists). Hoisted to the Media tab so the header's result count
-     * matches the visible list.
+     * Source filter (All / By URL / By RSS / From device). Hoisted to the
+     * Media tab so the header's result count matches the visible list.
      */
     sourceFilter: DownloadSourceFilter = DownloadSourceFilter.ALL,
     onSourceFilterChange: (DownloadSourceFilter) -> Unit = {},

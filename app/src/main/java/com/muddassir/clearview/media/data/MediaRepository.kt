@@ -13,10 +13,12 @@ import com.muddassir.clearview.media.util.decodeFeedFilter
 import com.muddassir.clearview.media.util.encodeFeedFilter
 import com.muddassir.clearview.media.util.extractYouTubePlaylistId
 import com.muddassir.clearview.media.util.extractYouTubeVideoId
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -94,16 +96,22 @@ class MediaRepository(context: Context) {
         val channel = SavedChannel(
             channelId = channelId,
             displayName = trimmed.removePrefix("@"),
-            sourceRef = trimmed
+            sourceRef = trimmed,
+            // Subscription moment: the worker's notification guard treats every
+            // video published before this instant as pre-existing backlog that
+            // must never be notified (see MediaUpdateWorker).
+            addedAtEpochMillis = System.currentTimeMillis()
         )
         saveChannels(existing + channel)
         // Notification baseline: fetch the new channel's feed immediately and
         // mark EVERY existing video as already-notified, so the background
         // worker never notifies about pre-existing uploads (the "added a
         // channel → notification spam of old videos" bug). The feed is also
-        // cached here, so the Media tab shows the content right away.
+        // cached here, so the Media tab shows the content right away. The
+        // refresh skips duration enrichment (enrich = false) so the dialog
+        // stays fast — the feed effect enriches the channel right after.
         runCatching {
-            refreshVideos(channelId)?.let { fresh ->
+            refreshVideos(channelId, enrich = false)?.let { fresh ->
                 if (fresh.isNotEmpty()) {
                     markVideosNotified(getNotifiedVideoIds() + fresh.map { it.videoId })
                 }
@@ -136,6 +144,7 @@ class MediaRepository(context: Context) {
                     .put("displayName", c.displayName)
                     .put("sourceRef", c.sourceRef)
                     .put("avatarUrl", c.avatarUrl ?: "")
+                    .put("addedAt", c.addedAtEpochMillis)
             )
         }
         prefs.edit().putString(KEY_CHANNELS, arr.toString()).apply()
@@ -150,7 +159,10 @@ class MediaRepository(context: Context) {
                     channelId = o.getString("channelId"),
                     displayName = o.optString("displayName", o.getString("channelId")),
                     sourceRef = o.optString("sourceRef", o.getString("channelId")),
-                    avatarUrl = o.optString("avatarUrl", "").ifBlank { null }
+                    avatarUrl = o.optString("avatarUrl", "").ifBlank { null },
+                    // Missing on channels saved by older builds → 0 → the
+                    // worker's subscription guard stays inactive for them.
+                    addedAtEpochMillis = o.optLong("addedAt", 0L)
                 )
             }
         } catch (e: Exception) {
@@ -298,8 +310,15 @@ class MediaRepository(context: Context) {
      * Fetches the channel's RSS feed, parses the latest videos, updates the
      * local cache and returns them. Returns null on any network/parse failure
      * so the UI can fall back to the cache and show an error hint.
+     *
+     * [enrich] skips the expensive watch-page duration enrichment (used by the
+     * add-channel path so the dialog stays fast — the feed's own refresh
+     * enriches on its next run).
      */
-    suspend fun refreshVideos(channelId: String): List<MediaVideo>? = withContext(Dispatchers.IO) {
+    suspend fun refreshVideos(
+        channelId: String,
+        enrich: Boolean = true
+    ): List<MediaVideo>? = withContext(Dispatchers.IO) {
         val url = "https://www.youtube.com/feeds/videos.xml?channel_id=$channelId"
         var connection: HttpURLConnection? = null
         try {
@@ -328,8 +347,10 @@ class MediaRepository(context: Context) {
                 if (known != null) v.copy(durationSeconds = known) else v
             }
             // Then enrich the newest still-unknown videos with their duration
-            // (best-effort: a failure just leaves the badge off).
-            val videos = enrichDurations(withKnown)
+            // (best-effort: a failure just leaves the badge off). The add-channel
+            // path skips enrichment so the dialog stays fast — the feed effect
+            // enriches on its own refresh right after.
+            val videos = if (enrich) enrichDurations(withKnown) else withKnown
             // Trace every feed item straight from the parsed RSS so we can
             // confirm the videoId handed to the embedded player belongs to
             // this exact RSS entry (no stale/mixed/hardcoded ids).
@@ -351,6 +372,12 @@ class MediaRepository(context: Context) {
             }
             if (videos.isNotEmpty()) writeCache(channelId, videos)
             videos
+        } catch (e: CancellationException) {
+            // Never report a cancelled refresh as a channel failure — the caller
+            // (the feed effect) restarts and refetches anyway. Rethrowing keeps
+            // the cancellation propagating so a dropped channel can't poison the
+            // merged feed with a bogus null.
+            throw e
         } catch (e: Exception) {
             null
         } finally {
@@ -571,18 +598,52 @@ class MediaRepository(context: Context) {
 
     /**
      * Refreshes EVERY channel's RSS feed and merges the results, newest
-     * first. Returns null only when every channel failed (the UI falls back to
-     * the cache and shows an error hint); partial failures keep the feeds that
-     * succeeded.
+     * first. Channels are refreshed CONCURRENTLY with [concurrency] feeds in
+     * flight at once (each channel's own duration enrichment is already
+     * internally bounded), so a multi-channel feed loads much faster than a
+     * strictly sequential pass. A [batchDelayMs] pause is inserted between
+     * batches so the request bursts don't stack into one rate-limit window.
+     * A channel whose refresh FAILED keeps its cached videos (if any), so a
+     * transient failure never drops the channel from the merged feed — this is
+     * what lets the background worker still see its content and what keeps the
+     * Media tab's own merge effective. Returns null only when every channel
+     * failed AND nothing is cached (callers then fall back to the cache / show
+     * an error hint). A legitimately EMPTY feed (fetched fine, no entries) is
+     * not a failure and contributes nothing.
      */
-    suspend fun refreshAllVideos(channels: List<SavedChannel>): List<MediaVideo>? {
+    suspend fun refreshAllVideos(
+        channels: List<SavedChannel>,
+        concurrency: Int = 3,
+        batchDelayMs: Long = 500
+    ): List<MediaVideo>? {
         var anySucceeded = false
         val merged = ArrayList<MediaVideo>()
-        for (channel in channels) {
-            val fresh = refreshVideos(channel.channelId)
-            if (fresh != null) {
-                anySucceeded = true
-                merged.addAll(fresh)
+        channels.chunked(concurrency).forEachIndexed { index, batch ->
+            // Brief pause between batches (never before the first): each batch
+            // can fire up to `concurrency` channels × (RSS + /shorts + watch
+            // pages) at once, so spacing them keeps the peak request rate down.
+            if (index > 0 && batchDelayMs > 0L) delay(batchDelayMs)
+            // refreshVideos never throws except on cancellation (which must
+            // propagate — a cancelled channel is NOT a failed channel), so the
+            // batch awaits raw and lets awaitAll rethrow on cancel. A failed
+            // refresh falls back to the channel's cached feed (read on IO, so
+            // the file read never touches the caller's main thread) — the
+            // channel isn't dropped from the merged result.
+            val results = coroutineScope {
+                batch.map { channel ->
+                    async {
+                        val channelId = channel.channelId
+                        withContext(Dispatchers.IO) {
+                            refreshVideos(channelId) ?: getCachedVideos(channelId)?.first
+                        }
+                    }
+                }.awaitAll()
+            }
+            for (fresh in results) {
+                if (fresh != null) {
+                    anySucceeded = true
+                    merged.addAll(fresh)
+                }
             }
         }
         if (!anySucceeded) return null

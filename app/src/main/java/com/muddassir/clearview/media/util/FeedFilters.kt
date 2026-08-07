@@ -75,6 +75,9 @@ fun applyFeedFilter(
             FeedSourceFilter.BY_URL -> isManual(v.videoId)
             // "From channels": pulled automatically from the saved channels.
             FeedSourceFilter.SYSTEM -> !isManual(v.videoId)
+            // "By RSS" is offered inside user playlists; in the All Feed it
+            // matches the same channel-feed videos as "From channels".
+            FeedSourceFilter.BY_RSS -> !isManual(v.videoId)
         }
         afterStart && beforeEnd && typeOk && statusOk && sourceOk
     }

@@ -51,15 +51,12 @@ class DownloadFiltersTest {
         val unknown = item("x1", "mystery")
         assertTrue(matchesDownloadSource(unknown, DownloadSourceFilter.ALL))
         assertFalse(matchesDownloadSource(unknown, DownloadSourceFilter.BY_URL))
+        assertFalse(matchesDownloadSource(unknown, DownloadSourceFilter.BY_RSS))
         assertFalse(matchesDownloadSource(unknown, DownloadSourceFilter.DEVICE))
     }
 
     @Test
-    fun `channel-feed downloads only match the all filter`() {
-        // RSS (channel-feed) downloads have no dedicated option any more —
-        // they are only visible under All.
-        assertTrue(matchesDownloadSource(items[2], DownloadSourceFilter.ALL))
-        assertFalse(matchesDownloadSource(items[2], DownloadSourceFilter.BY_URL))
-        assertFalse(matchesDownloadSource(items[2], DownloadSourceFilter.DEVICE))
+    fun `by rss keeps only channel-feed downloads`() {
+        assertEquals(listOf("rss1"), filtered(DownloadSourceFilter.BY_RSS))
     }
 }

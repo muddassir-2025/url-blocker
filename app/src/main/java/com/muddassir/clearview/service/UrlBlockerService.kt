@@ -2739,12 +2739,37 @@ class UrlBlockerService : AccessibilityService() {
                 putExtra("blocked_item", result.matchedItem)
                 putExtra("blocked_type", result.matchType.name)
                 putExtra("source_package", sourcePackage)
+                // The overlay explains Strict Mode when a broad keyword caused
+                // this block (see isStrictModeBlock).
+                putExtra("strict_hit", isStrictModeBlock(result))
             }
             startActivity(intent)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to show block overlay: ${e.message}", e)
             goToHome()
         }
+    }
+
+    /**
+     * True when [result] is a built-in keyword block whose keyword belongs to
+     * Strict Mode's broad sets AND at least one Strict toggle is on — i.e.
+     * the block happened because of Strict Mode, not a base/custom/domain
+     * rule. The overlay uses this to explain how to search the term
+     * legitimately (turn Strict Mode off).
+     */
+    private fun isStrictModeBlock(result: MatchResult.Blocked): Boolean {
+        if (result.matchType != MatchType.BUILT_IN_KEYWORD) return false
+        if (!repository.isStrictMode && !repository.blockGenderTermsInGoogleApp) return false
+        val keyword = result.matchedItem.trim().lowercase(Locale.ROOT)
+        if (keyword !in BlockRepository.STRICT_MODE_KEYWORDS &&
+            keyword !in BlockRepository.TAB_RESTRICTED_KEYWORDS
+        ) {
+            return false
+        }
+        // Words that are ALSO base adult keywords block without Strict Mode —
+        // the note must not imply that turning it off would unblock them.
+        val baseAdult = BlockRepository.ADULT_KEYWORDS_BY_CATEGORY.values.flatten().toSet()
+        return keyword !in baseAdult
     }
 
     private fun goToHome() {

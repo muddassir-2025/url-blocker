@@ -74,4 +74,30 @@ class MediaVideosTest {
         assertEquals(listOf("new", "mid", "old"), merged.map { it.videoId })
         assertTrue(merged.first().publishedAtEpochMillis > merged.last().publishedAtEpochMillis)
     }
+
+    // The Media-tab feed merge (fresh + cached): fresh (RSS, just fetched —
+    // carries this round's enriched durations) wins for overlap, while videos
+    // only present in the cache are KEPT — a channel whose refresh failed
+    // this round must not vanish from the feed. This is the regression guard
+    // for the "newly added channel never shows its feed" bug.
+    @Test
+    fun `feed merge prefers fresh but keeps cached-only videos`() {
+        // Cached state: channel A's videos + channel B's videos (B is the
+        // newly added channel, cache written by addChannel without durations).
+        val cached = listOf(
+            video("a1", 100L).copy(durationSeconds = 0L), // B's fresh copy missing → cached must stay
+            video("b1", 200L).copy(durationSeconds = 0L)
+        )
+        // Fresh refresh this round: A succeeded (enriched), B FAILED (absent).
+        val fresh = listOf(
+            video("a1", 100L).copy(durationSeconds = 7542L, viewCount = 9L)
+        )
+        val merged = MediaVideos.merge(fresh, cached)
+        // Both channels present — B did not vanish despite its failed refresh.
+        assertEquals(setOf("a1", "b1"), merged.map { it.videoId }.toSet())
+        // A keeps the FRESH (enriched) copy, not the stale cached one.
+        val a1 = merged.first { it.videoId == "a1" }
+        assertEquals(7542L, a1.durationSeconds)
+        assertEquals(9L, a1.viewCount)
+    }
 }

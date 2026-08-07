@@ -15,6 +15,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -66,8 +68,10 @@ class BlockOverlayActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Make this activity full-screen and impossible to bypass
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        // Make this activity full-screen and impossible to bypass. ALWAYS mode
+        // is only available from API 30 (Android 11) — older versions use the
+        // default cutout behavior, which is fine for the overlay.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         }
@@ -75,6 +79,9 @@ class BlockOverlayActivity : ComponentActivity() {
 
         val blockedItem = intent.getStringExtra("blocked_item") ?: "content"
         val blockedType = intent.getStringExtra("blocked_type") ?: "MATCHED"
+        // Whether this block came from Strict Mode's broad keywords — the
+        // overlay then shows a short note about searching the term legitimately.
+        val strictHit = intent.getBooleanExtra("strict_hit", false)
 
         // NOTE: incognito never reaches this overlay anymore — the service
         // closes the incognito tabs and lands the user on Home directly (simple,
@@ -87,6 +94,7 @@ class BlockOverlayActivity : ComponentActivity() {
                 BlockOverlayScreen(
                     blockedItem = blockedItem,
                     blockedType = blockedType,
+                    strictHit = strictHit,
                     onDismiss = { exitToDestination() }
                 )
             }
@@ -169,6 +177,9 @@ class BlockOverlayActivity : ComponentActivity() {
 private fun BlockOverlayScreen(
     blockedItem: String,
     blockedType: String,
+    /** When the block came from Strict Mode's broad keywords, a short note
+     *  explains that it's on and how to search the term legitimately. */
+    strictHit: Boolean = false,
     onDismiss: () -> Unit
 ) {
     var visible by remember { mutableStateOf(false) }
@@ -220,7 +231,10 @@ private fun BlockOverlayScreen(
             Column(
                 modifier = Modifier
                     .padding(32.dp)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    // Scrolls so the Strict Mode note card can't push the
+                    // message off-screen on short displays (landscape etc.).
+                    .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
@@ -264,6 +278,22 @@ private fun BlockOverlayScreen(
                         fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )
+                }
+
+                if (strictHit) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        shape = MaterialTheme.shapes.medium
+                    ) {
+                        Text(
+                            text = "Strict Mode is on. This block came from its broad keywords — if you're searching this term for a legitimate reason (health, education, research), you can turn Strict Mode off in the app: Block tab → Strict Mode.",
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(32.dp))

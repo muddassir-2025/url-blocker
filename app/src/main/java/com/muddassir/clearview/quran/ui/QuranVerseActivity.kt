@@ -17,7 +17,7 @@ import com.muddassir.clearview.media.worker.AudioWorkScheduler
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
 import com.muddassir.clearview.ui.ContentHubTabContent
 import com.muddassir.clearview.ui.ContentHubTopBar
-import com.muddassir.clearview.ui.applyImmersiveIfNeeded
+import com.muddassir.clearview.ui.ApplyImmersiveIfNeeded
 import com.muddassir.clearview.ui.isLandscape
 import com.muddassir.clearview.ui.rememberContentHubState
 import com.muddassir.clearview.ui.theme.UrlblockerTheme
@@ -83,7 +83,7 @@ private fun HubScreen() {
     val isFullscreen =
         (landscape && hub.playingVideo != null) ||
             (hub.playerFullscreen && hub.playingVideo != null)
-    applyImmersiveIfNeeded(isFullscreen)
+    ApplyImmersiveIfNeeded(isFullscreen)
 
     // Widget surface = Quran only: no bottom navigation bar. ContentHubTabContent
     // renders the persisted verse (the same one the widget shows); the selected

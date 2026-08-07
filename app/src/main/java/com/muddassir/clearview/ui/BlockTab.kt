@@ -100,6 +100,12 @@ fun BlockTab(
 private fun ProtectionCard(viewModel: MainViewModel, context: Context) {
     val isEnabled = viewModel.isAccessibilityEnabled
     val activeGreen = Color(0xFF2E7D32)
+    // Prominent disclosure + consent for the Accessibility Service (Google Play
+    // policy for non-accessibility-tool apps): shown whenever the user attempts
+    // to ENABLE protection. The service is described, its on-device nature is
+    // stated, and consent is explicit — system Settings is only opened after
+    // the user taps Continue. Disabling stays one tap away as before.
+    var showDisclosure by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -131,10 +137,18 @@ private fun ProtectionCard(viewModel: MainViewModel, context: Context) {
                 }
                 Switch(
                     checked = isEnabled,
-                    onCheckedChange = { turnOn ->
-                        // The Accessibility Service can't be toggled programmatically;
-                        // route the user to the system settings either way.
-                        viewModel.openAccessibilitySettings(context)
+                    onCheckedChange = { _ ->
+                        if (!isEnabled) {
+                            // Enabling: require explicit consent via the
+                            // prominent-disclosure dialog before the user is
+                            // sent to system Settings to turn the service on.
+                            showDisclosure = true
+                        } else {
+                            // Disabling: no disclosure needed — straight to
+                            // settings. The service can't be toggled
+                            // programmatically.
+                            viewModel.openAccessibilitySettings(context)
+                        }
                     },
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.White,
@@ -151,6 +165,44 @@ private fun ProtectionCard(viewModel: MainViewModel, context: Context) {
                 color = if (isEnabled) Color(0xFFE8F5E9) else MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+
+    if (showDisclosure) {
+        AlertDialog(
+            onDismissRequest = { showDisclosure = false },
+            title = { Text("Enable ClearView protection?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "ClearView uses the Accessibility service to read the text currently shown on your screen inside Chrome and the Google app — only to block adult content, your blocked keywords and websites, and incognito mode.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "• Screen text is processed instantly on your device\n" +
+                            "• It is never stored, logged, or sent anywhere\n" +
+                            "• No personal data is collected\n" +
+                            "• You can turn it off anytime in Settings → Accessibility",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDisclosure = false
+                        viewModel.openAccessibilitySettings(context)
+                    }
+                ) {
+                    Text("Continue")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDisclosure = false }) {
+                    Text("Not now")
+                }
+            }
+        )
     }
 }
 

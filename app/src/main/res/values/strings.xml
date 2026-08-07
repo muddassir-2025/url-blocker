@@ -34,16 +34,11 @@
     <string name="media_notifications">Channel Updates</string>
     <string name="media_notifications_note">Get a notification when your saved channels upload new videos</string>
     <string name="media_notification_permission_denied">Notifications are blocked. Allow them in Settings to get channel updates.</string>
-    <string name="media_latest_updates">Latest Updates</string>
     <string name="media_has_update">%1$s has an update</string>
     <string name="media_update_dismiss">Dismiss update</string>
     <string name="media_no_updates_yet">No updates yet. New videos from your saved channels will appear here.</string>
     <string name="media_notification_channel">Channel updates</string>
     <string name="media_notification_channel_desc">New videos from your saved channels</string>
-    <plurals name="media_channels_updated">
-        <item quantity="one">%1$d channel has updates</item>
-        <item quantity="other">%1$d channels have updates</item>
-    </plurals>
     <string name="quran_verse_refresh_frequency">New verse every</string>
     <string name="quran_verse_hour_short">%1$d hr</string>
     <string name="quran_verse_surah">Surah %1$s</string>

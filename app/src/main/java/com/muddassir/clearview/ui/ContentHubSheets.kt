@@ -536,6 +536,10 @@ private fun SurahBrowseList(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // Read via stringResource (not context.getString) so the value tracks
+    // configuration changes — lint treats context reads inside composables as
+    // an error since they aren't recomposed when the configuration changes.
+    val verseUnavailable = stringResource(R.string.quran_verse_unavailable)
 
     // Filter the 114 surahs by the shared search field: a blank query shows
     // all of them; a pure number matches the surah number exactly ("2" →
@@ -585,11 +589,7 @@ private fun SurahBrowseList(
                             onOpenVerse(first)
                         } else {
                             // Not cached yet — the jump can't resolve.
-                            Toast.makeText(
-                                context,
-                                context.getString(R.string.quran_verse_unavailable),
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            Toast.makeText(context, verseUnavailable, Toast.LENGTH_SHORT).show()
                         }
                     }
                 },

@@ -39,13 +39,15 @@ enum class FeedSortOrder(val label: String) {
 /**
  * Source filter for the All Feed — where each video came from:
  * [BY_URL] videos the user added manually by URL, and [SYSTEM] videos the
- * app pulled automatically from saved channels (RSS). In user-playlist
- * contexts the [SYSTEM] option is presented as "From device" (device audio
- * imported into the playlist).
+ * app pulled automatically from saved channels (RSS). [BY_RSS] is the
+ * playlist-only option for exactly those channel-feed videos (inside user
+ * playlists [SYSTEM] is presented as "From device" — device audio imported
+ * into the playlist).
  */
 enum class FeedSourceFilter(val label: String) {
     ALL("All"),
     BY_URL("By URL"),
+    BY_RSS("By RSS"),
     SYSTEM("From channels")
 }
 

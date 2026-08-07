@@ -196,7 +196,7 @@ fun MediaTab(
     // A downloaded video awaiting "delete offline audio" confirmation — the
     // card's ⋮ menu "Delete download" no longer deletes without asking.
     var pendingDeleteDownload by remember { mutableStateOf<MediaVideo?>(null) }
-    // Downloads view source filter (All / By URL / From device) — hoisted
+    // Downloads view source filter (All / By URL / By RSS / From device) — hoisted
     // here so the header's result count matches the section's list. Only used
     // while the Downloads content filter is active.
     var downloadsSourceFilter by remember { mutableStateOf(DownloadSourceFilter.ALL) }
@@ -322,7 +322,16 @@ fun MediaTab(
         }
         val fresh = repository.refreshAllVideos(channels)
         if (fresh != null) {
-            videos = fresh
+            // Merge, don't replace: a channel whose refresh failed this round
+            // keeps its cached videos. MediaVideos.merge keeps the FIRST list's
+            // copy of an id, so fresh goes first (RSS is authoritative for
+            // overlap — it carries this round's enriched durations and shorts
+            // classification); cached then only fills in the channels that
+            // fresh is missing. Without this, a freshly added channel could
+            // vanish from the feed entirely just because its very first
+            // refresh hit a transient failure — and every reload would repeat
+            // the same replacement.
+            videos = MediaVideos.merge(fresh, cached)
             showingCached = false
             lastRefreshedAt = System.currentTimeMillis()
         } else if (cached.isEmpty()) {
@@ -424,6 +433,11 @@ fun MediaTab(
                     FeedSourceFilter.BY_URL -> channelVideos.filter { it.videoId in manualIds }
                     // "From device": audio imported from the system into the playlist.
                     FeedSourceFilter.SYSTEM -> channelVideos.filter { isDeviceAudio(it.videoId) }
+                    // "By RSS": YouTube videos that came from a saved channel's
+                    // feed — not added by URL and not device audio.
+                    FeedSourceFilter.BY_RSS -> channelVideos.filter {
+                        it.videoId !in manualIds && !isDeviceAudio(it.videoId)
+                    }
                 }
                 when (feedFilter.playlistType) {
                     PlaylistTypeFilter.ALL -> bySource
@@ -638,6 +652,8 @@ fun MediaTab(
                 // video then lands in that playlist too).
                 canAddVideo = filterChannelId != null || feedIsUserPlaylist,
                 canEditPlaylist = feedIsUserPlaylist,
+                // Feed-only ⋮ menu entries stay off while inside a playlist.
+                isPlaylistContext = inPlaylistContext,
                 searchActive = searchActive && !downloadsFilter,
                 searchQuery = searchQuery,
                 searchEnabled = !downloadsFilter,
@@ -689,6 +705,7 @@ fun MediaTab(
                     val src = when (feedFilter.source) {
                         FeedSourceFilter.ALL -> ""
                         FeedSourceFilter.BY_URL -> " · By URL"
+                        FeedSourceFilter.BY_RSS -> " · By RSS"
                         FeedSourceFilter.SYSTEM -> " · $DEVICE_SOURCE_LABEL"
                     }
                     "All$type$src · $resultCount ${if (resultCount == 1) "item" else "items"}"
@@ -913,7 +930,10 @@ fun MediaTab(
                                 // from the card (the feed updates instantly).
                                 onRemoveFromPlaylist = {
                                     selectedUserPlaylist?.let { p -> pendingVideoRemove = p to video }
-                                }
+                                },
+                                // Feed-only ⋮ entries (Add to playlist…, Hide
+                                // video) stay off inside the playlist.
+                                inPlaylist = true
                             )
                         }
                     }
@@ -940,7 +960,7 @@ fun MediaTab(
     if (showFilterSheet) {
         FilterSheet(
             filter = feedFilter,
-            // Inside a user playlist only the Source (By URL / From device) and
+            // Inside a user playlist only the Source (By URL / From device / By RSS) and
             // Type (Video / Audio) filters apply — playlists keep their own
             // order, so the sheet shows just those two sections there.
             isPlaylistContext = feedIsUserPlaylist,
@@ -1698,7 +1718,10 @@ private fun LongVideoCard(
     onRemoveManual: () -> Unit,
     onAddToPlaylist: () -> Unit = {},
     /** When set (user-playlist feed), the ⋮ menu offers removing from it. */
-    onRemoveFromPlaylist: (() -> Unit)? = null
+    onRemoveFromPlaylist: (() -> Unit)? = null,
+    /** Inside a playlist the ⋮ menu drops the feed-only entries (Add to
+     *  playlist…, Hide video) — the playlist's own Remove is already shown. */
+    inPlaylist: Boolean = false
 ) {
     val fraction = remember(video.videoId) { progressStore.get(video.videoId) }
     // A live broadcast has no finite duration to complete — never show a
@@ -1798,7 +1821,8 @@ private fun LongVideoCard(
                     onHide = onHide,
                     onRemoveManual = onRemoveManual,
                     onAddToPlaylist = onAddToPlaylist,
-                    onRemoveFromPlaylist = onRemoveFromPlaylist
+                    onRemoveFromPlaylist = onRemoveFromPlaylist,
+                    inPlaylist = inPlaylist
                 )
             // Live download progress renders on the thumbnail itself (a
             // status pill + bottom progress bar); the ⋮ menu keeps the
@@ -1957,6 +1981,9 @@ private fun FeedHeader(
     canAddVideo: Boolean,
     /** Shows a pencil icon to open the user-playlist editor. */
     canEditPlaylist: Boolean = false,
+    /** Inside a playlist the ⋮ menu drops the feed-only entries (Hidden
+     *  videos, My playlists, Add playlist by URL) — those belong to the feed. */
+    isPlaylistContext: Boolean = false,
     searchActive: Boolean,
     searchQuery: String,
     /** When false the search toggle is hidden (e.g. the Downloads view, which
@@ -2069,34 +2096,38 @@ private fun FeedHeader(
                     expanded = showMenu,
                     onDismissRequest = { showMenu = false }
                 ) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                if (hiddenCount > 0) "Hidden videos ($hiddenCount)"
-                                else "Hidden videos"
-                            )
-                        },
-                        onClick = {
-                            showMenu = false
-                            onOpenHidden()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("My playlists") },
-                        enabled = onOpenMyPlaylists != null,
-                        onClick = {
-                            showMenu = false
-                            onOpenMyPlaylists?.invoke()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Add playlist by URL") },
-                        enabled = onAddPlaylist != null,
-                        onClick = {
-                            showMenu = false
-                            onAddPlaylist?.invoke()
-                        }
-                    )
+                    // Feed-only actions — hidden inside a playlist, where they
+                    // don't apply (the ✕ button already exits the playlist).
+                    if (!isPlaylistContext) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (hiddenCount > 0) "Hidden videos ($hiddenCount)"
+                                    else "Hidden videos"
+                                )
+                            },
+                            onClick = {
+                                showMenu = false
+                                onOpenHidden()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("My playlists") },
+                            enabled = onOpenMyPlaylists != null,
+                            onClick = {
+                                showMenu = false
+                                onOpenMyPlaylists?.invoke()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Add playlist by URL") },
+                            enabled = onAddPlaylist != null,
+                            onClick = {
+                                showMenu = false
+                                onAddPlaylist?.invoke()
+                            }
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("Add video by URL") },
                         enabled = canAddVideo,
@@ -2226,7 +2257,7 @@ private fun FeedHeader(
 @Composable
 private fun FilterSheet(
     filter: FeedFilter,
-    /** Inside a user playlist only the Source (By URL / From device) and Type
+    /** Inside a user playlist only the Source (By URL / From device / By RSS) and Type
      *  (Video / Audio) filters apply — playlists keep their hand-picked order,
      *  so the sheet shows just those two sections there. */
     isPlaylistContext: Boolean = false,
@@ -2360,7 +2391,7 @@ private fun FilterSheet(
             Spacer(Modifier.height(4.dp))
             Text(
                 text = if (isPlaylistContext) {
-                    "Where the audio in this playlist comes from: added by URL, or imported from your device."
+                    "Where the audio in this playlist comes from: added by URL, pulled from your channels, or imported from your device."
                 } else {
                     "Where the videos come from: added by URL, or pulled automatically from your channels."
                 },
@@ -2372,7 +2403,16 @@ private fun FilterSheet(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                FeedSourceFilter.entries.forEach { option ->
+                // "By RSS" is a playlist-only option — the All Feed already
+                // covers channel-feed videos with "From channels". It stays
+                // visible when already selected (a filter picked inside a
+                // playlist can outlive the playlist), so an active filter is
+                // never left with a hidden chip.
+                val sourceOptions = FeedSourceFilter.entries.filterNot {
+                    it == FeedSourceFilter.BY_RSS && !isPlaylistContext &&
+                        draft.source != FeedSourceFilter.BY_RSS
+                }
+                sourceOptions.forEach { option ->
                     FilterChip(
                         selected = draft.source == option,
                         onClick = {
@@ -2768,7 +2808,10 @@ private fun VideoCardMenu(
     onRemoveManual: () -> Unit,
     onAddToPlaylist: (() -> Unit)? = null,
     /** When set (a user-playlist feed), the menu also offers removing from it. */
-    onRemoveFromPlaylist: (() -> Unit)? = null
+    onRemoveFromPlaylist: (() -> Unit)? = null,
+    /** Inside a playlist the ⋮ menu drops the feed-only entries (Add to
+     *  playlist…, Hide video) — the playlist's own Remove is already shown. */
+    inPlaylist: Boolean = false
 ) {
     var showMenu by remember { mutableStateOf(false) }
     Box(modifier = modifier) {
@@ -2791,7 +2834,7 @@ private fun VideoCardMenu(
             expanded = showMenu,
             onDismissRequest = { showMenu = false }
         ) {
-            if (onAddToPlaylist != null) {
+            if (!inPlaylist && onAddToPlaylist != null) {
                 DropdownMenuItem(
                     text = { Text("Add to playlist…") },
                     onClick = {
@@ -2836,13 +2879,15 @@ private fun VideoCardMenu(
                     }
                 )
             }
-            DropdownMenuItem(
-                text = { Text("Hide video") },
-                onClick = {
-                    showMenu = false
-                    onHide()
-                }
-            )
+            if (!inPlaylist) {
+                DropdownMenuItem(
+                    text = { Text("Hide video") },
+                    onClick = {
+                        showMenu = false
+                        onHide()
+                    }
+                )
+            }
         }
     }
 }
