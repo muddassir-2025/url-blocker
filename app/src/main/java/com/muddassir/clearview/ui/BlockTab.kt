@@ -2,12 +2,15 @@ package com.muddassir.clearview.ui
 
 import android.content.Context
 import android.content.Intent
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -20,10 +23,11 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.outlined.AdminPanelSettings
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.LockOpen
-import androidx.compose.material.icons.outlined.Man
 import androidx.compose.material.icons.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.*
@@ -50,11 +54,10 @@ import com.muddassir.clearview.viewmodel.MainViewModel
  * Cards (top to bottom):
  *  1. Protection toggle — reflects the Accessibility Service state, turns
  *     green when active, and opens the system settings to enable/disable it.
- *  2. Chrome Strict Mode — blocks generic terms (women, man, ...) on Google
- *     image/search tabs inside Chrome.
- *  3. Google Strict Mode — blocks those same terms on Google search (the
- *     Google app can't reveal its active tab, so image-tab-only blocking is
- *     not possible there).
+ *  2. Strict Mode — adds the curated risky-but-innocent discovery terms
+ *     (bikini, lingerie, cleavage, ...) on top of the always-on adult terms.
+ *  3. Block Shorts — blocks YouTube Shorts in Chrome and the YouTube app
+ *     (no need to add "shorts" as a keyword).
  *  4. Blocked Items — dotted editable list card: add / view keywords and
  *     websites.
  *  5. DNS protection — network-level filtering.
@@ -73,8 +76,8 @@ fun BlockTab(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item { ProtectionCard(viewModel, context) }
-        item { ChromeStrictCard(viewModel, context) }
-        item { GoogleStrictCard(viewModel) }
+        item { StrictModeCard(viewModel, context) }
+        item { BlockShortsCard(viewModel) }
         item { BlockedItemsCard(viewModel) }
         item { DnsCard(viewModel, context) }
 
@@ -206,10 +209,10 @@ private fun ProtectionCard(viewModel: MainViewModel, context: Context) {
     }
 }
 
-// ── 2. Chrome Strict Mode ─────────────────────────────────────────
+// ── 2. Strict Mode ────────────────────────────────────────────────
 
 @Composable
-private fun ChromeStrictCard(viewModel: MainViewModel, context: Context) {
+private fun StrictModeCard(viewModel: MainViewModel, context: Context) {
     val active = viewModel.isStrictMode
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -235,12 +238,12 @@ private fun ChromeStrictCard(viewModel: MainViewModel, context: Context) {
             Spacer(modifier = Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Chrome Strict Mode",
+                    text = "Strict Mode",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Blocks generic terms like women, man on Google image and search tabs inside Chrome.",
+                    text = "Adds the curated risky-but-innocent discovery terms (bikini, lingerie, cleavage, ...) on top of the always-on adult filter — in every monitored app.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -254,11 +257,11 @@ private fun ChromeStrictCard(viewModel: MainViewModel, context: Context) {
     }
 }
 
-// ── 3. Google Strict Mode ─────────────────────────────────────────
+// ── 3. Block Shorts ───────────────────────────────────────────────
 
 @Composable
-private fun GoogleStrictCard(viewModel: MainViewModel) {
-    val active = viewModel.blockGenderTermsInGoogleApp
+private fun BlockShortsCard(viewModel: MainViewModel) {
+    val active = viewModel.blockShorts
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -275,7 +278,7 @@ private fun GoogleStrictCard(viewModel: MainViewModel) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                imageVector = Icons.Outlined.Man,
+                imageVector = Icons.Outlined.PlayCircle,
                 contentDescription = null,
                 tint = if (active) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(22.dp)
@@ -283,12 +286,12 @@ private fun GoogleStrictCard(viewModel: MainViewModel) {
             Spacer(modifier = Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Google Strict Mode",
+                    text = "Block Shorts",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Blocks terms like women, man on Google search. Image-tab-only blocking isn't possible in the Google app, so this mode handles search protection.",
+                    text = "Blocks YouTube Shorts in Chrome and the YouTube app — short-form videos won't open.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -296,7 +299,7 @@ private fun GoogleStrictCard(viewModel: MainViewModel) {
             Spacer(modifier = Modifier.width(8.dp))
             Switch(
                 checked = active,
-                onCheckedChange = { viewModel.toggleBlockGenderTermsInGoogleApp() }
+                onCheckedChange = { viewModel.toggleBlockShorts() }
             )
         }
     }
@@ -486,6 +489,7 @@ private fun BlockedChip(label: String, onDelete: () -> Unit) {
 
 @Composable
 private fun DnsCard(viewModel: MainViewModel, context: Context) {
+    var showSetupSheet by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -516,28 +520,183 @@ private fun DnsCard(viewModel: MainViewModel, context: Context) {
             Spacer(modifier = Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
-                    onClick = { viewModel.openPrivateDnsSettings(context) },
+                    onClick = { showSetupSheet = true },
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Open DNS Settings", fontSize = 12.sp)
+                    Text("DNS Setup Guide", fontSize = 12.sp)
                 }
                 OutlinedButton(
-                    onClick = { viewModel.openDnsSetupGuide(context) },
+                    onClick = { viewModel.openPrivateDnsSettings(context) },
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("DNS Providers", fontSize = 12.sp)
+                    Text("Open DNS Settings", fontSize = 12.sp)
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Recommended: CleanBrowsing Family Filter or Cloudflare 1.1.1.3 (Family)",
+                text = "Recommended: Cloudflare 1.1.1.3 (Family) or CleanBrowsing Family Filter",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
             )
+        }
+    }
+
+    if (showSetupSheet) {
+        DnsSetupSheet(
+            viewModel = viewModel,
+            context = context,
+            onDismiss = { showSetupSheet = false }
+        )
+    }
+}
+
+/**
+ * In-app DNS setup guide: pick a filtered-DNS provider, copy its hostname,
+ * then set it manually in Private DNS settings (open settings → Private DNS
+ * → paste the hostname → Save). Pure copy-paste flow — no permissions needed.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DnsSetupSheet(
+    viewModel: MainViewModel,
+    context: Context,
+    onDismiss: () -> Unit
+) {
+    // Acquired once (not per recomposition).
+    val clipboard = remember {
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+    }
+
+    fun copyHostname(hostname: String) {
+        clipboard.setPrimaryClip(
+            android.content.ClipData.newPlainText("DNS hostname", hostname)
+        )
+        Toast.makeText(context, "Copied: $hostname", Toast.LENGTH_SHORT).show()
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        // Scrollable so small screens / large font scale can't clip the guide.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "DNS Setup Guide",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+
+            // Step-by-step: 1 copy → 2 open → 3 paste → 4 save.
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "How to set it up",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "1. Tap a provider below and copy its hostname\n" +
+                            "2. Tap \"Open DNS Settings\"\n" +
+                            "3. Tap Private DNS\n" +
+                            "4. Paste the hostname and tap Save",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            DnsProviderCard(
+                name = "Cloudflare Family (1.1.1.3)",
+                description = "Blocks malware + adult content. Fast, free, no account.",
+                hostname = viewModel.cloudflareFamilyHostname(),
+                onCopy = { copyHostname(it) }
+            )
+
+            DnsProviderCard(
+                name = "CleanBrowsing Family Filter",
+                description = "Blocks adult content + malware. Strict family filter (185.228.168.168 / 185.228.169.168).",
+                hostname = viewModel.cleanBrowsingFamilyHostname(),
+                onCopy = { copyHostname(it) }
+            )
+
+            OutlinedButton(
+                onClick = {
+                    onDismiss()
+                    viewModel.openPrivateDnsSettings(context)
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Open DNS Settings", fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DnsProviderCard(
+    name: String,
+    description: String,
+    hostname: String,
+    onCopy: (String) -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = hostname,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    IconButton(onClick = { onCopy(hostname) }) {
+                        Icon(
+                            Icons.Outlined.ContentCopy,
+                            contentDescription = "Copy $hostname",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }

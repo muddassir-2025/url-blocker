@@ -87,7 +87,10 @@ fun QuranTab(
                 Text("🕋", fontSize = 56.sp)
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    text = "Verses are being downloaded.\nOpen the app once to download the full translation.",
+                    // Shown only when the first-run download couldn't complete
+                    // (e.g. offline). Normally the download runs in-process and
+                    // the verse appears automatically — see ContentHubState.start.
+                    text = "Quran verses are downloading.\nPlease close and reopen ClearView once the download is complete.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center

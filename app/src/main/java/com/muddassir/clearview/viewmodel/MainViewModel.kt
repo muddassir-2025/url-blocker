@@ -43,7 +43,7 @@ class MainViewModel : ViewModel() {
         refreshDomains()
         checkHasPassword()
         refreshStrictMode()
-        refreshBlockGenderTermsInGoogleApp()
+        refreshBlockShorts()
         ensureLauncherEnabled(context)   // cleanup stale disabled state first
         checkDeviceAdminStatus(context)  // then apply correct hide/show based on admin status
         // Auto-lock if password is set (app was restarted)
@@ -138,23 +138,37 @@ class MainViewModel : ViewModel() {
         isStrictMode = repository?.isStrictMode ?: false
     }
 
-    // ── Google App gender terms (all tabs) ────────────────────────
+    // ── Block Shorts (YouTube Shorts) ────────────────────────────────
 
-    var blockGenderTermsInGoogleApp by mutableStateOf(false)
+    var blockShorts by mutableStateOf(false)
         private set
 
-    fun toggleBlockGenderTermsInGoogleApp() {
-        val newValue = !blockGenderTermsInGoogleApp
-        repository?.blockGenderTermsInGoogleApp = newValue
-        blockGenderTermsInGoogleApp = newValue
-        android.util.Log.i("MainViewModel", "Google App gender terms ${if (newValue) "enabled" else "disabled"}")
+    fun toggleBlockShorts() {
+        val newValue = !blockShorts
+        repository?.blockShorts = newValue
+        blockShorts = newValue
+        android.util.Log.i("MainViewModel", "Block Shorts ${if (newValue) "enabled" else "disabled"}")
     }
 
-    fun refreshBlockGenderTermsInGoogleApp() {
-        blockGenderTermsInGoogleApp = repository?.blockGenderTermsInGoogleApp ?: false
+    fun refreshBlockShorts() {
+        blockShorts = repository?.blockShorts ?: false
     }
 
     // ── Private DNS (network-level filtering) ───────────────────────
+
+    /**
+     * Cloudflare Family DNS hostname (1.1.1.3) — blocks malware AND adult
+     * content at the network level. Using the DoT hostname form so it works
+     * as an Android Private DNS provider on all networks.
+     */
+    fun cloudflareFamilyHostname(): String = "family.cloudflare-dns.com"
+
+    /**
+     * CleanBrowsing Family Filter hostname — blocks adult content + malware
+     * at the network level (185.228.168.168 / 185.228.169.168). The DoT
+     * hostname form works as an Android Private DNS provider.
+     */
+    fun cleanBrowsingFamilyHostname(): String = "family-filter-dns.cleanbrowsing.org"
 
     fun openPrivateDnsSettings(context: Context) {
         try {
@@ -174,18 +188,6 @@ class MainViewModel : ViewModel() {
             } catch (e2: Exception) {
                 android.util.Log.e("MainViewModel", "Failed to open any network settings: ${e2.message}")
             }
-        }
-    }
-
-    fun openDnsSetupGuide(context: Context) {
-        try {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                data = android.net.Uri.parse("https://cleanbrowsing.org/filters/")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            android.util.Log.e("MainViewModel", "Failed to open DNS guide: ${e.message}")
         }
     }
 

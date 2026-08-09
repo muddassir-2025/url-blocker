@@ -10,7 +10,6 @@
          notification controls) when the app is backgrounded / screen off. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-
     <!-- Package visibility (Android 11+): the block overlay resolves the HOME
          intent to return the user to their launcher after a block. Without
          this <queries> declaration the resolution can return null on newer

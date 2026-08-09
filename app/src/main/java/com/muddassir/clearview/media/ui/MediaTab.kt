@@ -259,29 +259,42 @@ fun MediaTab(
     }
     val saveUserPlaylists: () -> Unit = { playlistRevision++ }
 
-    // "Add from device": picks audio files from the device (multi-select) and
-    // adds them to the open user playlist — they're imported into the offline
-    // library (Downloads) too, so they play like any downloaded audio.
-    val addSystemAudioLauncher = rememberLauncherForActivityResult(
+    // "Add from device": picks video/audio files from the device (multi-select
+    // through the modern DocumentsUI picker — no storage permissions needed)
+    // and imports them into the offline library (Downloads), so they play like
+    // any downloaded audio. Inside a user playlist the picked files are ALSO
+    // added to that playlist (where the menu item originally lived); in the
+    // All Feed / a channel feed they land in Downloads only.
+    val addSystemVideoLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
+        // Cancelled (or nothing picked) — nothing to do.
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
-        val target = selectedUserPlaylist ?: return@rememberLauncherForActivityResult
+        val target = selectedUserPlaylist
         AudioDownloads.importFromDevice(
             context = context,
             uris = uris,
             onResult = { imported ->
+                val noun = if (imported == 1) "file" else "files"
                 Toast.makeText(
                     context,
-                    if (imported == uris.size)
-                        "Added $imported audio${if (imported == 1) "" else "s"} to ${target.name}"
-                    else "Added $imported of ${uris.size} audios to ${target.name}",
+                    when {
+                        imported == 0 -> "Couldn't import those files."
+                        imported == uris.size && target != null -> "Added $imported $noun to ${target.name}"
+                        imported == uris.size -> "Added $imported $noun to Downloads"
+                        else -> "Added $imported of ${uris.size} $noun"
+                    },
                     Toast.LENGTH_SHORT
                 ).show()
             },
             onImported = { items ->
-                userPlaylistStore.addVideos(target.id, items.map { it.toMediaVideo() })
-                saveUserPlaylists()
+                target?.let { p ->
+                    userPlaylistStore.addVideos(p.id, items.map { it.toMediaVideo() })
+                    saveUserPlaylists()
+                }
+                // Without a playlist the items already landed in the offline
+                // library — importFromDevice calls AudioDownloads.refresh(),
+                // which repopulates the Downloads section automatically.
             }
         )
     }
@@ -647,10 +660,12 @@ fun MediaTab(
                 filter = feedFilter,
                 resultCount = resultCount,
                 hiddenCount = contextHiddenVideos.size,
-                // "Add video by URL" is available when a channel is selected
-                // OR when viewing one of the user's own playlists (the added
-                // video then lands in that playlist too).
-                canAddVideo = filterChannelId != null || feedIsUserPlaylist,
+                // "Add video by URL" is available in the All Feed, when a
+                // channel is selected, and when viewing one of the user's own
+                // playlists (the added video then lands in that playlist too).
+                // It stays off inside an imported YouTube playlist — a by-URL
+                // video can't be appended to YouTube's own playlist.
+                canAddVideo = !feedIsPlaylist,
                 canEditPlaylist = feedIsUserPlaylist,
                 // Feed-only ⋮ menu entries stay off while inside a playlist.
                 isPlaylistContext = inPlaylistContext,
@@ -685,11 +700,14 @@ fun MediaTab(
                 onAddPlaylist = { showAddPlaylistDialog = true },
                 onOpenMyPlaylists = { showPlaylistsSheet = true },
                 onEditPlaylist = { showPlaylistEditor = true },
-                // "Add from device" only makes sense while viewing one of the
-                // user's own playlists — the picked audio lands in it.
-                onAddFromSystem = if (feedIsUserPlaylist) {
-                    { addSystemAudioLauncher.launch(arrayOf("audio/*")) }
-                } else null,
+                // "Add from device": pick video/audio files from the phone via
+                // the modern DocumentsUI picker (no storage permissions needed).
+                // Available in the All Feed, a channel feed, and inside the
+                // user's own playlists (where the picked files also land in the
+                // open playlist).
+                onAddFromSystem = {
+                    addSystemVideoLauncher.launch(arrayOf("video/*", "audio/*"))
+                },
                 // Rename the playlist you're viewing (⋮ menu).
                 onRenamePlaylist = if (feedIsUserPlaylist) {
                     {

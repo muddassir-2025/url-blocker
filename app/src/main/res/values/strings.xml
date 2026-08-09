@@ -74,6 +74,7 @@
     <!-- Quran bookmarks manager (opened from the settings sheet) -->
     <string name="quran_bookmarks_title">Bookmarks</string>
     <string name="quran_bookmarks_view">View bookmarks</string>
+    <string name="quran_bookmarks_close">Close bookmarks</string>
     <string name="quran_bookmarks_search_hint">Filter bookmarks</string>
     <string name="quran_bookmarks_empty">No bookmarks yet. Tap the bookmark icon on a verse to save it here.</string>
     <string name="quran_bookmarks_no_match">No bookmarks match your filter</string>

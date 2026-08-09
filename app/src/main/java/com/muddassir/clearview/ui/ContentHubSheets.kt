@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -780,20 +779,60 @@ fun BookmarksSheet(state: ContentHubState, onDismiss: () -> Unit) {
     // confirmation dialog below can also use it.
     val list = bookmarks
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.92f)
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 24.dp)
+    Dialog(
+        onDismissRequest = onDismiss,
+        // Full width + edge-to-edge so imePadding() below actually receives the
+        // IME insets and the list shrinks above the keyboard (same pattern as
+        // the Quran search screen).
+        //
+        // WHY A DIALOG, NOT A BOTTOM SHEET: ModalBottomSheet wraps its content
+        // in its own vertical scroll, so a LazyColumn nested inside it creates
+        // TWO competing scrollers. When the list hits the bottom and the user
+        // keeps scrolling, the overscroll propagates through the sheet's
+        // scroll container into its nested-scroll (drag-to-dismiss) connection
+        // — the whole sheet gets dragged down and springs back, which is the
+        // flicker/shake. A full-screen dialog gives the LazyColumn a single
+        // bounded, sole-scroller layout (no nested scrolling) — the exact
+        // setup that already works in the Quran search screen.
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background
         ) {
-            Text(
-                text = stringResource(R.string.quran_bookmarks_title),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(Modifier.height(12.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .imePadding()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 24.dp)
+            ) {
+                // Top bar: back arrow + title (the back arrow dismisses, like
+                // the Quran search screen).
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.quran_bookmarks_close)
+                        )
+                    }
+                    Text(
+                        text = stringResource(R.string.quran_bookmarks_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -867,6 +906,7 @@ fun BookmarksSheet(state: ContentHubState, onDismiss: () -> Unit) {
                         }
                     }
                 }
+            }
             }
         }
     }

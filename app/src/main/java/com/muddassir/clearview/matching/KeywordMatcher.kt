@@ -47,23 +47,7 @@ data class FeedVideoCard(
      * blocked (set by the matcher's risk-score evaluation; the overlay draws
      * "🚫 Blocked: <this>"). Null for unblocked cards.
      */
-    val blockedKeyword: String? = null,
-    /**
-     * On-device NSFW thumbnail score 0..1 from the TFLite image analyzer, when
-     * the service ran the image pipeline for this card (Android 11+ with the
-     * model present). Null when image analysis wasn't possible; the matcher
-     * adds the +0.4 thumbnail weight when the score crosses the threshold.
-     */
-    val nsfwScore: Float? = null,
-    /**
-     * Best-effort bounds of the card's THUMBNAIL IMAGE (the 16:9 image above
-     * the title row), in screen coordinates — computed by ContentExtractor
-     * from the card node's shape so the NSFW pipeline crops the actual image
-     * and never the title text (observed on-device: an 800x79 title strip was
-     * analyzed as a "thumbnail"). Null when the computed region failed the
-     * size sanity gate; the service then skips image analysis for this card.
-     */
-    val thumbnailBounds: android.graphics.Rect? = null
+    val blockedKeyword: String? = null
 )
 
 enum class MatchType {
@@ -149,6 +133,55 @@ class KeywordMatcher(
     companion object {
         private const val TAG = "KeywordMatcher"
 
+        // ── Precompiled match data (hot path) ─────────────────────────
+        // checkKeywords used to RE-SORT the whole keyword set on every call
+        // (a ~700-element sort, several times per accessibility event). The
+        // sorted list is cached per keyword set; the per-keyword indexOf scan
+        // itself is fast (~13µs for the full set — verified by benchmark) and
+        // stays as-is. BlockRepository returns STABLE set instances (it caches
+        // them), so keying by set identity is safe — an edited/rebuild set is
+        // a new key that builds a fresh entry. Weak keys so replaced sets can
+        // be collected. Thread-safe: checks run on the main thread and on
+        // Dispatchers.Default (thumbnail re-analysis).
+        private class KeywordCache(
+            val sorted: List<String>
+        )
+
+        private val keywordCacheLock = Any()
+        private val keywordCache = java.util.WeakHashMap<Set<String>, KeywordCache>()
+
+        private fun cacheFor(keywords: Set<String>): KeywordCache {
+            synchronized(keywordCacheLock) {
+                keywordCache[keywords]?.let { return it }
+            }
+            // Build outside the lock (the sort of ~700 strings is ~tens of µs;
+            // a concurrent duplicate build is benign — the put below keeps one).
+            val cache = KeywordCache(
+                sorted = keywords.sortedWith(
+                    compareByDescending<String> { it.length }.thenBy { it }
+                )
+            )
+            synchronized(keywordCacheLock) {
+                keywordCache.putIfAbsent(keywords, cache)?.let { return it }
+                return cache
+            }
+        }
+
+        // Compiled once, not per event (was constructed inside checkShortsBlock).
+        private val SHORTS_SIGNAL_REGEX = Regex("\\bshorts\\b")
+
+        // ── Boundary-protected long keywords ────────────────────────
+        // The generic short-word rule only boundary-matches keywords <= 4
+        // letters. These LONGER anatomy words also need a token boundary:
+        // "breast" must never substring-match innocent compounds like
+        // "breastfeeding" (kept in STRICT_MODE_KEYWORDS so it only blocks
+        // while Strict Mode is on) or "breaststroke". "breast cancer"
+        // still matches (the space after "breast" is a boundary).
+        internal val boundaryProtectedKeywords: Set<String> = setOf(
+            "breast",
+            "breasts"
+        )
+
         // ── Weighted risk-score model for pre-emptive feed blocking ──
         // The user's requested flow scores each feed card's signals and
         // blocks when the weighted sum crosses the threshold (instead of
@@ -191,6 +224,18 @@ class KeywordMatcher(
             return MatchResult.Blocked("Incognito browsing", MatchType.INCOGNITO, MatchSource.NONE)
         }
 
+        // ── BLOCK SHORTS (Block tab toggle) ──────────────────────────
+        // When enabled, YouTube Shorts are blocked in every monitored package
+        // (Chrome, the Google app's in-app browser, the YouTube app, ...): any
+        // YouTube /shorts URL and the Shorts content signal inside the YouTube
+        // app. This replaces the old workaround of adding "shorts" as a user
+        // keyword — which only matched URLs and over-blocked innocent words
+        // (shortsleeves, shortstop, ...). Long-form videos and /watch URLs are
+        // never affected.
+        if (repository.blockShorts) {
+            checkShortsBlock(snapshot, packageName)?.let { return it }
+        }
+
         // ── CHROME PACKAGES: URL ONLY ──────────────────────────────────
         if (isChromePackage(packageName)) {
             return checkChrome(snapshot)
@@ -216,18 +261,56 @@ class KeywordMatcher(
     }
 
     /**
+     * Block decision for the "Block Shorts" toggle. Matches only when the
+     * snapshot is actually a YouTube Short:
+     *  - a YouTube /shorts URL in ANY monitored package (Chrome, the Google
+     *    app's in-app browser, ...) — a /shorts path is always a Short, or
+     *  - the Shorts content signal inside the YOUTUBE APP — the extractor
+     *    normalizes the Shorts indicator / #shorts hashtag to the signal
+     *    "shorts" in [ContentSnapshot.query] (signals are space-joined, so a
+     *    word-boundary match is used: "shorts #fyp" hits, "shortsy" doesn't).
+     *
+     * The signal part is deliberately limited to YouTube packages: Chrome's /
+     * the Google app's search QUERY is the user's own search text, so a search
+     * for the plain word "shorts" (clothing, weather, ...) must never be
+     * blocked by this toggle — only actual /shorts URLs are blocked there.
+     * Returns null when neither applies, so ordinary videos, pages and
+     * searches are never blocked by this toggle.
+     */
+    private fun checkShortsBlock(
+        snapshot: ContentSnapshot,
+        packageName: String
+    ): MatchResult.Blocked? {
+        val url = snapshot.url.orEmpty().lowercase(Locale.ROOT)
+        val isShortsUrl = ContentExtractor.isYouTubeDomain(url) && url.contains("/shorts")
+        val shortsSignal = !isShortsUrl && isYouTubePackage(packageName) &&
+            snapshot.query?.let { q ->
+                SHORTS_SIGNAL_REGEX.containsMatchIn(q.lowercase(Locale.ROOT))
+            } == true
+        if (!isShortsUrl && !shortsSignal) return null
+        val res = MatchResult.Blocked(
+            "YouTube Shorts",
+            MatchType.BUILT_IN_KEYWORD,
+            if (isShortsUrl) MatchSource.URL else MatchSource.QUERY
+        )
+        Log.i(TAG, buildBlockLog("SHORTS", snapshot.url ?: snapshot.query ?: "", res))
+        return res
+    }
+
+    /**
      * Chrome-specific check: URL is the ONLY source of truth.
      * Domain matching is already handled inside checkString(isUrl=true).
      *
-     * Websites never block the tab-restricted gender terms (woman, man, ...) —
-     * those are reserved for Google's Images/Videos tabs. See
-     * [BlockRepository.TAB_RESTRICTED_KEYWORDS].
+     * Gender/people terms (woman, girl, ...) NEVER block standalone — the
+     * audit moved them out of Strict Mode into the combination generic halves
+     * ([BlockRepository.COMBINATION_GENERIC_TERMS]); they only block paired
+     * with a risky half (woman + bikini), in every mode.
      *
      * IMPORTANT: Google search is frequently performed inside Chrome, not only
      * in the Google app. So when the Chrome URL is a Google search on the
      * Images or Videos tab (tbm=isch / tbm=vid, or the newer udm layout codes
-     * such as udm=2 for Images), the full strict keyword set — including the
-     * tab-restricted gender terms — is used, exactly as in the Google app.
+     * such as udm=2 for Images), the full strict keyword set is used, exactly
+     * as in the Google app.
      */
     private fun checkChrome(snapshot: ContentSnapshot): MatchResult {
         // Detect whether this is a Google Images/Videos search inside Chrome.
@@ -416,18 +499,6 @@ class KeywordMatcher(
             }
         }
 
-        // On-device thumbnail image signal (+0.4): the NSFW classifier on the
-        // cropped thumbnail. Runs only when the image pipeline was possible
-        // (Android 11+ + model in assets + overlay permission) — otherwise
-        // nsfwScore is null and this never fires. A confident NSFW thumbnail
-        // alone crosses the threshold — the user's "revealing thumbnail" case.
-        val nsfw = card.nsfwScore
-        if (nsfw != null && nsfw >= com.muddassir.clearview.vision.ThumbnailSafetyAnalyzer.NSFW_THRESHOLD) {
-            score += FEED_THUMBNAIL_WEIGHT
-            if (primary == null) primary = "thumbnail"
-            reasons.add("THUMBNAIL IMAGE: ${(nsfw * 100).toInt()}%")
-        }
-
         if (score >= FEED_BLOCK_THRESHOLD) {
             Log.i(TAG, "YOUTUBE_FEED_SCORE score=$score reasons=$reasons")
             return MatchResult.Blocked(
@@ -525,9 +596,11 @@ class KeywordMatcher(
     /**
      * Google-specific check: URL first, then search query.
      *
-     * Tab-restricted gender terms (woman, man, ...) are blocked ONLY on the
-     * Videos and Images tabs. On the All tab (and News/Shopping) they are
-     * allowed, because those everyday words are common in ordinary searches.
+     * The gender terms the tab system used to gate (woman, girl, ...) were
+     * removed from the keyword sets entirely — they never block standalone
+     * anywhere (they only participate as context-combination halves). The
+     * Images/Videos tab uses the same keyword set as every other surface
+     * ([TAB_RESTRICTED_KEYWORDS] is empty), so the check is uniform.
      */
     private fun checkGoogle(snapshot: ContentSnapshot): MatchResult {
         val googleQuery = extractGoogleQuery(snapshot)
@@ -537,17 +610,8 @@ class KeywordMatcher(
         // URL, so URL parsing alone cannot see the tab there); fall back to URL.
         val tab = snapshot.googleTab ?: ContentExtractor.googleTabFromUrl(snapshot.url)
         val isImageVideoTab = tab == "Images" || tab == "Videos"
-        // The Google app never exposes the active tab (chips carry no selected
-        // state and chip taps produce empty events), so tab-aware gender blocking
-        // cannot work there. When the user enables the Google-app toggle, the
-        // full strict set — including the tab-restricted gender terms — is used
-        // on ALL Google app tabs. Chrome keeps its URL-based tab-aware behavior.
-        val builtInKeywords = if (repository.blockGenderTermsInGoogleApp) {
-            repository.activeBuiltInKeywords
-        } else {
-            tabAwareBuiltInKeywords(tab)
-        }
-        Log.d(TAG, "GOOGLE_TAB=$tab imageVideoTab=$isImageVideoTab googleAllTabs=${repository.blockGenderTermsInGoogleApp}")
+        val builtInKeywords = tabAwareBuiltInKeywords(tab)
+        Log.d(TAG, "GOOGLE_TAB=$tab imageVideoTab=$isImageVideoTab")
 
         // 1. Check URL if available
         if (!snapshot.url.isNullOrBlank()) {
@@ -755,7 +819,8 @@ class KeywordMatcher(
      * block inside Google's Images/Videos tabs.
      */
     private fun websiteBuiltInKeywords(): Set<String> =
-        repository.activeBuiltInKeywords - BlockRepository.TAB_RESTRICTED_KEYWORDS
+        // Cached in the repository — no per-call set subtraction.
+        repository.activeWebsiteKeywords
 
     /**
      * Tab-aware keyword selection: the full strict set (including the
@@ -797,7 +862,49 @@ class KeywordMatcher(
             return MatchResult.Blocked(matchedUser, MatchType.USER_KEYWORD, MatchSource.NONE)
         }
 
+        // TIER 3 — context-combination (normal-mode discovery catch):
+        // "woman + bikini", "girl + pics". Only for query/title/description
+        // text — raw URLs are exempt so a legitimate page path like
+        // /photos/beach.html can never trip it.
+        if (!isUrl) {
+            val matchedCombo = checkCombinationTerms(lower)
+            if (matchedCombo != null) {
+                return MatchResult.Blocked(matchedCombo, MatchType.BUILT_IN_KEYWORD, MatchSource.NONE)
+            }
+        }
+
         return MatchResult.Allowed
+    }
+
+    /**
+     * TIER 3 — context-combination matching. Blocks when the text contains BOTH
+     * a generic discovery half (woman, girl, beach, pool, ...) AND a risky half
+     * (bikini, lingerie, pics, ...): "woman bikini", "girl pics". This catches
+     * searches clearly heading toward sexualized content in NORMAL mode without
+     * blocking the halves individually; in Strict Mode the individual terms
+     * already block. Reuses the same word-boundary rule as checkKeywords
+     * (short words <= 4 letters need token boundaries), so "hottest" never
+     * counts as "hot", "brass" never counts as "bra", and "button" never
+     * counts as "butt".
+     */
+    private fun checkCombinationTerms(lowercaseText: String): String? {
+        val generic = BlockRepository.COMBINATION_GENERIC_TERMS
+        val risky = BlockRepository.COMBINATION_RISKY_TERMS
+        if (generic.isEmpty() || risky.isEmpty()) return null
+        var genericHit: String? = null
+        for (term in generic) {
+            if (containsKeyword(lowercaseText, term, protectShortWords = true)) {
+                genericHit = term
+                break
+            }
+        }
+        if (genericHit == null) return null
+        for (term in risky) {
+            if (containsKeyword(lowercaseText, term, protectShortWords = true)) {
+                return "$genericHit + $term"
+            }
+        }
+        return null
     }
 
     private fun checkDomains(urlText: String): String? {
@@ -820,7 +927,10 @@ class KeywordMatcher(
         protectShortWords: Boolean = false
     ): String? {
         if (keywords.isEmpty()) return null
-        for (keyword in keywords.sortedWith(compareByDescending<String> { it.length }.thenBy { it })) {
+        // The per-keyword scan runs in the original longest-first order; the
+        // sorted list is cached (the previous per-call sort is gone). Results
+        // are identical to the original implementation.
+        for (keyword in cacheFor(keywords).sorted) {
             if (containsKeyword(lowercaseText, keyword, protectShortWords)) {
                 return keyword
             }
@@ -832,7 +942,12 @@ class KeywordMatcher(
         var start = text.indexOf(keyword)
         while (start >= 0) {
             val end = start + keyword.length
-            val requiresBoundary = protectShortWords && keyword.length <= 3
+            // Word-boundary protection for short keywords (<= 4 letters):
+            // "sex" never matches "sexy", "bra" never matches "brass", and
+            // "butt" never matches "button"/"butter". Longer phrases
+            // ("anal sex", "see through") are unambiguous and stay substring.
+            val requiresBoundary = protectShortWords &&
+                (keyword.length <= 4 || keyword in boundaryProtectedKeywords)
             val beforeIsWord = start > 0 && text[start - 1].isLetterOrDigit()
             val afterIsWord = end < text.length && text[end].isLetterOrDigit()
             if (!requiresBoundary || (!beforeIsWord && !afterIsWord)) return true

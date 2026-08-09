@@ -156,8 +156,25 @@ class ContentHubState(appContext: Context) {
     fun start() {
         scope.launch {
             if (verse == null) {
-                val loaded = withContext(Dispatchers.IO) {
+                verseLoading = true
+                var loaded = withContext(Dispatchers.IO) {
                     quranRepository.getCurrentVerse() ?: quranRepository.pickRandomVerse()
+                }
+                if (loaded == null) {
+                    // Very first launch: nothing is cached yet, so the persisted
+                    // verse doesn't exist and pickRandomVerse() has no data. The
+                    // background worker downloads the translation separately, but
+                    // this in-process download makes the result observable by
+                    // the UI — when it completes, the verse is set and the tab
+                    // recomposes immediately, with NO app restart required.
+                    val downloaded = withContext(Dispatchers.IO) {
+                        quranRepository.ensureEnglishAndArabic()
+                    }
+                    if (downloaded) {
+                        loaded = withContext(Dispatchers.IO) {
+                            quranRepository.pickRandomVerse()
+                        }
+                    }
                 }
                 verse = loaded
                 verseLoading = false

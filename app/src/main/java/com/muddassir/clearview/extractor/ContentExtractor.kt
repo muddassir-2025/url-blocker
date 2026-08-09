@@ -10,18 +10,6 @@ import com.muddassir.clearview.matching.QuerySource
 import java.util.Locale
 
 /**
- * Pure thumbnail-region geometry result. A plain data holder (not
- * android.graphics.Rect) so the computation stays unit-testable — the
- * mockable android.jar stubs Rect's constructor and methods as no-ops, so
- * a JVM test can neither construct a Rect with values nor read one back.
- * The service adapts this to a real Rect when cropping the screenshot.
- */
-data class ThumbnailRegion(val left: Int, val top: Int, val right: Int, val bottom: Int) {
-    val width: Int get() = right - left
-    val height: Int get() = bottom - top
-}
-
-/**
  * Unified extractor for URLs, queries, and titles from Chrome and Google apps.
  */
 class ContentExtractor {
@@ -77,17 +65,6 @@ class ContentExtractor {
         // their thumbnail) in the card list.
         private const val MIN_CARD_WIDTH_FRACTION = 0.45f
         private const val MIN_CARD_HEIGHT_FRACTION = 0.08f
-        // YouTube card thumbnails are 16:9; the NSFW pipeline crops the actual
-        // image region (never the title text row). These bound the geometry.
-        // THUMBNAIL_HEIGHT_FACTOR converts a thumbnail WIDTH to its HEIGHT
-        // (h = w * 9/16).
-        const val THUMBNAIL_HEIGHT_FACTOR = 9f / 16f
-        // The smallest region the pipeline will treat as a thumbnail. Anything
-        // smaller is a title/text strip or a channel avatar, not a video
-        // thumbnail — analyzing it would feed the model text (observed
-        // on-device: an 800x79 title row was analyzed as a "thumbnail").
-        const val MIN_THUMBNAIL_WIDTH = 200
-        const val MIN_THUMBNAIL_HEIGHT = 100
 
         // The Google app's results page nests its WebView — and thus the tab
         // chips — extremely deep in the accessibility tree. On-device evidence:
@@ -518,55 +495,6 @@ class ContentExtractor {
             return true
         }
 
-        /**
-         * Compute the THUMBNAIL IMAGE region of a feed card from its title
-         * node's bounds. YouTube cards are thumbnail-on-top, title-below, so:
-         *  - TALL nodes (full card: thumbnail + title + metadata) have their
-         *    top edge at the thumbnail's top → crop the top 16:9 band.
-         *  - SHORT nodes (title/metadata row only — the tree often exposes
-         *    just the text) have the thumbnail directly ABOVE the row → crop
-         *    the 16:9 band ending at the row's top.
-         * The result is clamped to the screen and rejected (null) when it
-         * fails the size sanity gate — a tiny rect is text, not a thumbnail.
-         * Pure so unit tests can cover the geometry without a tree.
-         */
-        fun thumbnailBoundsForCard(
-            left: Int,
-            top: Int,
-            right: Int,
-            bottom: Int,
-            screenW: Int,
-            screenH: Int
-        ): ThumbnailRegion? {
-            // Plain-int geometry (no android.graphics.Rect): the mockable
-            // android.jar stubs Rect's constructor and methods, so the math
-            // must be pure to stay unit-testable without a device.
-            val thumbW = right - left
-            if (thumbW < MIN_THUMBNAIL_WIDTH) return null
-            val thumbH = (thumbW * THUMBNAIL_HEIGHT_FACTOR).toInt()
-            val cardTop = if ((bottom - top) >= thumbW * 0.55f) {
-                // Full-card node: its top edge IS the thumbnail's top.
-                top
-            } else {
-                // Title row only: the thumbnail sits directly above the text —
-                // but ONLY when the full 16:9 band fits on screen. A row too
-                // near the top has no thumbnail above it on screen (clamping
-                // would leave a useless strip, not a thumbnail) → skip. This is
-                // deliberate: on a scrolled feed a partially-visible thumbnail
-                // in that position gets NO image signal (text signals still
-                // apply) rather than a garbage partial crop.
-                if (top - thumbH < 0) return null
-                top - thumbH
-            }
-            val cLeft = left.coerceIn(0, (screenW - 1).coerceAtLeast(0))
-            val cTop = cardTop.coerceIn(0, (screenH - 1).coerceAtLeast(0))
-            val cRight = (left + thumbW).coerceIn(cLeft + 1, screenW.coerceAtLeast(1))
-            val cBottom = (cardTop + thumbH).coerceIn(cTop + 1, screenH.coerceAtLeast(1))
-            if (cRight - cLeft < MIN_THUMBNAIL_WIDTH || cBottom - cTop < MIN_THUMBNAIL_HEIGHT) {
-                return null
-            }
-            return ThumbnailRegion(cLeft, cTop, cRight, cBottom)
-        }
     }
 
     /**
@@ -1030,27 +958,11 @@ class ContentExtractor {
                             null
                         }?.takeIf { it.isNotEmpty() && it != text }
                         val channel = ContentExtractor.channelFromCardText(text)
-                        // Thumbnail-image region (never the title text row): the
-                        // 16:9 band computed from the card node's shape. The NSFW
-                        // pipeline crops THIS — an 800x79 title strip must never
-                        // be fed to the model as a "thumbnail" (observed).
-                        val thumbBounds = if (hasBounds) {
-                            ContentExtractor.thumbnailBoundsForCard(
-                                bounds.left, bounds.top, bounds.right, bounds.bottom,
-                                screenWidth, screenHeight
-                            )?.let { android.graphics.Rect(it.left, it.top, it.right, it.bottom) }
-                        } else {
-                            null
-                        }
-                        if (thumbBounds != null) {
-                            Log.d(TAG, "THUMBNAIL_BOUNDS=[${thumbBounds.left},${thumbBounds.top},${thumbBounds.right},${thumbBounds.bottom}] THUMBNAIL_SIZE=${thumbBounds.width()}x${thumbBounds.height()} title=${title.take(40)}")
-                        }
                         seen[title] = FeedVideoCard(
                             title,
                             if (hasBounds) bounds else null,
                             contentDesc,
-                            channel,
-                            thumbnailBounds = thumbBounds
+                            channel
                         )
                     }
                 }
