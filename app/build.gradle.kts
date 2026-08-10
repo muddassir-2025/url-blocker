@@ -28,8 +28,8 @@ android {
         applicationId = "com.muddassir.clearview"
         minSdk = 24
         targetSdk = 37
-        versionCode = 11
-        versionName = "10.1"
+        versionCode = 15
+        versionName = "10.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -57,6 +57,10 @@ android {
     }
 
     compileOptions {
+        // java.time.chrono.HijrahDate (Umm al-Qura Islamic calendar) needs core
+        // library desugaring — java.time only arrived natively in API 26 and
+        // minSdk is 24.
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
@@ -92,6 +96,9 @@ dependencies {
     testImplementation(libs.junit)
     // org.json is stubbed in the Android SDK; provide the real JVM impl for unit tests
     testImplementation(libs.org.json)
+
+    // Core library desugaring (compile-time backport of java.time for API 24/25).
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
 
     // The Compose BOM must ALSO be on the androidTest + debug classpaths. The
     // versionless ui-test-junit4 / ui-test-manifest artifacts are only resolved

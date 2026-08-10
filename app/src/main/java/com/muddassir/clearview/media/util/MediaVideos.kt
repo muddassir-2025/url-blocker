@@ -28,6 +28,7 @@ object MediaVideos {
                     .put("isShort", v.isShort)
                     .put("isLive", v.isLive)
                     .put("durationSeconds", v.durationSeconds)
+                    .put("isOfflineAudio", v.isOfflineAudio)
             )
         }
         return arr.toString()
@@ -55,7 +56,8 @@ object MediaVideos {
                             viewCount = o.optLong("viewCount", 0L),
                             isShort = o.optBoolean("isShort", false),
                             isLive = o.optBoolean("isLive", false),
-                            durationSeconds = o.optLong("durationSeconds", 0L)
+                            durationSeconds = o.optLong("durationSeconds", 0L),
+                            isOfflineAudio = o.optBoolean("isOfflineAudio", false)
                         )
                     }
                 } catch (e: Exception) {

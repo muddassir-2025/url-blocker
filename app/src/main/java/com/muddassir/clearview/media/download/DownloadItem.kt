@@ -13,10 +13,9 @@ import org.json.JSONObject
  * cache dir via [AudioDownloadStore].
  *
  * [source] is [SOURCE_RSS] (from a saved channel's feed) or [SOURCE_URL]
- * (manually added by URL). [expiresAt] is only set for files larger than
- * [StoragePolicy.LARGE_FILE_THRESHOLD_BYTES] (the 15-day rule); 0 means the
- * file is kept indefinitely unless the user deletes it or storage cleanup
- * evicts the oldest downloads.
+ * (manually added by URL). [expiresAt] is always 0 — downloads are never
+ * auto-deleted, so the field exists only for JSON compatibility with metadata
+ * written by older builds that had the (removed) 15-day expiry rule.
  */
 data class DownloadItem(
     val videoId: String,

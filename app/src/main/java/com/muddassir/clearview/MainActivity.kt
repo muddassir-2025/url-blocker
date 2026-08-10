@@ -3,6 +3,7 @@ package com.muddassir.clearview
 import android.app.Activity
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -38,6 +39,8 @@ import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.worker.AudioWorkScheduler
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
 import com.muddassir.clearview.quran.worker.QuranWorkScheduler
+import com.muddassir.clearview.todo.data.TodoNotifier
+import com.muddassir.clearview.todo.data.TodoScheduler
 import com.muddassir.clearview.ui.BlockTab
 import com.muddassir.clearview.ui.ContentHubTabContent
 import com.muddassir.clearview.ui.ContentHubTopBar
@@ -50,6 +53,30 @@ import com.muddassir.clearview.ui.theme.UrlblockerTheme
 import com.muddassir.clearview.viewmodel.MainViewModel
 
 open class MainActivity : ComponentActivity() {
+
+    /**
+     * Warm-start request for the Todo screen: a Todo-reminder notification tap
+     * while the app is already running delivers a new intent via [onNewIntent];
+     * this snapshot state lets MainScreen react. The cold-start path reads the
+     * same flag straight from the launcher intent instead.
+     */
+    private val todoRequestState = mutableStateOf(false)
+    val todoScreenRequested: Boolean get() = todoRequestState.value
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(TodoNotifier.EXTRA_OPEN_TODO, false)) {
+            intent.removeExtra(TodoNotifier.EXTRA_OPEN_TODO)
+            todoRequestState.value = true
+        }
+    }
+
+    /** Clears the warm-start request after MainScreen has handled it. */
+    fun consumeTodoScreenRequest() {
+        todoRequestState.value = false
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -68,6 +95,11 @@ open class MainActivity : ComponentActivity() {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.deleteNotificationChannel("media_badge")
             nm.deleteNotificationChannel("protection_monitor")
+            // Todo reminders: keep both channels (reminders + the silent alarm
+            // channel) in their correct state from the very first launch — an
+            // older build's alarm channel without the silent tone must be
+            // rebuilt here, not only when the first alarm happens to fire.
+            TodoNotifier.ensureChannel(this)
         }
 
         // Quran Reminder: ensure the initial download + 6-hour refresh work is
@@ -100,6 +132,11 @@ open class MainActivity : ComponentActivity() {
                 // Settings).
                 viewModel.checkAccessibilityStatus(this)
                 viewModel.checkDeviceAdminStatus(this)
+                // The user may have just returned from granting the exact-alarm
+                // permission (SCHEDULE_EXACT_ALARM). Re-sync every todo alarm:
+                // the ones scheduled BEFORE the grant were inexact, and a
+                // re-arm now upgrades them to exact so reminders ring on time.
+                TodoScheduler.rescheduleAll(this)
             }
         })
 
@@ -121,6 +158,29 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
 
     var selectedTab by rememberSaveable { mutableStateOf(MainTab.QURAN) }
     val hub = rememberContentHubState()
+
+    // A Todo-reminder notification tap opens straight into the Todo screen —
+    // either from a cold start (the launcher intent carries EXTRA_OPEN_TODO) or
+    // a warm start (onNewIntent set todoScreenRequested). Both switch to the
+    // Quran tab first so the top bar that hosts the Todo screen is composed.
+    val activity = LocalContext.current as? MainActivity
+    LaunchedEffect(Unit) {
+        if (activity?.intent?.getBooleanExtra(TodoNotifier.EXTRA_OPEN_TODO, false) == true) {
+            activity.intent.removeExtra(TodoNotifier.EXTRA_OPEN_TODO)
+            selectedTab = MainTab.QURAN
+            hub.selectedTab = ContentTab.QURAN
+            hub.showTodoScreen = true
+        }
+    }
+    val todoRequested = activity?.todoScreenRequested == true
+    LaunchedEffect(todoRequested) {
+        if (todoRequested) {
+            activity?.consumeTodoScreenRequest()
+            selectedTab = MainTab.QURAN
+            hub.selectedTab = ContentTab.QURAN
+            hub.showTodoScreen = true
+        }
+    }
 
     LaunchedEffect(Unit) {
         viewModel.initialize(context)

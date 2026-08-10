@@ -13,10 +13,10 @@ import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.LiveTv
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.Badge
@@ -56,9 +56,14 @@ import com.muddassir.clearview.media.ui.MediaTab
 import com.muddassir.clearview.media.ui.VideoPlayerScreen
 import com.muddassir.clearview.media.worker.MediaNotifier
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
+import com.muddassir.clearview.quran.data.IslamicDateStore
 import com.muddassir.clearview.quran.data.QuranRepository
 import com.muddassir.clearview.quran.model.QuranVerse
+import com.muddassir.clearview.quran.ui.DhikrCounterScreen
 import com.muddassir.clearview.quran.ui.QuranTab
+import com.muddassir.clearview.todo.data.TodoScheduler
+import com.muddassir.clearview.todo.data.TodoStore
+import com.muddassir.clearview.todo.ui.TodoScreen
 import com.muddassir.clearview.quran.util.copyVerseToClipboard
 import com.muddassir.clearview.quran.util.formatVerseForSharing
 import com.muddassir.clearview.quran.widget.QuranReminderWidgetProvider
@@ -115,16 +120,31 @@ class ContentHubState(appContext: Context) {
     // ── Quran notifications (new verse) ────────────────────────────
     var quranNotificationsEnabled by mutableStateOf(true)
 
+    // ── Todo reminders (alarm notifications) ───────────────────────
+    var todoNotificationsEnabled by mutableStateOf(true)
+
     // ── Top-bar sheets on the Quran tab (search / settings / notifications) ──
     var showSearchSheet by mutableStateOf(false)
     var showSettingsSheet by mutableStateOf(false)
     var showNotificationsSheet by mutableStateOf(false)
     // Bookmarks manager opened from the settings sheet.
     var showBookmarksSheet by mutableStateOf(false)
+    // Dhikr Counter screen opened from the settings sheet's Dhikr card.
+    var showDhikrCounter by mutableStateOf(false)
+    // Todo screen opened from the settings sheet's Todo card.
+    var showTodoScreen by mutableStateOf(false)
+
+    // ── Islamic date (Umm al-Qura) on the Quran tab ────────────────
+    // The user's ±1 day adjustment (0 = the default calculated date),
+    // persisted via IslamicDateStore so it survives restarts.
+    var islamicDateAdjustment by mutableStateOf(0)
+    var showIslamicDateSheet by mutableStateOf(false)
 
     private val appContext: Context = appContext
     private val quranRepository = QuranRepository(appContext)
     private val mediaRepository = MediaRepository(appContext)
+    private val islamicDateStore = IslamicDateStore(appContext)
+    private val todoStore = TodoStore(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     init {
@@ -142,6 +162,8 @@ class ContentHubState(appContext: Context) {
         }
         mediaNotificationsEnabled = mediaRepository.isMediaNotificationsEnabled()
         quranNotificationsEnabled = quranRepository.getQuranNotificationsEnabled()
+        todoNotificationsEnabled = todoStore.getTodoNotificationsEnabled()
+        islamicDateAdjustment = islamicDateStore.adjustmentDays()
         verseLoading = true
     }
 
@@ -247,6 +269,23 @@ class ContentHubState(appContext: Context) {
     fun setQuranNotifications(enabled: Boolean) {
         quranNotificationsEnabled = enabled
         quranRepository.setQuranNotificationsEnabled(enabled)
+    }
+
+    /**
+     * Persists the global Todo-reminders toggle. Turning it ON re-registers
+     * every pending todo alarm so existing todos get their reminders again
+     * (turning it OFF leaves alarms unset — [TodoScheduler] skips them too).
+     */
+    fun setTodoNotifications(enabled: Boolean) {
+        todoNotificationsEnabled = enabled
+        todoStore.setTodoNotificationsEnabled(enabled)
+        TodoScheduler.rescheduleAll(appContext)
+    }
+
+    /** Persists the ±1 day Islamic-date adjustment (0 = the default Umm al-Qura date). */
+    fun changeIslamicDateAdjustment(days: Int) {
+        islamicDateAdjustment = days.coerceIn(-1, 1)
+        islamicDateStore.setAdjustmentDays(islamicDateAdjustment)
     }
 
     /**
@@ -569,7 +608,9 @@ fun ContentHubTabContent(
                 canGoPrevious = state.canGoPrevious,
                 canGoNext = state.canGoNext,
                 onPrevious = { state.goToAdjacentVerse(-1) },
-                onNext = { state.goToAdjacentVerse(+1) }
+                onNext = { state.goToAdjacentVerse(+1) },
+                islamicDateAdjustment = state.islamicDateAdjustment,
+                onAdjustDate = { state.showIslamicDateSheet = true }
             )
 
             state.selectedTab == ContentTab.MEDIA -> MediaTab(
@@ -657,14 +698,16 @@ fun ContentHubTopBar(
                         contentDescription = stringResource(R.string.quran_search)
                     )
                 }
-                // Settings: verse refresh interval + notification toggles.
+                // More options: verse refresh interval + notification toggles and
+                // the feature hub (Dhikr counter, Todo, bookmarks) — no longer
+                // just settings, so it uses the overflow icon.
                 IconButton(
                     onClick = { state.showSettingsSheet = true },
                     enabled = state.verse != null && !state.verseLoading
                 ) {
                     Icon(
-                        Icons.Filled.Settings,
-                        contentDescription = stringResource(R.string.quran_settings)
+                        Icons.Filled.MoreVert,
+                        contentDescription = stringResource(R.string.quran_more_options)
                     )
                 }
                 IconButton(
@@ -745,6 +788,19 @@ fun ContentHubTopBar(
     }
     if (state.showBookmarksSheet) {
         BookmarksSheet(state = state, onDismiss = { state.showBookmarksSheet = false })
+    }
+    if (state.showDhikrCounter) {
+        DhikrCounterScreen(onDismiss = { state.showDhikrCounter = false })
+    }
+    if (state.showTodoScreen) {
+        TodoScreen(onDismiss = { state.showTodoScreen = false })
+    }
+    if (state.showIslamicDateSheet) {
+        IslamicDateAdjustmentSheet(
+            adjustment = state.islamicDateAdjustment,
+            onSelect = { state.changeIslamicDateAdjustment(it) },
+            onDismiss = { state.showIslamicDateSheet = false }
+        )
     }
 }
 

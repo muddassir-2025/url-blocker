@@ -6,10 +6,23 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Alarm-style todo reminders show a full-screen notification (peeks over
+         the lock screen). Android 14+ requires this permission; it is a
+         normal permission granted automatically by the system. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Subtle haptic tick on every dhikr count (normal permission, auto-granted). -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Foreground media service: offline audio keeps playing (with
          notification controls) when the app is backgrounded / screen off. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Todo reminders: re-schedule AlarmManager alarms after a reboot (the OS
+         clears all alarms on boot). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Todo reminders: exact alarms for on-time notifications on Android 12+.
+         The user is guided to grant this from the Todo editor when they pick
+         the Alarm style; without it, reminders fall back to inexact timing. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- Package visibility (Android 11+): the block overlay resolves the HOME
          intent to return the user to their launcher after a block. Without
          this <queries> declaration the resolution can return null on newer
@@ -107,6 +120,64 @@
             android:name=".media.download.AudioPlaybackService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Todo reminders: alarm fire + Complete/Snooze actions + boot
+             rescheduling. Exported=false is fine — the alarms and actions are
+             the app's own explicit intents, and BOOT_COMPLETED is a system
+             broadcast. -->
+        <receiver
+            android:name=".todo.data.TodoReminderReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Todo snooze picker: a dialog-styled activity opened by the
+             reminder notification's Snooze action (10 / 30 / 60 min or custom). -->
+        <activity
+            android:name=".todo.ui.TodoSnoozeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Urlblocker.Dialog" />
+
+        <!-- Todo ALARM screen: launched by the SYSTEM via the alarm
+             notification's full-screen intent (the sanctioned alarm pattern —
+             direct activity launch from a background alarm is blocked on
+             Android 14+). Shows over the lock screen (API 27+ attrs; window
+             flags in code cover the rest). singleInstance so concurrent
+             alarms never stack. -->
+        <activity
+            android:name=".todo.ui.TodoAlarmActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.Urlblocker.Alarm" />
+
+        <!-- Todo ALARM ringtone service: foreground service that plays the
+             looping alarm ringtone + vibration for a full minute (even in the
+             background / screen off) for alarm-style todos. Starts from the
+             reminder receiver when an exact alarm fires; the exact-alarm
+             exemption permits the background foreground-service start. -->
+        <service
+            android:name=".todo.data.TodoAlarmService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- FileProvider: lets the native share sheet receive the generated
+             Progress Card image (a cache file) without any storage permission. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!-- Device Admin Receiver (adds uninstall friction) -->
         <receiver

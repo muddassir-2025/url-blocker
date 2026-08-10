@@ -454,8 +454,14 @@ fun MediaTab(
                 }
                 when (feedFilter.playlistType) {
                     PlaylistTypeFilter.ALL -> bySource
-                    PlaylistTypeFilter.VIDEO -> bySource.filterNot { isDeviceAudio(it.videoId) }
-                    PlaylistTypeFilter.AUDIO -> bySource.filter { isDeviceAudio(it.videoId) }
+                    // Audio entries: device imports (device- ids) OR the
+                    // downloaded audio of a YouTube video (isOfflineAudio).
+                    PlaylistTypeFilter.VIDEO -> bySource.filterNot {
+                        it.isOfflineAudio || isDeviceAudio(it.videoId)
+                    }
+                    PlaylistTypeFilter.AUDIO -> bySource.filter {
+                        it.isOfflineAudio || isDeviceAudio(it.videoId)
+                    }
                 }
             }
             else -> applyFeedFilter(
@@ -914,20 +920,35 @@ fun MediaTab(
                                 showingCached = false
                             )
                         }
-                        items(searchResults, key = { it.videoId }) { video ->
-                            // Audio imported from the system (device) is an
-                            // offline track, not a YouTube video — tapping it
-                            // plays the audio instead of opening the player.
-                            val isDeviceAudio = video.videoId.startsWith("device-")
+                        // key: (videoId, audio flag) — a playlist can hold BOTH
+                        // a video and its downloaded audio, and LazyColumn keys
+                        // must stay unique.
+                        items(
+                            searchResults,
+                            key = { it.videoId + if (it.isOfflineAudio) "#audio" else "#video" }
+                        ) { video ->
+                            // Audio entries — device imports (device- ids) or
+                            // the downloaded audio of a YouTube video
+                            // (isOfflineAudio) — are offline tracks, not YouTube
+                            // videos: tapping plays the audio instead of opening
+                            // the player. If that audio was deleted since the
+                            // entry was added, fall back to the video rather
+                            // than a dead tap.
+                            val isAudioEntry =
+                                video.isOfflineAudio || video.videoId.startsWith("device-")
                             LongVideoCard(
                                 video = video,
                                 progressStore = progressStore,
                                 isManual = libraryStore.isManuallyAdded(video.videoId),
                                 downloadStatus = AudioDownloads.statusFor(video.videoId),
-                                isOffline = isDeviceAudio || AudioDownloads.isDownloaded(video.videoId),
+                                isOffline = isAudioEntry || AudioDownloads.isDownloaded(video.videoId),
                                 onPlayOffline = { onPlayOffline(video) },
                                 onClick = {
-                                    if (isDeviceAudio) onPlayOffline(video) else playLong(video)
+                                    if (isAudioEntry && AudioDownloads.isDownloaded(video.videoId)) {
+                                        onPlayOffline(video)
+                                    } else {
+                                        playLong(video)
+                                    }
                                 },
                                 onDownload = {
                                     AudioDownloads.download(video, AudioDownloads.sourceFor(video))
@@ -1086,7 +1107,10 @@ fun MediaTab(
             text = { Text("Remove \"${video.title}\" from \"${playlist.name}\"?") },
             confirmButton = {
                 TextButton(onClick = {
-                    userPlaylistStore.removeVideo(playlist.id, video.videoId)
+                    // Remove exactly the entry tapped (video OR its audio — a
+                    // playlist can hold both, and removing one must never
+                    // remove the other).
+                    userPlaylistStore.removeVideo(playlist.id, video.videoId, video.isOfflineAudio)
                     saveUserPlaylists()
                     pendingVideoRemove = null
                     Toast.makeText(
@@ -1102,10 +1126,15 @@ fun MediaTab(
         )
     }
 
-    // ── My playlists manager (user-created) ────────────────────────
+    // ── Playlists manager (user-created + imported by URL) ─────────
+    // Opened from the Playlists entry beside "All". Both kinds of playlists
+    // live here: create a local one, import a YouTube one by URL, open or
+    // remove either.
     if (showPlaylistsSheet) {
         PlaylistsSheet(
-            playlists = userPlaylists,
+            userPlaylists = userPlaylists,
+            repository = repository,
+            importedPlaylists = playlists,
             onOpen = { p ->
                 showPlaylistsSheet = false
                 selectedUserPlaylistId = p.id
@@ -1125,6 +1154,24 @@ fun MediaTab(
                 showPlaylistNameDialog = true
             },
             onDelete = { p -> pendingUserPlaylistDelete = p },
+            // "Add playlist by URL": imports a YouTube playlist (same dialog
+            // as the imported-playlist strip's + chip).
+            onAddByUrl = {
+                showPlaylistsSheet = false
+                showAddPlaylistDialog = true
+            },
+            onOpenImported = { p ->
+                showPlaylistsSheet = false
+                selectedPlaylistId = p.playlistId
+                selectedUserPlaylistId = null
+                filterChannelId = null
+                playlistVideos = emptyList()
+                playlistError = null
+            },
+            onRemoveImported = { p ->
+                showPlaylistsSheet = false
+                pendingPlaylistRemove = p
+            },
             onDismiss = { showPlaylistsSheet = false }
         )
     }
@@ -1214,7 +1261,13 @@ fun MediaTab(
     if (showAddVideosPicker && selectedUserPlaylist != null) {
         PlaylistAddVideosSheet(
             candidates = addVideosCandidates,
-            alreadyIn = selectedUserPlaylist!!.videos.map { it.videoId }.toSet(),
+            // Only VIDEO entries block a candidate — the playlist may hold
+            // this video's downloaded AUDIO (isOfflineAudio) without the video
+            // itself, and the picker must still offer the video.
+            alreadyIn = selectedUserPlaylist!!.videos
+                .filterNot { it.isOfflineAudio }
+                .map { it.videoId }
+                .toSet(),
             onAdd = { videos ->
                 userPlaylistStore.addVideos(selectedUserPlaylist!!.id, videos)
                 saveUserPlaylists()
@@ -3519,64 +3572,167 @@ private fun AddPlaylistDialog(
 // ══════════════════════════════════════════════════════════════════════
 
 /**
- * The "My Playlists" manager: every user-created playlist with open, rename
- * and delete actions, plus a New playlist button. Tapping a playlist opens it
- * as the current feed.
+ * The "Playlists" manager opened from the Playlists entry beside "All":
+ * create a local playlist, ADD A YOUTUBE PLAYLIST BY URL, and open / rename /
+ * delete either kind. User playlists are the replacement for the removed
+ * Bookmark feature — a curated, locally-saved list in an order the user
+ * controls; imported playlists mirror a YouTube playlist wholesale.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlaylistsSheet(
-    playlists: List<UserPlaylist>,
+    userPlaylists: List<UserPlaylist>,
+    repository: MediaRepository,
+    importedPlaylists: List<SavedPlaylist>,
     onOpen: (UserPlaylist) -> Unit,
     onCreate: () -> Unit,
     onRename: (UserPlaylist) -> Unit,
     onDelete: (UserPlaylist) -> Unit,
+    /** Opens the "Add playlist by URL" dialog (imports a YouTube playlist). */
+    onAddByUrl: () -> Unit,
+    onOpenImported: (SavedPlaylist) -> Unit,
+    onRemoveImported: (SavedPlaylist) -> Unit,
     onDismiss: () -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(0.8f)
+                .fillMaxHeight(0.85f)
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 24.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                text = "My Playlists",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(Modifier.height(12.dp))
-            Button(
-                onClick = onCreate,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("New playlist")
-            }
-            Spacer(Modifier.height(12.dp))
-            if (playlists.isEmpty()) {
+            item {
                 Text(
-                    text = "No playlists yet. Create one to curate your own video list.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.fillMaxWidth()
+                    text = "Playlists",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
                 )
-            } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(playlists, key = { it.id }) { p ->
-                        UserPlaylistRow(
-                            playlist = p,
-                            onOpen = { onOpen(p) },
-                            onRename = { onRename(p) },
-                            onDelete = { onDelete(p) }
-                        )
-                    }
+            }
+            // Create a LOCAL playlist — the primary action.
+            item {
+                Button(onClick = onCreate, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("New playlist")
                 }
+            }
+            // Import a YouTube playlist by URL — the second way to add one.
+            item {
+                OutlinedButton(onClick = onAddByUrl, modifier = Modifier.fillMaxWidth()) {
+                    Icon(
+                        Icons.Filled.PlaylistAdd,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Add playlist by URL")
+                }
+            }
+            if (importedPlaylists.isNotEmpty()) {
+                item {
+                    Text(
+                        text = "Imported from YouTube",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+                items(importedPlaylists, key = { it.playlistId }) { p ->
+                    ImportedPlaylistRow(
+                        playlist = p,
+                        videoCount = repository.getCachedPlaylistVideos(p.playlistId)
+                            ?.first?.size ?: 0,
+                        onOpen = { onOpenImported(p) },
+                        onRemove = { onRemoveImported(p) }
+                    )
+                }
+            }
+            item {
+                Text(
+                    text = "My playlists",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+            if (userPlaylists.isEmpty()) {
+                item {
+                    Text(
+                        text = "No playlists yet. Create one to curate your own video list.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            } else {
+                items(userPlaylists, key = { it.id }) { p ->
+                    UserPlaylistRow(
+                        playlist = p,
+                        onOpen = { onOpen(p) },
+                        onRename = { onRename(p) },
+                        onDelete = { onDelete(p) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** One imported YouTube playlist row: title + count, tap to open, ✕ to remove. */
+@Composable
+private fun ImportedPlaylistRow(
+    playlist: SavedPlaylist,
+    videoCount: Int,
+    onOpen: () -> Unit,
+    onRemove: () -> Unit
+) {
+    Card(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Filled.PlaylistPlay,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = playlist.title,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = if (videoCount > 0) "$videoCount videos" else "Loading…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
+            IconButton(
+                onClick = onRemove,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Remove ${playlist.title}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp)
+                )
             }
         }
     }
@@ -3768,7 +3924,13 @@ private fun PlaylistEditorSheet(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    itemsIndexed(playlist.videos, key = { _, v -> v.videoId }) { index, video ->
+                    // key: (videoId, audio flag) — a playlist can hold BOTH a
+                    // video and its downloaded audio; LazyColumn keys must be
+                    // unique, so the two same-id entries get distinct keys.
+                    itemsIndexed(
+                        playlist.videos,
+                        key = { _, v -> v.videoId + if (v.isOfflineAudio) "#audio" else "#video" }
+                    ) { index, video ->
                         PlaylistEditorRow(
                             video = video,
                             index = index,
@@ -3828,13 +3990,27 @@ private fun PlaylistEditorRow(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Text(
-                    text = "${index + 1} · ${video.channelName.ifBlank { "YouTube" }}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Audio entries (downloaded audio / device imports) get a
+                    // small note so "audio of X" is distinguishable from
+                    // "video X" — a playlist can hold both.
+                    if (video.isOfflineAudio || video.videoId.startsWith("device-")) {
+                        Icon(
+                            Icons.Filled.MusicNote,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(
+                        text = "${index + 1} · ${video.channelName.ifBlank { "YouTube" }}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
             Column(horizontalAlignment = Alignment.End) {
                 Row {
@@ -4016,7 +4192,12 @@ internal fun AddToPlaylistSheet(
     playlists: List<UserPlaylist>,
     onAdd: (UserPlaylist) -> Unit,
     onCreateNew: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /** Sheet heading — "Add to playlist" for a video, "Add audio to
+     *  playlist" when the entry is downloaded audio (isOfflineAudio). */
+    title: String = "Add to playlist",
+    /** Label of the create-new button, mirroring [title]. */
+    newLabel: String = "New playlist with this video"
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -4026,7 +4207,7 @@ internal fun AddToPlaylistSheet(
                 .padding(bottom = 24.dp)
         ) {
             Text(
-                text = "Add to playlist",
+                text = title,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
@@ -4103,7 +4284,7 @@ internal fun AddToPlaylistSheet(
             ) {
                 Icon(Icons.Filled.PlaylistAdd, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("New playlist with this video")
+                Text(newLabel)
             }
         }
     }

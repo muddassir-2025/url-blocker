@@ -49,9 +49,13 @@ class UserPlaylistStore(context: Context) {
         save(UserPlaylists.withVideosAdded(getPlaylists(), id, videos))
     }
 
-    /** Removes one video from the playlist with [id]. */
-    fun removeVideo(id: String, videoId: String) {
-        save(UserPlaylists.withVideoRemoved(getPlaylists(), id, videoId))
+    /**
+     * Removes one entry from the playlist with [id] — the video or its
+     * offline audio (see [UserPlaylists.withVideoRemoved]). A playlist can
+     * hold both, so the caller passes the entry's own [MediaVideo.isOfflineAudio].
+     */
+    fun removeVideo(id: String, videoId: String, isOfflineAudio: Boolean = false) {
+        save(UserPlaylists.withVideoRemoved(getPlaylists(), id, videoId, isOfflineAudio))
     }
 
     /** Moves the video at [fromIndex] to [toIndex] within the playlist with [id]. */

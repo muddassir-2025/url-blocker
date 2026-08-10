@@ -23,13 +23,10 @@ import java.util.UUID
  * The registry ([DownloadItem]s) is persisted as JSON in metadata.json so it
  * survives restarts. All heavy I/O is expected to run on the caller's
  * background dispatcher.
- *
- * Also owns the persisted storage limit, which lives in SharedPreferences.
  */
 class AudioDownloadStore(context: Context) {
 
     private val appContext = context.applicationContext
-    private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     val audioDir: File = File(appContext.cacheDir, "audio")
     val thumbnailsDir: File = File(appContext.cacheDir, "thumbnails")
@@ -38,15 +35,6 @@ class AudioDownloadStore(context: Context) {
     init {
         audioDir.mkdirs()
         thumbnailsDir.mkdirs()
-    }
-
-    // ── Storage limit ──────────────────────────────────────────────
-
-    fun getStorageLimitBytes(): Long =
-        prefs.getLong(KEY_STORAGE_LIMIT, StoragePolicy.DEFAULT_LIMIT_BYTES)
-
-    fun setStorageLimitBytes(limit: Long) {
-        prefs.edit().putLong(KEY_STORAGE_LIMIT, limit.coerceAtLeast(10L * 1024 * 1024)).apply()
     }
 
     // ── Metadata registry ──────────────────────────────────────────
@@ -196,9 +184,8 @@ class AudioDownloadStore(context: Context) {
                     fileSize = target.length(),
                     downloadedAt = now,
                     lastPlayed = 0L,
-                    // These are the user's OWN files, not downloads — keep
-                    // them indefinitely (no 15-day expiry), matching the
-                    // "manual actions are never restricted" philosophy.
+                    // The user's own files are kept forever — like every other
+                    // download, nothing is ever auto-deleted.
                     expiresAt = 0L,
                     thumbnailPath = "",
                     // Real track length so the Downloads list shows "3:24"
@@ -276,37 +263,12 @@ class AudioDownloadStore(context: Context) {
         return count
     }
 
-    /** Deletes expired downloads (the 15-day rule); returns count. */
-    fun deleteExpired(now: Long): Int = synchronized(LOCK) {
-        val expired = StoragePolicy.expiredItems(loadItems(), now)
-        expired.forEach { delete(it.videoId) }
-        expired.size
-    }
-
-    /**
-     * Smart cleanup after a download: if storage exceeds the limit, delete
-     * expired downloads first, then the oldest downloads — never the audio
-     * currently playing ([protectedIds]). Returns how many were deleted.
-     */
-    fun evictIfOverLimit(now: Long, protectedIds: Set<String>): Int = synchronized(LOCK) {
-        val items = loadItems()
-        val used = StoragePolicy.storageUsedBytes(items)
-        val limit = getStorageLimitBytes()
-        if (used <= limit) return@synchronized 0
-        val candidates = StoragePolicy.evictionCandidates(items, used - limit, now, protectedIds)
-        candidates.forEach { delete(it.videoId) }
-        candidates.size
-    }
-
     private companion object {
         // Serializes every read-modify-write of metadata.json across ALL store
         // instances (the manager, the Downloads sheet, the worker) so two
         // concurrent downloads finishing together can never drop each other's
         // metadata row (which would orphan a file on disk).
         val LOCK = Any()
-
-        const val PREFS_NAME = "audio_downloads"
-        const val KEY_STORAGE_LIMIT = "storage_limit"
 
         const val STALE_PART_MS = 24L * 60 * 60 * 1000
     }

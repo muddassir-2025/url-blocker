@@ -95,7 +95,7 @@ class MediaRepository(context: Context) {
         }
         val channel = SavedChannel(
             channelId = channelId,
-            displayName = trimmed.removePrefix("@"),
+            displayName = channelDisplayName(trimmed),
             sourceRef = trimmed,
             // Subscription moment: the worker's notification guard treats every
             // video published before this instant as pre-existing backlog that
@@ -118,6 +118,19 @@ class MediaRepository(context: Context) {
             }
         }
         AddChannelResult.Success(channel)
+    }
+
+    /**
+     * Human-friendly channel name from what the user pasted: the @handle for
+     * handle / handle-URL inputs (incl. Unicode handles like @الفلاح-هدف), the
+     * input itself otherwise (bare ids, /channel/ URLs). Never the full pasted
+     * URL for an /@ URL.
+     */
+    private fun channelDisplayName(input: String): String = when {
+        input.contains("/@") ->
+            input.substringAfterLast("/@").substringBefore('/').substringBefore('?').trim()
+        input.startsWith("@") -> input.removePrefix("@")
+        else -> input
     }
 
     fun removeChannel(channelId: String) {
@@ -686,6 +699,7 @@ class MediaRepository(context: Context) {
                     .put("isShort", v.isShort)
                     .put("isLive", v.isLive)
                     .put("durationSeconds", v.durationSeconds)
+                    .put("isOfflineAudio", v.isOfflineAudio)
             )
         }
         val obj = JSONObject()
@@ -709,7 +723,8 @@ class MediaRepository(context: Context) {
                     viewCount = o.optLong("viewCount", 0L),
                     isShort = o.optBoolean("isShort", false),
                     isLive = o.optBoolean("isLive", false),
-                    durationSeconds = o.optLong("durationSeconds", 0L)
+                    durationSeconds = o.optLong("durationSeconds", 0L),
+                    isOfflineAudio = o.optBoolean("isOfflineAudio", false)
                 )
             } catch (e: Exception) {
                 null
@@ -829,39 +844,202 @@ class MediaRepository(context: Context) {
         File(appContext.filesDir, "media_playlist_$playlistId.json")
 
     /**
-     * Fetches the playlist page and parses its `ytInitialData`. A successful
-     * page load is authoritative — a private/unavailable playlist returns an
-     * info with an empty video list (no RSS fallback, that's the answer). Only
-     * when the page fetch itself fails does the RSS feed get tried (it returns
-     * the newest ~15 videos).
+     * Fetches the playlist page and parses its `ytInitialData`, then follows
+     * EVERY continuation page so the FULL playlist is imported. There are two
+     * page formats to handle:
+     *
+     *  - CLASSIC: the initial HTML embeds the first batch of items
+     *    (`playlistVideoRenderer`), the rest arrive via the
+     *    `youtubei/v1/browse` endpoint (one POST per page of ~100).
+     *  - MODERN (2025+): the initial HTML embeds ONLY playlist metadata — no
+     *    video list at all. The full ordered list is served by the
+     *    `youtubei/v1/next` endpoint's playlist panel (`playlistPanelVideoRenderer`
+     *    items), paginated the same way.
+     *
+     * A successful response is authoritative — a private/unavailable playlist
+     * returns an info with an empty video list (no RSS fallback, that's the
+     * answer). Only when the page can't be fetched/parsed or the modern panel
+     * fetch fails outright does the RSS feed get tried (it returns the newest
+     * ~15 videos — a degraded fallback, never the primary path).
      */
     private fun fetchPlaylistInfo(playlistId: String): PlaylistPageParser.PlaylistInfo? {
+        val pageHtml = fetchPlaylistPageHtml(playlistId)
+        val first = pageHtml?.let { PlaylistPageParser.parsePage(it) }
+
+        if (first != null && first.videos.isNotEmpty()) {
+            // Classic format: the list is embedded. Walk the continuation
+            // chain: every browse page yields the next batch of videos AND
+            // the token for the page after it. A LinkedHashMap keeps the
+            // playlist order while deduplicating (defensive — the pages never
+            // actually repeat items). A failed page stops the walk (cache
+            // what we have rather than failing the whole playlist).
+            val apiKey = PlaylistPageParser.innertubeApiKey(pageHtml)
+            val context = PlaylistPageParser.innertubeContext(pageHtml)
+            val all = LinkedHashMap<String, MediaVideo>()
+            first.videos.forEach { all[it.videoId] = it }
+
+            var token = PlaylistPageParser.firstContinuationToken(pageHtml)
+            var pages = 0
+            while (token != null && pages < MAX_PLAYLIST_PAGES) {
+                pages++
+                val page = fetchPlaylistContinuation(token, apiKey, context) ?: break
+                page.videos.forEach { v -> if (v.videoId !in all) all[v.videoId] = v }
+                token = page.nextToken
+            }
+            return PlaylistPageParser.PlaylistInfo(first.title, all.values.toList())
+        }
+
+        if (first != null) {
+            // Modern format: the page parsed fine (title + metadata) but
+            // carries NO embedded video list — a PUBLIC playlist looks exactly
+            // like this now, so this is NOT "private". Fetch the full list
+            // from the /next endpoint's playlist panel. A reached panel with
+            // an empty list is the authoritative private/unavailable answer;
+            // only a failed panel fetch falls back to RSS.
+            val apiKey = PlaylistPageParser.innertubeApiKey(pageHtml)
+            val context = PlaylistPageParser.innertubeContext(pageHtml)
+            if (context != null) {
+                fetchPlaylistPanelViaNext(playlistId, apiKey, context)?.let { return it }
+            }
+        }
+
+        // Page fetch or parse failed, or the modern panel fetch failed
+        // outright — last resort: RSS (newest ~15 videos).
+        return fetchPlaylistRss(playlistId)
+    }
+
+    /**
+     * Modern playlist pages (2025+ page format) embed NO video list in the
+     * initial HTML — only playlist metadata. The full ordered list is served
+     * by the `/youtubei/v1/next` endpoint's playlist panel
+     * (`playlistPanelVideoRenderer` items), which this walks to the end using
+     * the same continuation pattern as the classic browse walk. Returns null
+     * only when the endpoint can't be reached or the response has no playlist
+     * panel; a reached panel with an empty list is authoritative (private /
+     * unavailable playlist).
+     */
+    private fun fetchPlaylistPanelViaNext(
+        playlistId: String,
+        apiKey: String?,
+        context: JSONObject?
+    ): PlaylistPageParser.PlaylistInfo? {
+        val first = fetchNextPanel(playlistId, apiKey, context, continuation = null)
+            ?: return null
+        val all = LinkedHashMap<String, MediaVideo>()
+        first.videos.forEach { all[it.videoId] = it }
+
+        var token = first.nextToken
+        var pages = 0
+        while (token != null && pages < MAX_PLAYLIST_PAGES) {
+            pages++
+            val page = fetchNextPanel(playlistId, apiKey, context, continuation = token) ?: break
+            page.videos.forEach { v -> if (v.videoId !in all) all[v.videoId] = v }
+            token = page.nextToken
+        }
+        return PlaylistPageParser.PlaylistInfo(first.title, all.values.toList())
+    }
+
+    /**
+     * One `/youtubei/v1/next` request: the playlist's full video panel (when
+     * [continuation] is null) or the panel's next page (when it isn't). Null
+     * on any network/parse failure (the walk stops, keeping what it has).
+     */
+    private fun fetchNextPanel(
+        playlistId: String,
+        apiKey: String?,
+        context: JSONObject?,
+        continuation: String?
+    ): PlaylistPageParser.PlaylistPanel? {
+        val url = "https://www.youtube.com/youtubei/v1/next" +
+            (if (apiKey != null) "?key=$apiKey" else "")
+        val body = JSONObject()
+            .put("context", context ?: JSONObject())
+            .apply {
+                if (continuation != null) put("continuation", continuation)
+                else put("playlistId", playlistId)
+            }
+            .toString()
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("User-Agent", DESKTOP_USER_AGENT)
+                setRequestProperty("Referer", "https://www.youtube.com/")
+                outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            val resp = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            PlaylistPageParser.parsePlaylistPanel(resp)
+        } catch (e: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    /** Fetches the playlist page HTML with a DESKTOP UA (full ytInitialData). */
+    private fun fetchPlaylistPageHtml(playlistId: String): String? {
         val pageUrl = "https://www.youtube.com/playlist?list=$playlistId"
         var connection: HttpURLConnection? = null
-        try {
+        return try {
             connection = (URL(pageUrl).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 15_000
                 readTimeout = 20_000
                 requestMethod = "GET"
                 setRequestProperty("Accept-Language", "en-US,en;q=0.9")
-                setRequestProperty(
-                    "User-Agent",
-                    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
-                        "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
-                )
+                setRequestProperty("User-Agent", DESKTOP_USER_AGENT)
             }
-            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                val html = connection.inputStream.bufferedReader(Charsets.UTF_8).use {
-                    it.readText()
-                }
-                PlaylistPageParser.parsePage(html)?.let { return it }
-            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         } catch (e: Exception) {
-            // Page scrape failed — fall through to the RSS fallback.
+            null
         } finally {
             connection?.disconnect()
         }
-        return fetchPlaylistRss(playlistId)
+    }
+
+    /**
+     * One `youtubei/v1/browse` continuation request: POSTs the page's own
+     * innertube context + token and parses the next batch. Null on any
+     * network/parse failure (the walk stops, keeping what it has).
+     */
+    private fun fetchPlaylistContinuation(
+        token: String,
+        apiKey: String?,
+        context: JSONObject?
+    ): PlaylistPageParser.ContinuationPage? {
+        val url = "https://www.youtube.com/youtubei/v1/browse" +
+            (if (apiKey != null) "?key=$apiKey" else "")
+        val body = JSONObject()
+            .put("context", context ?: JSONObject())
+            .put("continuation", token)
+            .toString()
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("User-Agent", DESKTOP_USER_AGENT)
+                setRequestProperty("Referer", "https://www.youtube.com/")
+                outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            val resp = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            PlaylistPageParser.parseContinuationPage(resp)
+        } catch (e: Exception) {
+            null
+        } finally {
+            connection?.disconnect()
+        }
     }
 
     /** RSS fallback for playlists: `feeds/videos.xml?playlist_id=` (newest ~15). */
@@ -902,7 +1080,17 @@ class MediaRepository(context: Context) {
         const val KEY_SEEN_UPDATE_IDS = "seen_update_ids"
         const val KEY_FEED_FILTER = "feed_filter"
         const val MAX_NOTIFIED_VIDEOS = 200
+        // Safety cap on continuation pages (~100 videos each → up to 10 000
+        // videos, far beyond YouTube's 5 000-video playlist maximum).
+        const val MAX_PLAYLIST_PAGES = 100
         const val DEFAULT_MEDIA_NOTIFICATIONS_ENABLED = true
+
+        // A DESKTOP UA gets the full server-rendered page (a mobile UA makes
+        // YouTube serve a reduced page without the playlist's ytInitialData,
+        // which silently fell back to the ~15-video RSS feed).
+        const val DESKTOP_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
         val DEFAULT_CHANNEL = SavedChannel(
             channelId = "UC2cX3SmsdWsrRS8t_5zvzEw", // Safina Society (@SafinaSociety)

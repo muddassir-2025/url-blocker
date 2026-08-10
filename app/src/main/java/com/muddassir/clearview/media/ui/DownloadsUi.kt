@@ -36,7 +36,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddLink
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
@@ -88,7 +87,6 @@ import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.download.DownloadItem
 import com.muddassir.clearview.media.download.DownloadStatus
 import com.muddassir.clearview.media.download.OfflineAudioPlayer
-import com.muddassir.clearview.media.download.StoragePolicy
 import com.muddassir.clearview.media.model.DownloadSourceFilter
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.util.formatBytes
@@ -99,13 +97,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-
-/** Storage colors: green 0–70%, yellow 70–90%, red 90–100% (of the limit). */
-fun storageColor(fraction: Float): Color = when {
-    fraction < 0.7f -> Color(0xFF2E7D32)
-    fraction < 0.9f -> Color(0xFFF9A825)
-    else -> Color(0xFFD32F2F)
-}
 
 /**
  * The Downloads view: storage card + settings gear, a live search over the
@@ -138,7 +129,6 @@ fun DownloadsSection(
     onPlayAudio: (DownloadItem) -> Unit
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val repository = remember { MediaRepository(context.applicationContext) }
     var showManage by remember { mutableStateOf(false) }
     var selectionMode by remember { mutableStateOf(false) }
@@ -184,7 +174,6 @@ fun DownloadsSection(
     val active = AudioDownloads.active
     val activeIds = active.keys.toList()
     val used = AudioDownloads.storageUsedBytes()
-    val limit = AudioDownloads.storageLimit.longValue
 
     // ── Scoping: the selected channel's downloads first, then the live
     // search on top (title / channel name, case-insensitive). Older downloads
@@ -224,11 +213,11 @@ fun DownloadsSection(
 
     Column(modifier = modifier.fillMaxWidth()) {
 
-        // ── Storage card: just the bar + gear. All stats, the limit picker
-        // and the auto-cleanup rules live in the Manage-storage sheet.
+        // ── Storage card: used space + the add-audio menu + settings gear.
+        // All stats and the destructive Clear actions live in the
+        // Manage-storage sheet.
         StorageCard(
             used = used,
-            limit = limit,
             onManage = { showManage = true },
             onAddAudio = addAudio,
             onAddAudioByUrl = { showAddAudioUrlDialog = true },
@@ -442,15 +431,6 @@ fun DownloadsSection(
         ManageStorageSheet(
             items = downloads,
             used = used,
-            limit = limit,
-            onSetLimit = { AudioDownloads.setStorageLimit(it) },
-            onClearExpired = {
-                scope.launch { withContext(Dispatchers.IO) {
-                    val store = com.muddassir.clearview.media.download.AudioDownloadStore(context.applicationContext)
-                    store.deleteExpired(System.currentTimeMillis())
-                } }
-                AudioDownloads.refresh()
-            },
             onClearAll = { AudioDownloads.clearAll(); showManage = false },
             onDismiss = { showManage = false }
         )
@@ -496,10 +476,14 @@ fun DownloadsSection(
     }
 
     // ── Add to playlist (downloaded audio) ─────────────────────────
+    // The item is AUDIO, so it lands in a playlist as an audio entry (plays
+    // the offline file) — the sheet says so explicitly.
     pendingPlaylistItem?.let { item ->
         val media = item.toMediaVideo()
         AddToPlaylistSheet(
             video = media,
+            title = "Add audio to playlist",
+            newLabel = "New playlist with this audio",
             playlists = playlists,
             onAdd = { p ->
                 userPlaylistStore.addVideos(p.id, listOf(media))
@@ -550,16 +534,14 @@ private fun SectionLabel(text: String) {
 }
 
 /**
- * Storage summary card — deliberately slim: the gear, "X used · Y
- * remaining" and the colored progress bar. Every other stat (count, limit,
- * largest/oldest files, expiring items) plus the auto-cleanup rules and the
- * destructive Clear actions live inside the Manage-storage sheet, so the
- * Downloads list starts with a compact bar instead of a tall card.
+ * Storage summary card — deliberately slim: the gear, "X used" and the add
+ * audio menu. Every other stat and the destructive Clear actions live inside
+ * the Manage-storage sheet, so the Downloads list starts with a compact bar
+ * instead of a tall card.
  */
 @Composable
 private fun StorageCard(
     used: Long,
-    limit: Long,
     onManage: () -> Unit,
     /** When set, an "Add audio" button appears next to the gear. */
     onAddAudio: (() -> Unit)? = null,
@@ -567,10 +549,6 @@ private fun StorageCard(
     onAddAudioByUrl: (() -> Unit)? = null,
     importing: Boolean = false
 ) {
-    val fraction = StoragePolicy.usageFraction(used, limit)
-    val barColor = storageColor(fraction)
-    val available = (limit - used).coerceAtLeast(0L)
-
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -636,7 +614,7 @@ private fun StorageCard(
                     }
                 }
                 // Media settings gear: opens the sheet with all the storage
-                // stats, the limit picker and the cleanup actions.
+                // stats and the Clear actions.
                 IconButton(onClick = onManage, modifier = Modifier.size(32.dp)) {
                     Icon(
                         Icons.Filled.Settings,
@@ -647,46 +625,14 @@ private fun StorageCard(
                 }
             }
             Spacer(Modifier.height(4.dp))
-            // Used / remaining at a glance (the core of the storage card).
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "${formatBytes(used)} used",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = "· ${formatBytes(available)} remaining",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            LinearProgressIndicator(
-                progress = { fraction },
-                modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
-                color = barColor,
-                trackColor = MaterialTheme.colorScheme.surfaceVariant
+            // Storage used at a glance — downloads are never auto-deleted, so
+            // there is no limit bar to show.
+            Text(
+                text = "${formatBytes(used)} used · never auto-deleted",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
             )
         }
-    }
-}
-
-@Composable
-private fun CleanupHint(text: String) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
-        Icon(
-            Icons.Filled.Info,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(12.dp)
-        )
-        Spacer(Modifier.width(6.dp))
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }
 
@@ -700,6 +646,10 @@ private fun ActiveDownloadRow(
     val video = AudioDownloads.pendingVideos[videoId]
     val isDownloading = status is DownloadStatus.Downloading
     val progress = (status as? DownloadStatus.Downloading)?.progress
+    // The resolved audio size (bytes) — known as soon as the stream is
+    // resolved, BEFORE any bytes are downloaded, so the row shows "≈ X MB"
+    // while preparing and throughout the download.
+    val sizeBytes = AudioDownloads.pendingSizes[videoId]
 
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
@@ -726,12 +676,14 @@ private fun ActiveDownloadRow(
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(Modifier.height(4.dp))
+            val sizeSuffix = if (sizeBytes != null && sizeBytes > 0L)
+                " · ≈ ${formatBytes(sizeBytes)}" else ""
             when (status) {
                 is DownloadStatus.Preparing -> Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "Preparing audio…",
+                        "Preparing audio…$sizeSuffix",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -744,7 +696,7 @@ private fun ActiveDownloadRow(
                         )
                         Spacer(Modifier.height(3.dp))
                         Text(
-                            "Downloading ${(progress.coerceIn(0f, 1f) * 100).toInt()}%" +
+                            "Downloading ${(progress.coerceIn(0f, 1f) * 100).toInt()}%$sizeSuffix" +
                                 etaSuffix(status.etaSeconds),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -755,7 +707,7 @@ private fun ActiveDownloadRow(
                         )
                         Spacer(Modifier.height(3.dp))
                         Text(
-                            "Downloading…" + etaSuffix(status.etaSeconds),
+                            "Downloading…$sizeSuffix" + etaSuffix(status.etaSeconds),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -1073,30 +1025,18 @@ fun OfflineThumbnail(item: DownloadItem, modifier: Modifier = Modifier) {
     }
 }
 
-/** Manage-storage sheet: stats + storage limit choices + Clear Expired / Clear All. */
+/** Manage-storage sheet: stats + Clear All (no auto-cleanup — nothing expires). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ManageStorageSheet(
     items: List<DownloadItem>,
     used: Long,
-    limit: Long,
-    onSetLimit: (Long) -> Unit,
-    onClearExpired: () -> Unit,
     onClearAll: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var confirmClearAll by remember { mutableStateOf(false) }
-    val now = System.currentTimeMillis()
     val largest = items.maxByOrNull { it.fileSize }
     val oldest = items.minByOrNull { it.downloadedAt }
-    val expiringSoon = StoragePolicy.expiringSoonItems(items, now)
-    val expiredCount = StoragePolicy.expiredItems(items, now).size
-    val limitOptions = listOf(
-        500L * 1024 * 1024,
-        1024L * 1024 * 1024,
-        2L * 1024 * 1024 * 1024,
-        5L * 1024 * 1024 * 1024
-    )
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -1112,68 +1052,31 @@ private fun ManageStorageSheet(
             )
             Spacer(Modifier.height(14.dp))
             StatRow("Storage used", formatBytes(used))
-            StatRow("Storage limit", formatBytes(limit))
-            StatRow("Available", formatBytes((limit - used).coerceAtLeast(0L)))
             StatRow("Downloads", items.size.toString())
             StatRow("Total size", formatBytes(used))
             StatRow("Largest download", largest?.let { formatBytes(it.fileSize) } ?: "—")
             StatRow("Oldest download", oldest?.let { formatDownloadDate(it.downloadedAt) } ?: "—")
-            StatRow(
-                "Files expiring soon",
-                if (expiringSoon.isEmpty()) "None" else expiringSoon.size.toString()
-            )
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(8.dp))
+            // Downloads are kept until removed manually — nothing is ever
+            // auto-deleted, so the sheet explains that instead of offering
+            // limits / expiry controls.
             Text(
-                text = "Storage limit",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold
+                text = "Downloads are never auto-deleted. Remove them anytime from the list.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                limitOptions.forEach { option ->
-                    FilterChip(
-                        selected = limit == option,
-                        onClick = { onSetLimit(option) },
-                        label = { Text(formatBytes(option)) }
-                    )
-                }
-            }
 
             Spacer(Modifier.height(16.dp))
-            // Auto-cleanup rules (moved here from the storage card so the
-            // Downloads view keeps just the compact bar).
-            Text(
-                text = "Auto cleanup",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(6.dp))
-            CleanupHint("Large downloads (over 15 MB) expire after 15 days")
-            CleanupHint("Oldest downloads removed when storage is full")
-
-            Spacer(Modifier.height(16.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            Button(
+                onClick = { confirmClearAll = true },
+                enabled = items.isNotEmpty(),
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error
+                ),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                OutlinedButton(
-                    onClick = onClearExpired,
-                    enabled = expiredCount > 0,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(if (expiredCount > 0) "Clear expired ($expiredCount)" else "Clear expired")
-                }
-                Button(
-                    onClick = { confirmClearAll = true },
-                    enabled = items.isNotEmpty(),
-                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    ),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Clear all")
-                }
+                Text("Clear all downloads")
             }
         }
     }
@@ -1215,7 +1118,12 @@ private fun StatRow(label: String, value: String) {
     }
 }
 
-/** The feed-style video a download belongs to (playlist add etc.). */
+/**
+ * The feed-style video a download belongs to (playlist add etc.). Marked
+ * [MediaVideo.isOfflineAudio] so adding it to a playlist creates an AUDIO
+ * entry — tapping it plays the downloaded file instead of opening the video
+ * player (the same entry the player's "Add audio to playlist…" creates).
+ */
 fun DownloadItem.toMediaVideo(): MediaVideo = MediaVideo(
     videoId = videoId,
     title = title,
@@ -1226,7 +1134,8 @@ fun DownloadItem.toMediaVideo(): MediaVideo = MediaVideo(
     // leave the thumbnail blank (cards render a plain placeholder box).
     thumbnailUrl = if (source == DownloadItem.SOURCE_DEVICE) ""
     else "https://i.ytimg.com/vi/$videoId/hqdefault.jpg",
-    durationSeconds = durationSeconds
+    durationSeconds = durationSeconds,
+    isOfflineAudio = true
 )
 
 /**

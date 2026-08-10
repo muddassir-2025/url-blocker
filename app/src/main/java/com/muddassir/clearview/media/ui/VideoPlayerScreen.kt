@@ -100,6 +100,7 @@ import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.download.DownloadStatus
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.model.UserPlaylist
+import com.muddassir.clearview.media.util.formatBytes
 import com.muddassir.clearview.media.util.formatEtaRemaining
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -343,9 +344,24 @@ fun VideoPlayerScreen(
     // composition. Playlists replaced the old Bookmark feature.
     val userPlaylistStore = remember { UserPlaylistStore(context.applicationContext) }
     var showPlaylistPicker by remember { mutableStateOf(false) }
+    // Same picker in AUDIO mode: the ⋮ menu's "Add audio to playlist…" seeds
+    // an audio entry (MediaVideo.isOfflineAudio) instead of the video entry,
+    // so the playlist gains "audio of this video" — tapping it plays the
+    // downloaded file rather than opening the player.
+    var showAudioPlaylistPicker by remember { mutableStateOf(false) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
-    val playerPlaylists = remember(showPlaylistPicker) {
-        if (showPlaylistPicker) userPlaylistStore.getPlaylists() else emptyList()
+    // True while the create dialog was opened from the AUDIO picker, so its
+    // seed is the audio entry, not the video entry.
+    var creatingAudioPlaylist by remember { mutableStateOf(false) }
+    // Re-read whenever EITHER picker opens (the audio picker never flips
+    // showPlaylistPicker, so keying on it alone would hand the audio sheet an
+    // empty list unless the video picker had been opened first).
+    val playerPlaylists = remember(showPlaylistPicker, showAudioPlaylistPicker) {
+        if (showPlaylistPicker || showAudioPlaylistPicker) {
+            userPlaylistStore.getPlaylists()
+        } else {
+            emptyList()
+        }
     }
     // A user playlist containing the current video — when one exists, the ⋮
     // menu offers removing the video from it (mirroring the Media tab's
@@ -355,7 +371,11 @@ fun VideoPlayerScreen(
     var playlistRevision by remember { mutableIntStateOf(0) }
     val containingPlaylist = remember(userPlaylistStore, video.videoId, playlistRevision) {
         userPlaylistStore.getPlaylists().firstOrNull { p ->
-            p.videos.any { it.videoId == video.videoId }
+            // The VIDEO entry only — a playlist may hold this video's
+            // downloaded AUDIO (isOfflineAudio) as a separate entry, and this
+            // ⋮ entry removes the VIDEO. The audio entry is removed from the
+            // playlist itself (or via the Delete download flow).
+            p.videos.any { !it.isOfflineAudio && it.videoId == video.videoId }
         }
     }
     // A playlist awaiting "remove from playlist" confirmation — captured at
@@ -859,6 +879,7 @@ fun VideoPlayerScreen(
                     }
                 },
                 onAddToPlaylist = { showPlaylistPicker = true },
+                onAddAudioToPlaylist = { showAudioPlaylistPicker = true },
                 onRemoveFromPlaylist = { pendingRemovePlaylist = containingPlaylist },
                 containingPlaylistName = containingPlaylist?.name,
                 onSpeedMenuToggle = { showSpeedMenu = !showSpeedMenu },
@@ -981,22 +1002,63 @@ fun VideoPlayerScreen(
             onDismiss = { showPlaylistPicker = false }
         )
     }
+    if (showAudioPlaylistPicker) {
+        // Audio mode of the same picker: seeds an AUDIO entry so the playlist
+        // holds "audio of this video" (plays the downloaded file). Only
+        // reachable while the audio is downloaded (⋮ menu gates on isOffline).
+        AddToPlaylistSheet(
+            video = video.copy(isOfflineAudio = true),
+            title = "Add audio to playlist",
+            newLabel = "New playlist with this audio",
+            playlists = playerPlaylists,
+            onAdd = { playlist ->
+                userPlaylistStore.addVideos(
+                    playlist.id,
+                    listOf(video.copy(isOfflineAudio = true))
+                )
+                playlistRevision++
+                showAudioPlaylistPicker = false
+                Toast.makeText(
+                    context,
+                    "Added audio to ${playlist.name}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            },
+            onCreateNew = {
+                showAudioPlaylistPicker = false
+                creatingAudioPlaylist = true
+                showCreatePlaylistDialog = true
+            },
+            onDismiss = { showAudioPlaylistPicker = false }
+        )
+    }
     if (showCreatePlaylistDialog) {
         PlaylistNameDialog(
             initial = "",
             title = "New playlist",
             confirmLabel = "Create",
             onSubmit = { name ->
-                userPlaylistStore.createPlaylist(name, listOf(video))
+                val seed =
+                    if (creatingAudioPlaylist) listOf(video.copy(isOfflineAudio = true))
+                    else listOf(video)
+                creatingAudioPlaylist = false
+                userPlaylistStore.createPlaylist(name, seed)
                 playlistRevision++
                 showCreatePlaylistDialog = false
                 Toast.makeText(
                     context,
-                    "Created \"$name\" with this video",
+                    if (seed.first().isOfflineAudio) {
+                        "Created \"$name\" with this audio"
+                    } else {
+                        "Created \"$name\" with this video"
+                    },
                     Toast.LENGTH_SHORT
                 ).show()
             },
-            onDismiss = { showCreatePlaylistDialog = false }
+            onDismiss = {
+                creatingAudioPlaylist = false
+                showCreatePlaylistDialog = false
+            }
         )
     }
 }
@@ -1027,6 +1089,8 @@ private fun PlayerControlPanel(
     /** ⋮ menu download entry: cancel while active, else start/retry. */
     onDownloadMenuAction: () -> Unit,
     onAddToPlaylist: () -> Unit,
+    /** ⋮ menu → Add audio to playlist (only while the audio is downloaded). */
+    onAddAudioToPlaylist: () -> Unit,
     /** ⋮ menu → Remove from playlist (only when [containingPlaylistName] is set). */
     onRemoveFromPlaylist: () -> Unit,
     /** Name of the user playlist holding this video, or null (no entry shown). */
@@ -1143,6 +1207,18 @@ private fun PlayerControlPanel(
                             onAddToPlaylist()
                         }
                     )
+                    // The downloaded audio can ALSO be added to a playlist — as
+                    // its own AUDIO entry (plays the offline file) next to the
+                    // video entry above. Only while the audio exists.
+                    if (isOffline) {
+                        DropdownMenuItem(
+                            text = { Text("Add audio to playlist…") },
+                            onClick = {
+                                showMoreMenu = false
+                                onAddAudioToPlaylist()
+                            }
+                        )
+                    }
                     if (containingPlaylistName != null) {
                         DropdownMenuItem(
                             text = { Text("Remove from \"$containingPlaylistName\"") },
@@ -1243,7 +1319,12 @@ private fun PlayerControlPanel(
         // ── Offline audio: the Download Audio button with its full state flow
         // (Download → Preparing… → Downloading NN% → Downloaded → Play offline).
         // Live broadcasts can't be downloaded, so the button is hidden for them.
+        // The resolved audio size (≈ X MB) appears as soon as the stream is
+        // resolved — before any bytes are downloaded.
         if (!isLive) {
+            val audioSize = AudioDownloads.pendingSizes[video.videoId]
+            val sizeSuffix = if (audioSize != null && audioSize > 0L)
+                " · ≈ ${formatBytes(audioSize)}" else ""
             Spacer(Modifier.height(10.dp))
             when {
                 isOffline -> FilledTonalButton(
@@ -1269,7 +1350,7 @@ private fun PlayerControlPanel(
                         color = MaterialTheme.colorScheme.onPrimary
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text("Preparing…")
+                    Text("Preparing…$sizeSuffix")
                 }
                 downloadStatus is DownloadStatus.Downloading -> Column(
                     modifier = Modifier.fillMaxWidth()
@@ -1281,9 +1362,9 @@ private fun PlayerControlPanel(
                     ) {
                         Text(
                             if (downloadStatus.progress >= 0f)
-                                "Downloading ${(downloadStatus.progress.coerceIn(0f, 1f) * 100).toInt()}%"
+                                "Downloading ${(downloadStatus.progress.coerceIn(0f, 1f) * 100).toInt()}%$sizeSuffix"
                             else
-                                "Downloading…"
+                                "Downloading…$sizeSuffix"
                         )
                     }
                     Spacer(Modifier.height(4.dp))

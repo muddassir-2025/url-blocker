@@ -27,6 +27,15 @@ package com.muddassir.clearview.media.model
  *                          VideoDurationResolver) for the newest uploads and
  *                          persisted in the cache; used for the time badge on
  *                          feed cards.
+ * @property isOfflineAudio True when this entry represents the DOWNLOADED
+ *                          AUDIO of the video (added to a user playlist via
+ *                          "Add audio to playlist…"), not the video itself.
+ *                          Such an entry keeps the same [videoId], so a
+ *                          playlist can hold BOTH the video and its offline
+ *                          audio side by side; tapping one opens the player,
+ *                          tapping the other plays the local audio file.
+ *                          Persisted only in user-playlist JSON — feed videos
+ *                          are always false (default).
  */
 data class MediaVideo(
     val videoId: String,
@@ -38,7 +47,8 @@ data class MediaVideo(
     val viewCount: Long = 0L,
     val isShort: Boolean = false,
     val isLive: Boolean = false,
-    val durationSeconds: Long = 0L
+    val durationSeconds: Long = 0L,
+    val isOfflineAudio: Boolean = false
 ) {
     companion object {
         /**

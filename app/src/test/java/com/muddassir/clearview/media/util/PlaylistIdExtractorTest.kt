@@ -22,6 +22,15 @@ class PlaylistIdExtractorTest {
     }
 
     @Test
+    fun `extracts when the URL carries a share si parameter after list`() {
+        // Share links append `&si=…` after list= — must not swallow the id.
+        assertEquals(
+            pl,
+            extractYouTubePlaylistId("https://youtube.com/playlist?list=$pl&si=y-NZvE3N6nU0CLcS")
+        )
+    }
+
+    @Test
     fun `extracts from music youtube and youtu be forms`() {
         assertEquals(pl, extractYouTubePlaylistId("https://music.youtube.com/playlist?list=$pl"))
         assertEquals(

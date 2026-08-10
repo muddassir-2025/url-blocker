@@ -3,6 +3,17 @@
 
     <style name="Theme.Urlblocker" parent="android:Theme.Material.Light.NoActionBar" />
 
+    <!-- Todo snooze picker: a dialog-styled activity launched from the reminder
+         notification's Snooze action (offers 10 / 30 / 60 minutes or custom). -->
+    <style name="Theme.Urlblocker.Dialog" parent="android:Theme.Material.Light.Dialog.NoActionBar" />
+
+    <!-- Todo ALARM: dark full-screen window for the alarm-style reminder.
+         The Compose screen draws its own dark background and white text. -->
+    <style name="Theme.Urlblocker.Alarm" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:colorBackgroundCacheHint">@android:color/black</item>
+    </style>
+
     <!--
       Block overlay theme: the same full-screen look, but with alpha-only
       window animations. The stock default animation scales the window as it

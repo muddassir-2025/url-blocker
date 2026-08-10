@@ -35,6 +35,20 @@ class MediaVideosTest {
     }
 
     @Test
+    fun `encode decode round-trips the offline-audio flag`() {
+        val list = listOf(
+            // A playlist can hold BOTH a video and its downloaded audio.
+            video("same", 100L),
+            video("same", 100L).copy(isOfflineAudio = true),
+            video("plain", 200L)
+        )
+        val decoded = MediaVideos.decode(MediaVideos.encode(list))
+        assertEquals(list, decoded)
+        // The flag is persisted (not just a runtime default).
+        assertTrue(decoded[1].isOfflineAudio)
+    }
+
+    @Test
     fun `encode decode round-trips durationSeconds`() {
         val list = listOf(
             video("long", 100L).copy(durationSeconds = 7542L),
