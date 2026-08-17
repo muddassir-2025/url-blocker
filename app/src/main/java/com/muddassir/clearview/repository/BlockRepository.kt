@@ -40,6 +40,18 @@ class BlockRepository(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_BLOCK_SHORTS, value).apply()
 
     /**
+     * EXPERIMENTAL — Stage 1 feasibility test: "YouTube Chrome Test". When
+     * enabled, the accessibility service watches Google Chrome ONLY and runs
+     * the YouTube-Shorts-in-Chrome probe (detect Shorts, match visible page
+     * text against ClearView's blocked keywords, pause playback). Detailed
+     * logs under tag "ClearViewYTTest". Off by default; never affects normal
+     * blocking behavior.
+     */
+    var youTubeChromeTest: Boolean
+        get() = prefs.getBoolean(KEY_YT_CHROME_TEST, false)
+        set(value) = prefs.edit().putBoolean(KEY_YT_CHROME_TEST, value).apply()
+
+    /**
      * Built-in protected keywords — always active, hidden from the user, not editable.
      *
      * TIER 1: clear adult keywords ([ALWAYS_BLOCK_KEYWORDS]) block in every
@@ -235,6 +247,7 @@ class BlockRepository(context: Context) {
         private const val KEY_APP_PASSWORD = "app_password"
         private const val KEY_STRICT_MODE = "strict_mode"
         private const val KEY_BLOCK_SHORTS = "block_shorts"
+        private const val KEY_YT_CHROME_TEST = "yt_chrome_test"
 
         /**
          * Normalize a user-entered domain into a hostname.

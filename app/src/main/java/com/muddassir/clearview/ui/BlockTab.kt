@@ -28,6 +28,7 @@ import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PlayCircle
+import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.*
@@ -78,6 +79,8 @@ fun BlockTab(
         item { ProtectionCard(viewModel, context) }
         item { StrictModeCard(viewModel, context) }
         item { BlockShortsCard(viewModel) }
+        item { YouTubeChromeTestCard(viewModel) }
+        item { YouTubeChromeTestKeywordsCard(viewModel) }
         item { BlockedItemsCard(viewModel) }
         item { DnsCard(viewModel, context) }
 
@@ -301,6 +304,139 @@ private fun BlockShortsCard(viewModel: MainViewModel) {
                 checked = active,
                 onCheckedChange = { viewModel.toggleBlockShorts() }
             )
+        }
+    }
+}
+
+// ── 3b. YouTube Chrome Test (Stage 1 experiment) ─────────────────
+
+@Composable
+private fun YouTubeChromeTestCard(viewModel: MainViewModel) {
+    val active = viewModel.youTubeChromeTest
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (active)
+                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.7f)
+            else
+                MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Science,
+                contentDescription = null,
+                tint = if (active) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "YouTube Chrome Test",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "EXPERIMENT — detects YouTube Shorts in Chrome, matches on-screen text against your blocked keywords, and pauses the video. Logs under tag ClearViewYTTest.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Switch(
+                checked = active,
+                onCheckedChange = { viewModel.toggleYouTubeChromeTest() }
+            )
+        }
+    }
+}
+
+// ── 3c. YouTube Chrome Test Keywords (separate test-only list) ───
+
+@Composable
+private fun YouTubeChromeTestKeywordsCard(viewModel: MainViewModel) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Outlined.Science,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "YouTube Chrome Test Keywords",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Keywords used only for testing YouTube Shorts in Chrome. " +
+                    "Matching Shorts will be paused instead of showing the normal ClearView block screen.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Add test keyword
+            OutlinedTextField(
+                value = viewModel.newYoutubeTestKeywordText,
+                onValueChange = { viewModel.updateNewYoutubeTestKeyword(it) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Test keyword") },
+                placeholder = { Text("e.g., aestheic") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Ascii,
+                    imeAction = ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(onDone = { viewModel.addYoutubeTestKeyword() }),
+                trailingIcon = {
+                    IconButton(onClick = { viewModel.addYoutubeTestKeyword() }) {
+                        Icon(Icons.Filled.Add, contentDescription = "Add test keyword")
+                    }
+                }
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            if (viewModel.youtubeTestKeywords.isNotEmpty()) {
+                Text(
+                    text = "Testing keywords:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                androidx.compose.foundation.layout.FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    for (keyword in viewModel.youtubeTestKeywords) {
+                        BlockedChip(
+                            label = keyword,
+                            onDelete = { viewModel.removeYoutubeTestKeyword(keyword) }
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    text = "No test keywords yet. Add one above.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }

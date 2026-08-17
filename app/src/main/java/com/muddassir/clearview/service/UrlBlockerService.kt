@@ -16,6 +16,8 @@ import com.muddassir.clearview.matching.MatchResult
 import com.muddassir.clearview.matching.MatchType
 import com.muddassir.clearview.matching.MatchSource
 import com.muddassir.clearview.repository.BlockRepository
+import com.muddassir.clearview.youtubetest.YouTubeChromeTestCoordinator
+import com.muddassir.clearview.youtubetest.YoutubeTestKeywordRepository
 import kotlinx.coroutines.*
 
 enum class BlockingState {
@@ -93,6 +95,14 @@ class UrlBlockerService : AccessibilityService() {
     private lateinit var repository: BlockRepository
     private lateinit var keywordMatcher: KeywordMatcher
     private val contentExtractor = ContentExtractor()
+
+    /**
+     * STAGE 1 FEASIBILITY TEST coordinator (YouTube Shorts in Chrome), gated
+     * by the "YouTube Chrome Test" toggle. Fully independent of the blocking
+     * pipeline below — it never touches blockingState, the dedup cache, or
+     * the overlay. See [YouTubeChromeTestCoordinator].
+     */
+    private var youtubeChromeTest: YouTubeChromeTestCoordinator? = null
 
     // Per-event/per-poll debug logging is EXPENSIVE (string formatting + logcat
     // I/O on the accessibility/main thread). Release builds keep the detection
@@ -183,6 +193,12 @@ class UrlBlockerService : AccessibilityService() {
         instance = this
         repository = BlockRepository(applicationContext)
         keywordMatcher = KeywordMatcher(repository)
+        // Separate test-only keyword list for the YouTube-in-Chrome Shorts
+        // experiment — never touches the normal blocked keywords. The
+        // coordinator matches ONLY against this list with its own simple
+        // matcher (the normal KeywordMatcher is deliberately not used).
+        val testKeywordRepository = YoutubeTestKeywordRepository(applicationContext)
+        youtubeChromeTest = YouTubeChromeTestCoordinator(this, repository, testKeywordRepository)
         Log.i(TAG, "UrlBlockerService created")
     }
 
@@ -196,11 +212,13 @@ class UrlBlockerService : AccessibilityService() {
         Log.w(TAG, "UrlBlockerService interrupted")
         stopPolling()
         stopGooglePolling()
+        youtubeChromeTest?.stop()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
+        youtubeChromeTest?.stop()
         instance = null
         Log.i(TAG, "UrlBlockerService destroyed")
     }
@@ -209,6 +227,12 @@ class UrlBlockerService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         val packageName = event.packageName?.toString() ?: return
+
+        // Stage 1 experiment hook: the coordinator decides for itself whether
+        // the toggle is on and whether the package/event matters. Cheap call.
+        // The full event is passed so the coordinator can detect player clicks
+        // (VIEW_CLICKED) for immediate re-enforcement of a blocked Short.
+        youtubeChromeTest?.onAccessibilityEvent(event)
 
         // Debug: log every event for target packages so detection issues (why an
         // incognito window was / wasn't caught) can be diagnosed from logcat.
@@ -350,6 +374,10 @@ class UrlBlockerService : AccessibilityService() {
     private fun handlePackageChange(newPackage: String) {
         if (currentForegroundPackage != newPackage) {
             Log.d(TAG, "Foreground package changed: $currentForegroundPackage -> $newPackage")
+
+            // Stage 1 experiment hook: track the foreground package so the
+            // coordinator only runs while Chrome is the active app.
+            youtubeChromeTest?.onForegroundPackageChanged(newPackage)
 
             if (newPackage == packageName) {
                 // We reached the block overlay

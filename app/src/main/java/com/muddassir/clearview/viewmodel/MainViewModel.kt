@@ -12,6 +12,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import com.muddassir.clearview.repository.BlockRepository
+import com.muddassir.clearview.youtubetest.YoutubeTestKeywordRepository
 
 class MainViewModel : ViewModel() {
 
@@ -35,15 +36,19 @@ class MainViewModel : ViewModel() {
     // ── Repo ───────────────────────────────────────────────────────
 
     private var repository: BlockRepository? = null
+    private var youtubeTestKeywordRepository: YoutubeTestKeywordRepository? = null
 
     fun initialize(context: Context) {
         if (repository != null) return
         repository = BlockRepository(context.applicationContext)
+        youtubeTestKeywordRepository = YoutubeTestKeywordRepository(context.applicationContext)
         refreshKeywords()
         refreshDomains()
         checkHasPassword()
         refreshStrictMode()
         refreshBlockShorts()
+        refreshYouTubeChromeTest()
+        refreshYoutubeTestKeywords()
         ensureLauncherEnabled(context)   // cleanup stale disabled state first
         checkDeviceAdminStatus(context)  // then apply correct hide/show based on admin status
         // Auto-lock if password is set (app was restarted)
@@ -152,6 +157,56 @@ class MainViewModel : ViewModel() {
 
     fun refreshBlockShorts() {
         blockShorts = repository?.blockShorts ?: false
+    }
+
+    // ── YouTube Chrome Test (Stage 1 feasibility experiment) ────────
+
+    var youTubeChromeTest by mutableStateOf(false)
+        private set
+
+    fun toggleYouTubeChromeTest() {
+        val newValue = !youTubeChromeTest
+        repository?.youTubeChromeTest = newValue
+        youTubeChromeTest = newValue
+        android.util.Log.i("MainViewModel", "YouTube Chrome Test ${if (newValue) "enabled" else "disabled"}")
+    }
+
+    fun refreshYouTubeChromeTest() {
+        youTubeChromeTest = repository?.youTubeChromeTest ?: false
+    }
+
+    // ── YouTube Chrome Test Keywords (separate test-only list) ──────
+
+    var newYoutubeTestKeywordText by mutableStateOf("")
+        private set
+
+    val youtubeTestKeywords = mutableStateListOf<String>()
+
+    fun updateNewYoutubeTestKeyword(text: String) {
+        newYoutubeTestKeywordText = text
+    }
+
+    fun addYoutubeTestKeyword() {
+        val keyword = newYoutubeTestKeywordText.trim()
+        if (keyword.isEmpty()) return
+        youtubeTestKeywordRepository?.addKeyword(keyword)
+        newYoutubeTestKeywordText = ""
+        refreshYoutubeTestKeywords()
+    }
+
+    fun removeYoutubeTestKeyword(keyword: String) {
+        youtubeTestKeywordRepository?.removeKeyword(keyword)
+        refreshYoutubeTestKeywords()
+    }
+
+    fun clearYoutubeTestKeywords() {
+        youtubeTestKeywordRepository?.clearKeywords()
+        refreshYoutubeTestKeywords()
+    }
+
+    private fun refreshYoutubeTestKeywords() {
+        youtubeTestKeywords.clear()
+        youtubeTestKeywords.addAll((youtubeTestKeywordRepository?.getKeywords() ?: emptySet()).sorted())
     }
 
     // ── Private DNS (network-level filtering) ───────────────────────
