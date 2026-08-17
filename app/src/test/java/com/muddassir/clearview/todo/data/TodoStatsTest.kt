@@ -199,6 +199,24 @@ class TodoStatsTest {
     }
 
     @Test
+    fun `late night productive window ends at 24 and labels without crashing`() {
+        // Two completions at 22:xx and 23:xx → the window is 22:00–24:00. The
+        // end (24) used to crash TodoCodec.timeLabel with a DateTimeException
+        // when the Statistics section rendered it; it now wraps to midnight.
+        val late = listOf(
+            item("a", start = TODAY, end = TODAY, completions = mapOf(TODAY.toEpochDay() to at(TODAY, 22))),
+            item("b", start = TODAY, end = TODAY, completions = mapOf(TODAY.toEpochDay() to at(TODAY, 23)))
+        )
+        val stats = TodoStats.weekStats(late, TODAY)
+        assertEquals(22 to 24, stats.mostProductiveWindow)
+        assertEquals(
+            "10:00 PM – 12:00 AM",
+            TodoCodec.timeLabel(stats.mostProductiveWindow!!.first * 60) + " – " +
+                TodoCodec.timeLabel(stats.mostProductiveWindow!!.second * 60)
+        )
+    }
+
+    @Test
     fun `streak counts consecutive completed days ending today or yesterday`() {
         // Completions on Mon, Wed, Sat this week (+ last Wed). Today (Mon) has
         // one → streak = 1 (Mon), since Sunday has none.

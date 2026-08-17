@@ -2,82 +2,49 @@ package com.muddassir.clearview.todo.ui
 
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.text.TextStyle
-import com.muddassir.clearview.todo.data.ProgressCardStats
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.time.LocalDate
 import kotlin.math.ceil
 import kotlin.math.min
 
 /**
- * QA gate for the progress-card layout engine: with a deterministic stand-in
+ * QA gate for the minimal premium card layout: with a deterministic stand-in
  * for the platform TextMeasurer, every worst-case composition (long name,
- * first-week badge, 6 long skills, 30-day heatmap) must fit inside the canvas
- * with no overlaps — the check [verifyCardLayout] runs on every layout, so a
- * regression here fails the build instead of shipping a clipped card.
+ * long first-week badge, wide score line) must fit inside the canvas with no
+ * overlaps on BOTH export sizes — the check [verifyCardLayout] runs on every
+ * layout, so a regression here fails the build instead of shipping a clipped
+ * or overlapping card.
  */
 class ProgressCardLayoutTest {
 
-    private val today = LocalDate.of(2026, 8, 10)
-    private val from = today.minusDays(6)
-
-    private fun stats(
-        heatmapDays: Int = 7,
-        skills: List<String> = listOf("Leetcode DSA", "Read Qur'an", "Fajr Salah"),
-        firstWeek: Boolean = false,
-        due: Int = 12,
-        completed: Int = 8
-    ) = ProgressCardStats.CardStats(
-        from = from,
-        to = today,
-        rangeKind = ProgressCardStats.RangeKind.WEEK,
-        created = 12,
-        completed = completed,
-        missed = due - completed,
-        activeDays = 6,
-        currentStreak = 3,
-        bestStreak = 5,
-        score = 62,
-        skills = skills,
-        heatmap = (0 until heatmapDays).map { i ->
-            ProgressCardStats.HeatDay(
-                today.minusDays((heatmapDays - 1 - i).toLong()),
-                when (i % 3) {
-                    0 -> ProgressCardStats.Heat.DONE
-                    1 -> ProgressCardStats.Heat.MISSED
-                    else -> ProgressCardStats.Heat.SCHEDULED
-                }
-            )
-        },
-        firstWeek = firstWeek
-    )
-
-    private fun texts(name: String = "Abdul Rahman") = CardTexts(
+    private fun texts(
+        name: String = "Abdul Rahman",
+        scoreLine: String? = "62 / 100",
+        percentLine: String? = "66% completion",
+        firstWeekBadge: Boolean = false,
+        statValues: List<String> = listOf("12", "7", "5", "3 days", "5")
+    ) = CardTexts(
         nameProgress = "$name's Progress",
-        scoreLabel = "WEEKLY SCORE",
-        created = "Todos Created",
-        completed = "Completed",
-        incomplete = "Incomplete",
-        currentStreak = "Current Streak",
-        bestStreak = "Best Streak",
-        activeDays = "Active Days",
-        daysUnit = " days",
-        skillsTitle = "SKILLS & HABITS",
-        skillsEmpty = "Complete todos to grow your skills & habits",
-        firstWeek = "First week of tracking",
-        lastDays = "THIS WEEK",
-        motivational = "Building momentum 🔥",
-        madeWith = "Made with ClearView",
-        dateRange = "Aug 3 – Aug 10, 2026",
-        percentLine = "66% COMPLETION"
+        dateRange = "Aug 4 – Aug 10, 2026",
+        scoreTitle = "WEEKLY SCORE",
+        scoreLine = scoreLine,
+        percentLine = percentLine,
+        emptyRange = "No todos due in this period",
+        statLabels = listOf("Created", "Completed", "Incomplete", "Streak", "Active Days"),
+        // With the badge, the streak value really carries the long badge text —
+        // the QA worst case must exercise the actual production string.
+        statValues = if (firstWeekBadge) {
+            statValues.toMutableList().also { it[3] = "First week of tracking" }
+        } else statValues,
+        firstWeekBadge = firstWeekBadge,
+        madeWith = "Made with ClearView"
     )
 
     /**
      * Deterministic stand-in for the real TextMeasurer. Latin glyphs measure
      * ~0.58em wide / 1.18em tall; color emoji measure much wider and taller
      * (~1.15em / 1.35em) — modeled so the QA gate matches the tightest real
-     * case (emoji share the label line inside stat tiles).
+     * case (emoji sit inline in the stat rows).
      */
     private fun fakeMeasure(text: String, style: TextStyle, maxWidth: Float): Size {
         // TextStyle() defaults are TextUnit.Unspecified, whose .value is NaN —
@@ -93,14 +60,9 @@ class ProgressCardLayoutTest {
         return Size(min(singleW, max), lines * fs * hFactor)
     }
 
+    /** The most content-dense compositions: long name + first-week badge. */
     private fun worstCase(isStory: Boolean): List<CardBlock> = layoutProgressCard(
-        stats(
-            heatmapDays = 30,
-            skills = List(6) { "Long habit title number $it" }.take(if (isStory) 6 else 4),
-            firstWeek = true
-        ),
-        texts(name = "Abdul RahmanAbdul Rahman".take(24)),
-        heroScore = 100,
+        texts(name = "Abdul RahmanAbdul Rahman".take(24), firstWeekBadge = true),
         appIconPresent = true,
         isStory = isStory,
         measure = ::fakeMeasure
@@ -119,72 +81,73 @@ class ProgressCardLayoutTest {
     }
 
     @Test
-    fun `hero score shrinks to at most 80 pct of the content width`() {
-        val blocks = layoutProgressCard(stats(), texts(), heroScore = 100, appIconPresent = true, isStory = true, measure = ::fakeMeasure)
-        val score = blocks.filterIsInstance<CardBlock.Text>().first { "/100" in it.text }
+    fun `score line never exceeds the padded content column`() {
+        val blocks = layoutProgressCard(texts(), appIconPresent = true, isStory = true, measure = ::fakeMeasure)
+        val score = blocks.filterIsInstance<CardBlock.Text>().first { it.text.startsWith("62 / 100") }
         val contentWidth = 1080f - 64f * 2f
-        assertTrue("score too wide: ${score.rect.width} > ${contentWidth * 0.8f}", score.rect.width <= contentWidth * 0.8f + 1f)
-        // And it never bleeds out of the safe padding either.
+        assertTrue(
+            "score too wide: ${score.rect.width} > $contentWidth",
+            score.rect.width <= contentWidth + 1f
+        )
         assertTrue("score off-canvas", score.rect.isInside(1080f, 1920f))
     }
 
     @Test
-    fun `empty skills message wraps within the content column and flows`() {
+    fun `empty range shows the empty message instead of a score`() {
         val blocks = layoutProgressCard(
-            stats(heatmapDays = 30, skills = emptyList(), firstWeek = true),
-            texts(), heroScore = 62, appIconPresent = true, isStory = true, measure = ::fakeMeasure
+            texts(scoreLine = null, percentLine = null),
+            appIconPresent = true, isStory = true, measure = ::fakeMeasure
         )
-        val issues = verifyCardLayout(blocks, 1080f, 1920f)
-        assertTrue("empty-skills layout issues: $issues", issues.isEmpty())
+        val empty = blocks.filterIsInstance<CardBlock.Text>().first { it.text == "No todos due in this period" }
+        assertTrue(empty.rect.isInside(1080f, 1920f))
     }
 
     @Test
-    fun `real stat labels never split and stay inside their tiles`() {
-        // The reported "Complete d" / "Incomplet e" class of bug: labels are
-        // measured and width-constrained, so each label sits fully inside its
-        // tile, stays on one line (it fits), and never touches the value row.
-        val blocks = layoutProgressCard(stats(), texts(), 62, true, true, ::fakeMeasure)
-        val tiles = blocks.filterIsInstance<CardBlock.Tile>()
-        assertEquals(6, tiles.size)
-        val labels = tiles.map { it.label }
-        assertTrue(
-            labels.containsAll(
-                listOf("Completed", "Incomplete", "Todos Created", "Current Streak", "Best Streak", "Active Days")
-            )
-        )
-        tiles.forEach { tile ->
-            assertTrue(
-                "label '${tile.label}' escapes its tile: ${tile.labelRect}",
-                tile.labelRect.left >= tile.rect.left && tile.labelRect.right <= tile.rect.right &&
-                    tile.labelRect.top >= tile.rect.top && tile.labelRect.bottom <= tile.rect.bottom
-            )
-            assertTrue(
-                "label '${tile.label}' overlaps its value",
-                tile.labelRect.bottom <= tile.valueRect.top
-            )
-            assertTrue(
-                "label '${tile.label}' wrapped when it should fit on one line",
-                tile.labelRect.height <= 22f * 1.5f
-            )
+    fun `stat labels and values render on single lines without overlap`() {
+        val blocks = layoutProgressCard(texts(), appIconPresent = true, isStory = true, measure = ::fakeMeasure)
+        val textBlocks = blocks.filterIsInstance<CardBlock.Text>()
+        val labels = listOf("Created", "Completed", "Incomplete", "Streak", "Active Days")
+        val values = listOf("12", "7", "5", "3 days", "5")
+        labels.forEach { label ->
+            val t = textBlocks.first { it.text == label }
+            assertTrue("'$label' wrapped to two lines", t.rect.height <= 22f * 1.5f)
+            assertTrue("'$label' escapes the canvas", t.rect.isInside(1080f, 1920f))
         }
+        values.forEach { value ->
+            assertTrue("missing stat value '$value'", textBlocks.any { it.text == value })
+        }
+        // The QA gate covers label↔value overlaps inside each row.
+        val issues = verifyCardLayout(blocks, 1080f, 1920f)
+        assertTrue("stat rows overlap: $issues", issues.isEmpty())
     }
 
     @Test
-    fun `30-day dot strip stays inside the content column`() {
-        val blocks = layoutProgressCard(stats(heatmapDays = 30), texts(), 62, true, true, ::fakeMeasure)
-        val dots = blocks.filterIsInstance<CardBlock.Dot>()
-        assertTrue("expected 30 dots, got ${dots.size}", dots.size == 30)
-        val leftMost = dots.minOf { it.rect.left }
-        val rightMost = dots.maxOf { it.rect.right }
-        assertTrue("dots span $leftMost..$rightMost", leftMost >= 64f && rightMost <= 1080f - 64f)
+    fun `first week badge fits the streak row`() {
+        val blocks = layoutProgressCard(
+            texts(firstWeekBadge = true),
+            appIconPresent = true, isStory = true, measure = ::fakeMeasure
+        )
+        val badge = blocks.filterIsInstance<CardBlock.Text>().first { it.text == "First week of tracking" }
+        assertTrue(badge.rect.isInside(1080f, 1920f))
+        val issues = verifyCardLayout(blocks, 1080f, 1920f)
+        assertTrue("badge layout issues: $issues", issues.isEmpty())
     }
 
     @Test
-    fun `7-day strip uses the bigger dots`() {
-        val blocks = layoutProgressCard(stats(heatmapDays = 7), texts(), 62, true, true, ::fakeMeasure)
-        val dots = blocks.filterIsInstance<CardBlock.Dot>()
-        assertTrue(dots.size == 7)
-        assertTrue(dots.all { it.rect.width > 30f })
+    fun `footer is pinned near the canvas bottom on both sizes`() {
+        val story = layoutProgressCard(texts(), appIconPresent = true, isStory = true, measure = ::fakeMeasure)
+        val storyFooter = story.filterIsInstance<CardBlock.Text>().first { it.text == "Made with ClearView" }
+        // The minimal card leaves most of the tall story canvas empty; the
+        // watermark must anchor near the bottom, not float mid-card.
+        assertTrue(
+            "story footer floats at ${storyFooter.rect.top}",
+            storyFooter.rect.top > 1920f * 0.75f
+        )
+        assertTrue(storyFooter.rect.isInside(1080f, 1920f))
+
+        val square = layoutProgressCard(texts(), appIconPresent = true, isStory = false, measure = ::fakeMeasure)
+        val squareFooter = square.filterIsInstance<CardBlock.Text>().first { it.text == "Made with ClearView" }
+        assertTrue(squareFooter.rect.isInside(1080f, 1080f))
     }
 
     @Test

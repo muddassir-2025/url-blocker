@@ -214,8 +214,7 @@ fun DownloadsSection(
     Column(modifier = modifier.fillMaxWidth()) {
 
         // ── Storage card: used space + the add-audio menu + settings gear.
-        // All stats and the destructive Clear actions live in the
-        // Manage-storage sheet.
+        // The full storage breakdown lives in the Manage-storage sheet.
         StorageCard(
             used = used,
             onManage = { showManage = true },
@@ -431,7 +430,6 @@ fun DownloadsSection(
         ManageStorageSheet(
             items = downloads,
             used = used,
-            onClearAll = { AudioDownloads.clearAll(); showManage = false },
             onDismiss = { showManage = false }
         )
     }
@@ -613,8 +611,7 @@ private fun StorageCard(
                         }
                     }
                 }
-                // Media settings gear: opens the sheet with all the storage
-                // stats and the Clear actions.
+                // Media settings gear: opens the sheet with all the storage stats.
                 IconButton(onClick = onManage, modifier = Modifier.size(32.dp)) {
                     Icon(
                         Icons.Filled.Settings,
@@ -1025,16 +1022,14 @@ fun OfflineThumbnail(item: DownloadItem, modifier: Modifier = Modifier) {
     }
 }
 
-/** Manage-storage sheet: stats + Clear All (no auto-cleanup — nothing expires). */
+/** Manage-storage sheet: the storage breakdown (downloads are never auto-deleted). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ManageStorageSheet(
     items: List<DownloadItem>,
     used: Long,
-    onClearAll: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    var confirmClearAll by remember { mutableStateOf(false) }
     val largest = items.maxByOrNull { it.fileSize }
     val oldest = items.minByOrNull { it.downloadedAt }
 
@@ -1066,38 +1061,7 @@ private fun ManageStorageSheet(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-
-            Spacer(Modifier.height(16.dp))
-            Button(
-                onClick = { confirmClearAll = true },
-                enabled = items.isNotEmpty(),
-                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.error
-                ),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Clear all downloads")
-            }
         }
-    }
-
-    // Clear all lives here (not on the storage card) and asks first, so an
-    // accidental tap can never wipe the library.
-    if (confirmClearAll) {
-        AlertDialog(
-            onDismissRequest = { confirmClearAll = false },
-            title = { Text("Clear all downloads?") },
-            text = { Text("All ${items.size} downloaded audio files will be deleted from this device.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmClearAll = false
-                    onClearAll()
-                }) { Text("Clear all", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmClearAll = false }) { Text("Cancel") }
-            }
-        )
     }
 }
 

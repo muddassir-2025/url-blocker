@@ -28,8 +28,8 @@ android {
         applicationId = "com.muddassir.clearview"
         minSdk = 24
         targetSdk = 37
-        versionCode = 15
-        versionName = "10.5"
+        versionCode = 20
+        versionName = "10.10"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -46,6 +46,15 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Install side-by-side with the Play Store release. The debug APK is
+            // signed with the debug keystore, so Android refuses to install it
+            // over the release app (same applicationId, different signature). A
+            // ".debug" suffix gives the debug build its own applicationId
+            // (com.muddassir.clearview.debug) — a separate app that coexists
+            // with the Play Store one, each with its own data.
+            applicationIdSuffix = ".debug"
+        }
         release {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
@@ -67,6 +76,10 @@ android {
 
     buildFeatures {
         compose = true
+        // BuildConfig.APPLICATION_ID — needed by the instrumentation test to
+        // assert the variant's real applicationId (the debug build carries a
+        // ".debug" suffix).
+        buildConfig = true
     }
 
 }

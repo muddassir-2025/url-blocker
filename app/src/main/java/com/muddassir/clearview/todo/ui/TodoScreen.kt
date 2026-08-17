@@ -122,12 +122,16 @@ private data class DayDialogRequest(val day: LocalDate, val mode: BarMode)
 /**
  * The Todo screen — a calm productivity dashboard with a clean hierarchy:
  *
- *   Today → Upcoming → All → History → Temporary → Permanent
+ *   Today → Upcoming → History → All → Temporary → Permanent
  *
- * Today is the only actionable tab (checkboxes enabled solely for todos due
- * today — a future todo can never be completed early). Upcoming groups future
- * todos by their required date, purely informational. History separates
- * completed and missed past todos with destructive-action confirmations.
+ * Today is the completion tab: todos due today carry a checkbox — the ONLY
+ * place completion happens and the only interactive thing on the tab.
+ * Tapping ticks it; tapping again un-completes (a strict-interval day is
+ * locked either way once its window closes — "can't redo"). The ⋮ menu
+ * (Edit / Snooze / Delete) lives in the Temporary and Permanent lists; a
+ * future todo can never be completed early. Upcoming groups future todos by
+ * their required date, purely informational. History separates completed and
+ * missed past todos with destructive-action confirmations.
  * Below the list: the daily target + weekly progress strip, the explainable
  * Weekly Score (tap for the full breakdown), Weekly Insights, Statistics and
  * a month calendar that works together with the weekly system.
@@ -209,15 +213,24 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
     }
 
     fun toggle(item: TodoItem, day: LocalDate = today) {
-        // Date rule: a todo can only be completed on a day it is applicable
-        // on (for the list that is always today — future todos show no
+        // Date rule: a todo can only be toggled on a day it is applicable on
+        // (for the list that is always today — future todos show no
         // checkbox). Strict-interval todos add a second rule: completion is
-        // only allowed while the window is OPEN — once it closes, the day is
-        // locked as missed ("can't redo"). nowMillis (refreshed every minute)
-        // matches the checkbox state exactly, so the visible affordance and
-        // the enforcement can never disagree. The notification Complete path
-        // enforces the same rule with the real clock.
-        if (!TodoCodec.canCompleteOn(item, day, nowMillis)) return
+        // only allowed while the window is OPEN, and a COMPLETED day is
+        // equally locked once the window closes ("can't redo" works both
+        // ways) — so un-completing is only possible while the window is still
+        // open. nowMillis (refreshed every minute) matches the checkbox state
+        // exactly, so the visible affordance and the enforcement can never
+        // disagree. The notification Complete path enforces the same rule
+        // with the real clock.
+        if (!TodoCodec.isActiveOn(item, day)) return
+        if (TodoCodec.completedOn(item, day)) {
+            // Un-complete — blocked once a strict window has closed (the day
+            // is locked as done, mirroring "can't redo" for missed days).
+            if (TodoCodec.intervalEnded(item, day, nowMillis)) return
+        } else if (!TodoCodec.canCompleteOn(item, day, nowMillis)) {
+            return
+        }
         val (updated, _) = TodoCodec.toggled(items, item.id, day, nowMillis)
         save(updated)
     }
@@ -384,7 +397,7 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
             }
         }
 
-        // ── Filter chips: Today · Upcoming · All · History · Temporary · Permanent ──
+        // ── Filter chips: Today · Upcoming · History · All · Temporary · Permanent ──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -395,8 +408,8 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
             listOf(
                 TodoFilter.TODAY to R.string.todo_filter_today,
                 TodoFilter.UPCOMING to R.string.todo_filter_upcoming,
-                TodoFilter.ALL to R.string.todo_filter_all,
                 TodoFilter.HISTORY to R.string.todo_filter_history,
+                TodoFilter.ALL to R.string.todo_filter_all,
                 TodoFilter.TEMPORARY to R.string.todo_filter_temporary,
                 TodoFilter.PERMANENT to R.string.todo_filter_permanent
             ).forEach { (option, label) ->
@@ -486,6 +499,10 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
                                             canComplete = false,
                                             missedToday = false,
                                             snoozeWindow = snoozedWindows[todo.id],
+                                            // Upcoming is a view-only list — the manage-actions
+                                            // (Edit / Snooze / Delete) live in the Temporary /
+                                            // Permanent lists.
+                                            showActions = false,
                                             onToggle = {},
                                             onEdit = { editing = todo },
                                             onDelete = { pendingDelete = todo },
@@ -512,13 +529,32 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
                                         // before being moved) must never strike it through or tint it.
                                         completedToday = TodoCodec.isActiveOn(todo, today) &&
                                             TodoCodec.completedOn(todo, today),
-                                        canComplete = TodoCodec.canCompleteOn(todo, today, nowMillis),
+                                        // The completion checkbox is ONLY for Today — the one
+                                        // place a todo is actionable. Temporary / Permanent
+                                        // cards manage the plan (⋮ menu) but never complete;
+                                        // All stays a strictly view-only aggregate.
+                                        canComplete = filter == TodoFilter.TODAY &&
+                                            TodoCodec.canCompleteOn(todo, today, nowMillis),
+                                        // A todo completed today keeps its checkmark ONLY on the
+                                        // Today tab — the same card in the other lists shows the
+                                        // completion through styling, never a checkbox.
+                                        showCheckbox = filter == TodoFilter.TODAY,
                                         // A strict-interval todo whose window closed today
                                         // uncompleted is LOCKED as missed — shown at a glance.
                                         missedToday = TodoCodec.isActiveOn(todo, today) &&
                                             !TodoCodec.completedOn(todo, today) &&
                                             TodoCodec.intervalEnded(todo, today, nowMillis),
+                                        // A completed strict-interval todo whose window closed
+                                        // is equally locked (as done) — its checkbox shows
+                                        // ticked but cannot be un-completed.
+                                        toggleLocked = TodoCodec.completedOn(todo, today) &&
+                                            TodoCodec.intervalEnded(todo, today, nowMillis),
                                         snoozeWindow = snoozedWindows[todo.id],
+                                        // Temporary and Permanent are the manageable lists
+                                        // (⋮ menu: Edit / Snooze / Delete) — Today is purely
+                                        // checkbox-based, and All stays a view-only aggregate.
+                                        showActions = filter == TodoFilter.TEMPORARY ||
+                                            filter == TodoFilter.PERMANENT,
                                         onToggle = { toggle(todo) },
                                         onEdit = { editing = todo },
                                         onDelete = { pendingDelete = todo },
@@ -556,6 +592,10 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
                                             canComplete = false,
                                             missedToday = false,
                                             snoozeWindow = snoozedWindows[todo.id],
+                                            // Today is purely checkbox-based — these "up next"
+                                            // teasers are view-only (not due today, so no
+                                            // completion checkbox and no ⋮ menu).
+                                            showActions = false,
                                             onToggle = {},
                                             onEdit = { editing = todo },
                                             onDelete = { pendingDelete = todo },
@@ -730,7 +770,6 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
             items = items,
             today = today,
             nowMillis = nowMillis,
-            weekScore = weekStats.score,
             store = store,
             onDismiss = { showProgressCard = false }
         )
@@ -854,11 +893,14 @@ private fun UpcomingGroupHeader(date: LocalDate, today: LocalDate) {
 }
 
 /**
- * One todo card: checkbox (only when due today AND the strict window is
- * open), title, details, schedule meta, menu. A strict-interval todo whose
- * window closed today uncompleted shows a red Missed chip and NO checkbox —
- * it is locked (\"can't redo\"). When a snooze is pending, [snoozeWindow]
- * (\"1:58 PM → 2:08 PM\") replaces the reminder portion.
+ * One todo card: checkbox (only in Today, when due today) — ticking it
+ * completes, tapping it again un-completes; a completed strict-interval todo
+ * whose window closed shows it ticked but DISABLED (locked as done, "can't
+ * redo" both ways). Title, details, schedule meta, and — only when
+ * [showActions] — the ⋮ menu with Edit / Snooze / Delete. A strict-interval
+ * todo whose window closed today uncompleted shows a red Missed chip and NO
+ * checkbox — it is locked (\"can't redo\"). When a snooze is pending,
+ * [snoozeWindow] (\"1:58 PM → 2:08 PM\") replaces the reminder portion.
  */
 @Composable
 private fun TodoCard(
@@ -867,7 +909,22 @@ private fun TodoCard(
     completedToday: Boolean,
     canComplete: Boolean,
     missedToday: Boolean,
+    /**
+     * True only in the Today view. Completion checkboxes are exclusive to
+     * Today: outside it [completedToday] still styles the card (strike-through
+     * + tint), but a checkbox is never rendered — a todo completed today in
+     * Temporary / Permanent / All is presented as done, not toggleable.
+     */
+    showCheckbox: Boolean = false,
+    /**
+     * A completed strict-interval todo whose window has closed: its checkbox
+     * renders ticked but disabled — the day is locked as done ("can't redo"
+     * works both ways), so it cannot be un-completed.
+     */
+    toggleLocked: Boolean = false,
     snoozeWindow: String?,
+    /** False in the Today / All / Upcoming views, which are view-only. */
+    showActions: Boolean,
     onToggle: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -935,8 +992,16 @@ private fun TodoCard(
                             modifier = Modifier.size(22.dp)
                         )
                     }
-                } else if (isDueToday && canComplete) {
-                    Checkbox(checked = completedToday, onCheckedChange = { onToggle() })
+                } else if (showCheckbox && isDueToday && (canComplete || completedToday)) {
+                    // Today-only: a completed todo keeps its checkbox — ticked,
+                    // and tapping it again un-completes. Only a strict-interval
+                    // todo whose window already closed renders it DISABLED
+                    // (locked as done, "can't redo" both ways).
+                    Checkbox(
+                        checked = completedToday,
+                        onCheckedChange = { onToggle() },
+                        enabled = !toggleLocked
+                    )
                 } else {
                     // Upcoming / not applicable today / window not yet open: no
                     // completion checkbox — a calendar icon marks it as scheduled.
@@ -1001,55 +1066,65 @@ private fun TodoCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                // Missed (locked "can't redo") cards offer Delete ONLY — they
-                // are history. Completed cards keep Edit + Delete (editing
-                // restarts the todo as new, clearing its completion). Active
-                // cards get the full Edit / Snooze / Delete menu.
-                Box {
-                    IconButton(onClick = { menuOpen = true }) {
-                        Icon(
-                            Icons.Filled.MoreVert,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        if (!missedToday) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.todo_edit)) },
-                                onClick = { menuOpen = false; onEdit() },
-                                leadingIcon = {
-                                    Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
-                                }
+                // The ⋮ menu (Edit / Snooze / Delete) shows in the manageable
+                // lists: Temporary and Permanent (Today / All / Upcoming are
+                // view-only). Missed (locked "can't redo") cards offer Delete
+                // ONLY — they are history. Completed cards keep Edit + Delete
+                // (editing restarts the todo as new, clearing its completion).
+                // Active cards get Edit / Snooze / Delete. Completion is the
+                // checkbox's job — and the checkbox only appears in Today.
+                if (showActions) {
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(
+                                Icons.Filled.MoreVert,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        if (!completedToday && !missedToday) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.todo_snooze)) },
-                                onClick = { menuOpen = false; onSnooze() },
-                                enabled = item.reminder != null,
-                                leadingIcon = {
-                                    Icon(Icons.Filled.Snooze, contentDescription = null, modifier = Modifier.size(18.dp))
-                                }
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    text = stringResource(R.string.todo_delete),
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            },
-                            onClick = { menuOpen = false; onDelete() },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Filled.Delete,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.size(18.dp)
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            if (!missedToday) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.todo_edit)) },
+                                    onClick = { menuOpen = false; onEdit() },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    }
                                 )
                             }
-                        )
+                            if (!completedToday && !missedToday) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.todo_snooze)) },
+                                    onClick = { menuOpen = false; onSnooze() },
+                                    // Only when a reminder actually fires — a
+                                    // todo whose reminders are switched OFF
+                                    // (reminderStyle Off) must not offer a
+                                    // Snooze that would silently re-arm an
+                                    // alarm the user disabled.
+                                    enabled = item.reminder?.enabled == true,
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.Snooze, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    }
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = stringResource(R.string.todo_delete),
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                },
+                                onClick = { menuOpen = false; onDelete() },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Filled.Delete,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -2147,24 +2222,44 @@ private fun DayTodosDialog(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (editable && TodoCodec.canCompleteOn(item, day, nowMillis)) {
-                                Checkbox(
-                                    checked = TodoCodec.completedOn(item, day),
-                                    onCheckedChange = { onToggle(item) }
-                                )
-                            } else if (editable &&
-                                TodoCodec.isActiveOn(item, day) &&
-                                !TodoCodec.completedOn(item, day) &&
-                                TodoCodec.intervalEnded(item, day, nowMillis)
-                            ) {
-                                // Strict window closed today uncompleted → locked.
-                                Icon(
-                                    Icons.Filled.Warning,
-                                    contentDescription = null,
-                                    tint = MISSED_RED,
-                                    modifier = Modifier.size(20.dp).padding(start = 6.dp)
-                                )
-                                Spacer(Modifier.width(10.dp))
+                            if (editable && TodoCodec.isActiveOn(item, day)) {
+                                val done = TodoCodec.completedOn(item, day)
+                                val lockedMissed = !done && TodoCodec.intervalEnded(item, day, nowMillis)
+                                when {
+                                    // Strict window closed today uncompleted → locked.
+                                    lockedMissed -> {
+                                        Icon(
+                                            Icons.Filled.Warning,
+                                            contentDescription = null,
+                                            tint = MISSED_RED,
+                                            modifier = Modifier.size(20.dp).padding(start = 6.dp)
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                    }
+                                    // Same toggle semantics as the Today list: a ticked
+                                    // completed day can be un-completed unless its strict
+                                    // window already closed (locked both ways), and an
+                                    // uncompleted day only shows a checkbox while the rules
+                                    // allow completing — a strict window that hasn't opened
+                                    // yet falls through to the DateRange marker, matching
+                                    // the list.
+                                    done || TodoCodec.canCompleteOn(item, day, nowMillis) -> {
+                                        Checkbox(
+                                            checked = done,
+                                            onCheckedChange = { onToggle(item) },
+                                            enabled = !(done && TodoCodec.intervalEnded(item, day, nowMillis))
+                                        )
+                                    }
+                                    else -> {
+                                        Icon(
+                                            Icons.Filled.DateRange,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                            modifier = Modifier.size(18.dp).padding(start = 6.dp)
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                    }
+                                }
                             } else {
                                 Icon(
                                     Icons.Filled.DateRange,

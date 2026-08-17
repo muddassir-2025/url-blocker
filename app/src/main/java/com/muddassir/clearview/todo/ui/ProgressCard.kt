@@ -97,7 +97,6 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.ceil
-import kotlin.math.roundToInt
 import kotlin.random.Random
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -124,7 +123,6 @@ fun ProgressCardDialog(
     items: List<TodoItem>,
     today: LocalDate,
     nowMillis: Long,
-    weekScore: Int?,
     store: TodoStore,
     onDismiss: () -> Unit
 ) {
@@ -136,7 +134,7 @@ fun ProgressCardDialog(
         )
     ) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            ProgressCardFlow(items, today, nowMillis, weekScore, store, onDismiss)
+            ProgressCardFlow(items, today, nowMillis, store, onDismiss)
         }
     }
 }
@@ -146,7 +144,6 @@ private fun ProgressCardFlow(
     items: List<TodoItem>,
     today: LocalDate,
     nowMillis: Long,
-    weekScore: Int?,
     store: TodoStore,
     onDismiss: () -> Unit
 ) {
@@ -224,7 +221,6 @@ private fun ProgressCardFlow(
                 CardPreviewStep(
                     stats = stats,
                     name = name,
-                    weekScore = weekScore,
                     isStory = isStory,
                     onStoryChange = { isStory = it },
                     onRegenerate = {
@@ -285,9 +281,10 @@ private fun NameInputStep(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             listOf(
+                ProgressCardStats.RangeKind.TODAY to R.string.progress_card_range_today,
                 ProgressCardStats.RangeKind.WEEK to R.string.progress_card_range_week,
                 ProgressCardStats.RangeKind.MONTH to R.string.progress_card_range_month,
-                ProgressCardStats.RangeKind.ALL to R.string.progress_card_range_all,
+                ProgressCardStats.RangeKind.DAY90 to R.string.progress_card_range_90,
                 ProgressCardStats.RangeKind.CUSTOM to R.string.progress_card_range_custom
             ).forEach { (option, label) ->
                 FilterChip(
@@ -395,20 +392,14 @@ private fun NameInputStep(
 private fun CardPreviewStep(
     stats: ProgressCardStats.CardStats,
     name: String,
-    weekScore: Int?,
     isStory: Boolean,
     onStoryChange: (Boolean) -> Unit,
     onRegenerate: () -> Unit
 ) {
     val context = LocalContext.current
-    // The hero stat: the on-screen Weekly Score for the WEEK range (exact
-    // match), the generalized range score otherwise.
-    val heroScore = if (stats.rangeKind == ProgressCardStats.RangeKind.WEEK) {
-        weekScore ?: stats.score
-    } else {
-        stats.score
-    }
-    val rendered = rememberProgressCardImage(stats, name, heroScore, context, isStory)
+    // The score is always the range's own v2 score — the card is a
+    // self-contained analytics dashboard for the selected period.
+    val rendered = rememberProgressCardImage(stats, name, context, isStory)
 
     // Pre-Android-10 gallery save goes through the system save dialog (SAF);
     // Android 10+ writes straight into MediaStore Pictures/ClearView.
@@ -507,13 +498,12 @@ private fun CardPreviewStep(
  * Renders [stats] into an off-screen [Bitmap] at full export resolution
  * (1080×1920 story / 1080×1080 square) via [CanvasDrawScope], returning both
  * the composable preview surface and the raw bitmap for save/share. Re-renders
- * whenever the stats, name, hero score or size change.
+ * whenever the stats, name or size change.
  */
 @Composable
 private fun rememberProgressCardImage(
     stats: ProgressCardStats.CardStats,
     name: String,
-    heroScore: Int?,
     context: Context,
     isStory: Boolean
 ): RenderedCard {
@@ -525,13 +515,13 @@ private fun rememberProgressCardImage(
     val height = if (isStory) 1920 else 1080
     // Draw SYNCHRONOUSLY while creating the bitmap so the preview never shows
     // a blank frame: CanvasDrawScope.draw is synchronous, and this only re-runs
-    // when the stats/name/score/size actually change (a button tap), not on
-    // every recomposition.
-    return remember(stats, name, heroScore, isStory) {
-        val texts = buildTexts(stats, name, heroScore, context)
+    // when the stats/name/size actually change (a button tap), not on every
+    // recomposition.
+    return remember(stats, name, isStory) {
+        val texts = buildTexts(stats, name, context)
         // 1. Lay out every element as a measured block (flex-column flow).
         val blocks = layoutProgressCard(
-            stats, texts, heroScore, appIcon != null, isStory
+            texts, appIcon != null, isStory
         ) { text, style, maxWidth ->
             // ceil: never constrain below the layout width, or a borderline
             // single-line text would re-wrap during the draw pass.
@@ -566,42 +556,51 @@ private fun rememberProgressCardImage(
 private fun buildTexts(
     stats: ProgressCardStats.CardStats,
     name: String,
-    heroScore: Int?,
     context: Context
 ): CardTexts {
     val appName = context.getString(R.string.app_name)
+    val days = " " + context.getString(R.string.progress_card_days)
+    val scoreTitle = context.getString(
+        when (stats.rangeKind) {
+            ProgressCardStats.RangeKind.TODAY -> R.string.progress_card_score_today
+            ProgressCardStats.RangeKind.WEEK -> R.string.progress_card_score_week
+            ProgressCardStats.RangeKind.MONTH -> R.string.progress_card_score_month
+            ProgressCardStats.RangeKind.DAY90 -> R.string.progress_card_score_90
+            ProgressCardStats.RangeKind.CUSTOM -> R.string.progress_card_score_period
+        }
+    )
+    val firstWeekBadge = stats.firstWeek
+    val statLabels = listOf(
+        context.getString(R.string.progress_card_created),
+        context.getString(R.string.progress_card_completed),
+        context.getString(R.string.progress_card_incomplete),
+        context.getString(R.string.progress_card_streak),
+        context.getString(R.string.progress_card_active)
+    )
+    val statValues = listOf(
+        stats.created.toString(),
+        stats.completed.toString(),
+        stats.missed.toString(),
+        if (firstWeekBadge) context.getString(R.string.progress_card_first_week)
+        else stats.currentStreak.toString() + days,
+        stats.activeDays.toString()
+    )
+
     return CardTexts(
         nameProgress = context.getString(R.string.progress_card_your_progress, name.trim().take(24)),
-        scoreLabel = context.getString(
-            if (stats.rangeKind == ProgressCardStats.RangeKind.WEEK) {
-                R.string.progress_card_score_week
-            } else {
-                R.string.progress_card_score_range
-            }
-        ),
-        created = context.getString(R.string.progress_card_created),
-        completed = context.getString(R.string.progress_card_completed),
-        incomplete = context.getString(R.string.progress_card_incomplete),
-        currentStreak = context.getString(R.string.progress_card_current_streak),
-        bestStreak = context.getString(R.string.progress_card_best_streak),
-        activeDays = context.getString(R.string.progress_card_active_days),
-        daysUnit = " " + context.getString(R.string.progress_card_days),
-        skillsTitle = context.getString(R.string.progress_card_skills),
-        skillsEmpty = context.getString(R.string.progress_card_skills_empty),
-        firstWeek = context.getString(R.string.progress_card_first_week),
-        lastDays = if (stats.rangeKind == ProgressCardStats.RangeKind.WEEK) {
-            context.getString(R.string.progress_card_this_week)
-        } else {
-            context.getString(R.string.progress_card_last_days, stats.heatmap.size)
-        },
-        motivational = when {
-            stats.percent < 20 -> context.getString(R.string.progress_card_motiv_low)
-            stats.percent <= 70 -> context.getString(R.string.progress_card_motiv_mid)
-            else -> context.getString(R.string.progress_card_motiv_high)
-        },
-        madeWith = context.getString(R.string.progress_card_made_with, appName),
         dateRange = formatDateRange(stats.from, stats.to),
-        percentLine = context.getString(R.string.progress_card_percent, stats.percent)
+        scoreTitle = scoreTitle,
+        scoreLine = stats.score?.let {
+            context.getString(R.string.progress_card_score_value, it)
+        },
+        percentLine = stats.score?.let {
+            context.getString(R.string.progress_card_completion, stats.percent)
+        },
+        emptyRange = context.getString(R.string.progress_card_empty_range),
+        statLabels = statLabels,
+        statValues = statValues,
+        firstWeekBadge = firstWeekBadge,
+        madeWith = context.getString(R.string.progress_card_made_with, appName)
     )
 }
 
@@ -693,50 +692,12 @@ private fun DrawScope.drawCardBlocks(blocks: List<CardBlock>, appIcon: ImageBitm
             is CardBlock.Text ->
                 drawTextBlock(block.text, block.style, block.rect, tm)
 
-            is CardBlock.Tile -> {
-                drawRoundRect(
-                    color = CardTileBg,
+            is CardBlock.Line ->
+                drawRect(
+                    color = CardDivider,
                     topLeft = Offset(block.rect.left, block.rect.top),
-                    size = Size(block.rect.width, block.rect.height),
-                    cornerRadius = CornerRadius(26f)
+                    size = Size(block.rect.width, block.rect.height)
                 )
-                drawRoundRect(
-                    color = CardTileBorder,
-                    topLeft = Offset(block.rect.left, block.rect.top),
-                    size = Size(block.rect.width, block.rect.height),
-                    cornerRadius = CornerRadius(26f),
-                    style = Stroke(width = 2f)
-                )
-                drawTextBlock(block.emoji, block.emojiStyle, block.emojiRect, tm)
-                drawTextBlock(block.label, block.labelStyle, block.labelRect, tm)
-                drawTextBlock(block.value, block.valueStyle, block.valueRect, tm)
-            }
-
-            is CardBlock.Pill -> {
-                drawRoundRect(
-                    color = CardTeal.copy(alpha = 0.12f),
-                    topLeft = Offset(block.rect.left, block.rect.top),
-                    size = Size(block.rect.width, block.rect.height),
-                    cornerRadius = CornerRadius(block.rect.height / 2f)
-                )
-                drawTextBlock(block.text, block.style, block.textRect, tm)
-            }
-
-            is CardBlock.Dot -> {
-                val color = when (block.heat) {
-                    ProgressCardStats.Heat.DONE -> CardDone
-                    ProgressCardStats.Heat.MISSED -> CardMissed
-                    ProgressCardStats.Heat.SCHEDULED -> CardGrayDot
-                }
-                drawCircle(
-                    color = color,
-                    radius = block.rect.width / 2f,
-                    center = Offset(
-                        block.rect.left + block.rect.width / 2f,
-                        block.rect.top + block.rect.height / 2f
-                    )
-                )
-            }
 
             is CardBlock.Icon -> drawIconBlock(block, appIcon, tm)
         }

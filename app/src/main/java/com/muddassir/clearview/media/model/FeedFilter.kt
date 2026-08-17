@@ -71,7 +71,7 @@ enum class FeedWatchStatus(val label: String) {
 }
 
 /**
- * The Media tab's All Feed filters. Defaults: All time + All content +
+ * The Media tab's All Feed filters. Defaults: Last 3 days + All content +
  * Newest first. [customStartEpochMillis] / [customEndEpochMillis] only apply
  * when [date] is [FeedDateFilter.CUSTOM] (both are local start-of-day millis).
  *
@@ -80,7 +80,7 @@ enum class FeedWatchStatus(val label: String) {
  * decode, so no stale filter can lock the feed.
  */
 data class FeedFilter(
-    val date: FeedDateFilter = FeedDateFilter.ALL_TIME,
+    val date: FeedDateFilter = FeedDateFilter.LAST_3_DAYS,
     val content: FeedContentFilter = FeedContentFilter.ALL,
     val sort: FeedSortOrder = FeedSortOrder.NEWEST_FIRST,
     // Unwatched by default: the feed leads with videos the user hasn't seen,
@@ -96,7 +96,7 @@ data class FeedFilter(
 ) {
     /** True when anything differs from the defaults (drives the active indicator). */
     val isActive: Boolean
-        get() = date != FeedDateFilter.ALL_TIME ||
+        get() = date != FeedDateFilter.LAST_3_DAYS ||
             content != FeedContentFilter.ALL ||
             sort != FeedSortOrder.NEWEST_FIRST ||
             watchStatus != FeedWatchStatus.UNWATCHED ||

@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phone Limit widget. Idle: "Screen time - Phone Limit" title, a
+     field-styled label ALWAYS reading "Screen time: …" (the real today
+     figure from Usage Access, or an em dash when not granted), and the
+     START button below it. Active: the title plus the remaining time,
+     centered. The card keeps the same size in both states.
+
+     Three stacked rows need more height than a single launcher row, so the
+     widget defaults to a 2x2 footprint (resizable to suit the launcher).
+
+     No EditText: widget layouts containing an EditText fail to inflate on
+     some launchers ("Problem loading widget"), so START deep-links into the
+     app's Phone Limit sheet (the timer window). RemoteViews-safe views only
+     (LinearLayout / TextView) with app-only drawables. No cancel control. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_quran_reminder_bg"
+    android:orientation="vertical"
+    android:padding="8dp">
+
+    <!-- ── ACTIVE: "Phone Limit" + remaining time, centered ── -->
+    <LinearLayout
+        android:id="@+id/widget_phone_remaining_block"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="sans-serif"
+            android:maxLines="1"
+            android:text="@string/widget_phone_limit_title"
+            android:textColor="@color/widget_title"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_phone_remaining"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:fontFamily="monospace"
+            android:maxLines="1"
+            android:textColor="@color/widget_verse_text"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- ── IDLE: title + duration field + taller START button ── -->
+    <LinearLayout
+        android:id="@+id/widget_phone_controls"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="sans-serif"
+            android:maxLines="1"
+            android:text="@string/widget_phone_limit_title"
+            android:textColor="@color/widget_title"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_phone_input"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="@drawable/widget_phone_input_bg"
+            android:fontFamily="sans-serif"
+            android:gravity="center"
+            android:maxLines="1"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:text="@string/widget_phone_screen_time_na"
+            android:textColor="@color/widget_verse_text"
+            android:textSize="16sp" />
+
+        <TextView
+            android:id="@+id/widget_phone_start"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="5dp"
+            android:background="@drawable/widget_phone_button_bg"
+            android:gravity="center"
+            android:maxLines="1"
+            android:paddingTop="10dp"
+            android:paddingBottom="10dp"
+            android:text="@string/widget_phone_limit_start"
+            android:textColor="@color/widget_verse_text"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+</LinearLayout>

@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -15,25 +16,34 @@ import java.util.UUID
  * Unified storage for offline audio downloads:
  *
  * ```
- * cache/audio/<videoId>.<ext>   ← the audio files
- * cache/audio/metadata.json     ← the download registry
- * cache/thumbnails/<videoId>.jpg ← local thumbnails (offline lists/player)
+ * filesDir/downloads/<videoId>.<ext> ← the COMPLETED audio files (permanent)
+ * filesDir/downloads/metadata.json   ← the download registry
+ * cache/audio/<videoId>.part         ← temporary in-progress downloads
+ * cache/thumbnails/<videoId>.jpg     ← local thumbnails (offline lists/player)
  * ```
  *
- * The registry ([DownloadItem]s) is persisted as JSON in metadata.json so it
- * survives restarts. All heavy I/O is expected to run on the caller's
- * background dispatcher.
+ * Completed downloads live in `filesDir/downloads` — the app's permanent
+ * storage — so clearing the cache (or Android doing it automatically) can
+ * never delete the user's saved audio. Only genuinely temporary data (the
+ * in-progress `.part` files, thumbnails) uses the cache. The registry
+ * ([DownloadItem]s) is persisted as JSON in metadata.json so it survives
+ * restarts. All heavy I/O is expected to run on the caller's background
+ * dispatcher.
  */
 class AudioDownloadStore(context: Context) {
 
     private val appContext = context.applicationContext
 
-    val audioDir: File = File(appContext.cacheDir, "audio")
+    /** Completed downloads: `filesDir/downloads` (permanent, cache-safe). */
+    val audioDir: File = File(appContext.filesDir, "downloads")
+    /** Temporary in-progress downloads: `cache/audio` (may be cleared anytime). */
+    val partsDir: File = File(appContext.cacheDir, "audio")
     val thumbnailsDir: File = File(appContext.cacheDir, "thumbnails")
     private val metadataFile: File = File(audioDir, "metadata.json")
 
     init {
         audioDir.mkdirs()
+        partsDir.mkdirs()
         thumbnailsDir.mkdirs()
     }
 
@@ -90,21 +100,13 @@ class AudioDownloadStore(context: Context) {
         ids.forEach { delete(it) }
     }
 
-    fun clearAll() {
-        loadItems().forEach { delete(it.videoId) }
-        // Sweep leftovers (part files, unmatched thumbnails, …).
-        audioDir.listFiles()?.forEach { it.delete() }
-        thumbnailsDir.listFiles()?.forEach { it.delete() }
-        saveItems(emptyList())
-    }
-
     // ── Files ──────────────────────────────────────────────────────
 
     fun audioFile(item: DownloadItem): File = File(audioDir, item.fileName)
 
     fun thumbnailFile(item: DownloadItem): File = File(thumbnailsDir, item.thumbnailPath)
 
-    fun partFile(videoId: String): File = File(audioDir, "$videoId.part")
+    fun partFile(videoId: String): File = File(partsDir, "$videoId.part")
 
     /**
      * Downloads the video thumbnail into `thumbnails/<videoId>.jpg` so the
@@ -248,11 +250,103 @@ class AudioDownloadStore(context: Context) {
         orphans.size
     }
 
+    /**
+     * One-time migration from the legacy `cache/audio/` location: completed
+     * downloads (audio files + the metadata registry) move to the permanent
+     * `filesDir/downloads/` home, where a cache clear can no longer delete
+     * them. Called on startup by [AudioDownloads.initialize].
+     *
+     * Safe, idempotent and restart-friendly:
+     *  - `.part` (in-progress) and `.tmp` (atomic metadata writes) files are
+     *    genuinely temporary and STAY in the cache — they are already where
+     *    they belong,
+     *  - audio files move first, the registry LAST, so an interruption can
+     *    never leave a moved registry pointing at files that never arrived
+     *    (worst case: a still-cached registry, which the next run finishes
+     *    moving — rows are never orphaned),
+     *  - a destination that already holds the same file (same size) is a
+     *    previously completed migration — its legacy copy is removed,
+     *  - a name clash with different content keeps BOTH copies and logs,
+     *  - nothing is deleted before the destination is verified; failures keep
+     *    the original file and log instead of deleting it.
+     */
+    fun migrateLegacyDownloads() {
+        // cache/audio is now the TEMPORARY parts home — if no legacy downloads
+        // ever lived there it only ever holds .part files, which need no
+        // migration (and the dir must not be deleted: it is in active use).
+        val legacy = partsDir
+        if (!legacy.isDirectory) return
+        val files = legacy.listFiles() ?: return
+        if (files.none { isCompletedDownload(it) }) return
+        audioDir.mkdirs()
+        var moved = 0
+        files.forEach { f ->
+            if (f.name == "metadata.json") return@forEach // moves last
+            if (isCompletedDownload(f) && moveCompletedFile(f)) moved++
+        }
+        // The registry moves LAST: a crash mid-migration leaves it in the
+        // cache (harmless — the next run finishes the job) instead of a moved
+        // registry pointing at files that never made it across.
+        val metadata = File(legacy, "metadata.json")
+        if (metadata.isFile && moveCompletedFile(metadata)) moved++
+        if (moved > 0) {
+            Log.i(TAG, "Migrated $moved legacy download(s) to filesDir/downloads")
+        }
+    }
+
+    /** True for a completed download: a plain file that is not a temp write. */
+    private fun isCompletedDownload(f: File): Boolean {
+        if (!f.isFile) return false
+        val name = f.name
+        return !name.endsWith(".part") && !name.endsWith(".tmp")
+    }
+
+    /** Moves one legacy file into [audioDir]; true when it now lives there. */
+    private fun moveCompletedFile(src: File): Boolean {
+        val dest = File(audioDir, src.name)
+        return try {
+            when {
+                !dest.exists() -> moveFile(src, dest)
+                // Already migrated on a previous run (same file) — drop the
+                // cache copy so the migration converges.
+                dest.length() == src.length() -> {
+                    src.delete()
+                    true
+                }
+                // Name clash with DIFFERENT content: never overwrite, never
+                // delete — keep both copies and surface it.
+                else -> {
+                    Log.w(TAG, "Legacy name clash kept in cache: ${src.name}")
+                    false
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Legacy migration failed for ${src.name}: ${e.message}")
+            false
+        }
+    }
+
+    /** Moves [src] to [dest], falling back to copy+verify when rename fails. */
+    private fun moveFile(src: File, dest: File): Boolean {
+        if (src.renameTo(dest)) return true
+        // renameTo can fail across some filesystems — fall back to a verified
+        // copy; the source is deleted ONLY after the destination checks out.
+        return try {
+            src.copyTo(dest, overwrite = false)
+            val ok = dest.exists() && dest.length() == src.length()
+            if (ok) src.delete() else dest.delete()
+            ok
+        } catch (e: Exception) {
+            runCatching { dest.delete() }
+            false
+        }
+    }
+
     /** Deletes stale `.part` files (interrupted downloads), skipping [activeIds]. */
     fun deleteStalePartFiles(activeIds: Set<String> = emptySet(), olderThanMs: Long = STALE_PART_MS): Int {
         val cutoff = System.currentTimeMillis() - olderThanMs
         var count = 0
-        audioDir.listFiles()?.forEach { f ->
+        partsDir.listFiles()?.forEach { f ->
             val name = f.name
             if (name.endsWith(".part") && f.lastModified() < cutoff &&
                 name.removeSuffix(".part") !in activeIds
@@ -269,6 +363,8 @@ class AudioDownloadStore(context: Context) {
         // concurrent downloads finishing together can never drop each other's
         // metadata row (which would orphan a file on disk).
         val LOCK = Any()
+
+        private const val TAG = "AudioDownloadStore"
 
         const val STALE_PART_MS = 24L * 60 * 60 * 1000
     }

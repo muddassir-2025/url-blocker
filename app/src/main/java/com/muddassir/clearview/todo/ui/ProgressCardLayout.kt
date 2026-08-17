@@ -5,38 +5,35 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
-import com.muddassir.clearview.todo.data.ProgressCardStats
 
 // ── Card palette (matches the app's dark + teal identity) ──────────────
 internal val CardTeal = Color(0xFF2DD4BF)
-internal val CardDone = Color(0xFF43A047)
-internal val CardMissed = Color(0xFFE53935)
-internal val CardGrayDot = Color(0xFF333A42)
 internal val CardTextDim = Color(0xFF9AA3AF)
 internal val CardBgTop = Color(0xFF10161B)
 internal val CardBgBottom = Color(0xFF06090D)
-internal val CardTileBg = Color.White.copy(alpha = 0.05f)
-internal val CardTileBorder = Color.White.copy(alpha = 0.07f)
+internal val CardDivider = Color.White.copy(alpha = 0.08f)
 
-/** Resolved, localizable strings the card renders (built by the UI layer). */
+/**
+ * Resolved, localizable strings the card renders (built by the UI layer —
+ * the layout engine stays purely visual).
+ */
 internal data class CardTexts(
     val nameProgress: String,
-    val scoreLabel: String,
-    val created: String,
-    val completed: String,
-    val incomplete: String,
-    val currentStreak: String,
-    val bestStreak: String,
-    val activeDays: String,
-    val daysUnit: String,
-    val skillsTitle: String,
-    val skillsEmpty: String,
-    val firstWeek: String,
-    val lastDays: String,
-    val motivational: String,
-    val madeWith: String,
     val dateRange: String,
-    val percentLine: String
+    /** e.g. "WEEKLY SCORE" / "MONTHLY SCORE". */
+    val scoreTitle: String,
+    /** e.g. "62 / 100"; null → [emptyRange] is shown instead of the score. */
+    val scoreLine: String?,
+    /** e.g. "66% completion"; shown under the score when the range has data. */
+    val percentLine: String?,
+    val emptyRange: String,
+    /** The five stat labels: Created, Completed, Incomplete, Streak, Active Days. */
+    val statLabels: List<String>,
+    /** The five stat values (the streak slot holds the badge when first-week). */
+    val statValues: List<String>,
+    /** True when the streak value is the "First week of tracking" badge. */
+    val firstWeekBadge: Boolean,
+    val madeWith: String
 )
 
 /** An absolutely-positioned region of the card, produced by [layoutProgressCard]. */
@@ -67,27 +64,8 @@ internal sealed class CardBlock {
         val style: TextStyle
     ) : CardBlock()
 
-    data class Tile(
-        override val rect: CardRect,
-        val emoji: String,
-        val emojiRect: CardRect,
-        val emojiStyle: TextStyle,
-        val label: String,
-        val labelRect: CardRect,
-        val labelStyle: TextStyle,
-        val value: String,
-        val valueRect: CardRect,
-        val valueStyle: TextStyle
-    ) : CardBlock()
-
-    data class Pill(
-        override val rect: CardRect,
-        val textRect: CardRect,
-        val text: String,
-        val style: TextStyle
-    ) : CardBlock()
-
-    data class Dot(override val rect: CardRect, val heat: ProgressCardStats.Heat) : CardBlock()
+    /** A thin horizontal divider. */
+    data class Line(override val rect: CardRect) : CardBlock()
 
     data class Icon(override val rect: CardRect, val useAppIcon: Boolean) : CardBlock()
 }
@@ -118,39 +96,20 @@ private data class CardConfig(
     val nameXGap: Float,
     val dateFont: Float,
     val gapAfterDate: Float,
-    val heroLabelFont: Float,
-    val heroScoreFont: Float,
-    val heroScoreMin: Float,
-    val heroPercentFont: Float,
-    val heroInnerGap: Float,
-    val gapAfterHero: Float,
-    val tilePadX: Float,
-    val tilePadY: Float,
-    val tileVGap: Float,
-    val tileGap: Float,
-    val tileRowGap: Float,
-    val tileLabelFont: Float,
-    val tileValueFont: Float,
-    val tileBadgeFont: Float,
-    val tileEmojiFont: Float,
-    val gapAfterTiles: Float,
-    val skillsTitleFont: Float,
-    val gapAfterSkillsTitle: Float,
-    val pillH: Float,
-    val pillGap: Float,
-    val pillPadX: Float,
-    val pillFont: Float,
-    val pillCount: Int,
-    val pillCharCap: Int,
-    val gapAfterPills: Float,
-    val heatTitleFont: Float,
-    val heatDot7: Float,
-    val heatGap7: Float,
-    val heatDot30: Float,
-    val heatGap30: Float,
-    val gapAfterHeat: Float,
-    val motivFont: Float,
-    val gapAfterMotiv: Float,
+    val scoreTitleFont: Float,
+    val scoreFont: Float,
+    val scoreMin: Float,
+    val scoreGap: Float,
+    val scorePercentFont: Float,
+    val scorePercentGap: Float,
+    val gapAfterScore: Float,
+    val dividerGap: Float,
+    val statIconFont: Float,
+    val statFont: Float,
+    val statValueFont: Float,
+    val statBadgeFont: Float,
+    val statGap: Float,
+    val statRowGap: Float,
     val footerFont: Float,
     val footerIcon: Float
 ) {
@@ -158,40 +117,35 @@ private data class CardConfig(
     val center: Float get() = (left + right) / 2f
 }
 
+/**
+ * The card is intentionally MINIMAL — a single small premium block of content
+ * (name, date range, score, completion %, five stats) with the watermark
+ * footer pinned to the bottom of the canvas.
+ */
 private val STORY = CardConfig(
-    left = 64f, right = 1080f - 64f, top = 72f, gap = 30f,
-    iconSize = 92f, nameFont = 46f, nameXGap = 28f,
-    dateFont = 34f, gapAfterDate = 44f,
-    heroLabelFont = 26f, heroScoreFont = 186f, heroScoreMin = 96f, heroPercentFont = 32f,
-    heroInnerGap = 12f, gapAfterHero = 36f,
-    tilePadX = 26f, tilePadY = 18f, tileVGap = 10f, tileGap = 16f, tileRowGap = 14f,
-    tileLabelFont = 22f, tileValueFont = 44f, tileBadgeFont = 26f, tileEmojiFont = 40f,
-    gapAfterTiles = 40f,
-    skillsTitleFont = 26f, gapAfterSkillsTitle = 16f,
-    pillH = 56f, pillGap = 12f, pillPadX = 28f, pillFont = 29f, pillCount = 6, pillCharCap = 28,
-    gapAfterPills = 34f,
-    heatTitleFont = 24f, heatDot7 = 54f, heatGap7 = 17f, heatDot30 = 20f, heatGap30 = 8f,
-    gapAfterHeat = 34f,
-    motivFont = 42f, gapAfterMotiv = 26f,
-    footerFont = 28f, footerIcon = 40f
+    left = 64f, right = 1080f - 64f, top = 56f, gap = 26f,
+    iconSize = 64f, nameFont = 34f, nameXGap = 20f,
+    dateFont = 24f, gapAfterDate = 36f,
+    scoreTitleFont = 19f, scoreFont = 52f, scoreMin = 28f,
+    scoreGap = 10f, scorePercentFont = 23f, scorePercentGap = 6f,
+    gapAfterScore = 30f,
+    dividerGap = 22f,
+    statIconFont = 26f, statFont = 22f, statValueFont = 26f, statBadgeFont = 18f,
+    statGap = 12f, statRowGap = 13f,
+    footerFont = 24f, footerIcon = 32f
 )
 
 private val SQUARE = CardConfig(
     left = 44f, right = 1080f - 44f, top = 44f, gap = 20f,
-    iconSize = 56f, nameFont = 34f, nameXGap = 20f,
-    dateFont = 27f, gapAfterDate = 28f,
-    heroLabelFont = 20f, heroScoreFont = 108f, heroScoreMin = 64f, heroPercentFont = 25f,
-    heroInnerGap = 8f, gapAfterHero = 24f,
-    tilePadX = 20f, tilePadY = 10f, tileVGap = 6f, tileGap = 12f, tileRowGap = 10f,
-    tileLabelFont = 17f, tileValueFont = 34f, tileBadgeFont = 21f, tileEmojiFont = 30f,
-    gapAfterTiles = 24f,
-    skillsTitleFont = 22f, gapAfterSkillsTitle = 12f,
-    pillH = 44f, pillGap = 10f, pillPadX = 20f, pillFont = 24f, pillCount = 4, pillCharCap = 16,
-    gapAfterPills = 20f,
-    heatTitleFont = 20f, heatDot7 = 40f, heatGap7 = 13f, heatDot30 = 15f, heatGap30 = 5f,
-    gapAfterHeat = 20f,
-    motivFont = 32f, gapAfterMotiv = 14f,
-    footerFont = 22f, footerIcon = 30f
+    iconSize = 48f, nameFont = 26f, nameXGap = 16f,
+    dateFont = 19f, gapAfterDate = 26f,
+    scoreTitleFont = 15f, scoreFont = 40f, scoreMin = 22f,
+    scoreGap = 8f, scorePercentFont = 18f, scorePercentGap = 5f,
+    gapAfterScore = 22f,
+    dividerGap = 16f,
+    statIconFont = 21f, statFont = 17f, statValueFont = 21f, statBadgeFont = 14f,
+    statGap = 10f, statRowGap = 10f,
+    footerFont = 19f, footerIcon = 26f
 )
 
 /** A simple vertical flex column: y advances by measured content + gaps. */
@@ -230,25 +184,15 @@ private class Flow(
     }
 }
 
-private data class TileSpec(
-    val emoji: String,
-    val label: String,
-    val value: String,
-    val valueColor: Color,
-    val badge: Boolean
-)
-
 /**
- * Lays the card out as a single vertical flow (flex-column semantics): every
- * section's position follows from the section above it, all text is measured
- * and width-constrained to the padded content column, and nothing is placed
- * with hardcoded pixel offsets. Returns the complete block list — the drawing
- * pass and the QA bounds/overlap check both consume exactly this.
+ * Lays the minimal card out as a single vertical flow (flex-column semantics):
+ * every section's position follows from the section above it, all text is
+ * measured and width-constrained to the padded content column, and nothing is
+ * placed with hardcoded pixel offsets. Returns the complete block list — the
+ * drawing pass and the QA bounds/overlap check both consume exactly this.
  */
 internal fun layoutProgressCard(
-    stats: ProgressCardStats.CardStats,
     texts: CardTexts,
-    heroScore: Int?,
     appIconPresent: Boolean,
     isStory: Boolean,
     measure: CardMeasurer
@@ -282,161 +226,84 @@ internal fun layoutProgressCard(
     )
     flow.gap(cfg.gapAfterDate)
 
-    // ── 3. Hero stat (score auto-shrinks to ≤80% of the content width) ──
+    // ── 3. Score + completion % (centered, compact) ──
     flow.text(
-        texts.scoreLabel,
+        texts.scoreTitle,
         TextStyle(
-            fontSize = cfg.heroLabelFont.sp,
+            fontSize = cfg.scoreTitleFont.sp,
             fontWeight = FontWeight.SemiBold,
             color = CardTextDim,
-            letterSpacing = (cfg.heroLabelFont * 0.30f).sp
+            letterSpacing = (cfg.scoreTitleFont * 0.28f).sp
         ),
         centeredX = cfg.center
     )
-    flow.gap(cfg.heroInnerGap)
-
-    val scoreText = if (heroScore != null) "$heroScore/100" else "—"
-    val maxScoreW = cfg.width * 0.8f
-    var scoreFont = cfg.heroScoreFont
-    var scoreStyle = TextStyle(fontSize = scoreFont.sp, fontWeight = FontWeight.Bold, color = Color.White)
-    while (measure.measure(scoreText, scoreStyle, maxScoreW).width > maxScoreW &&
-        scoreFont > cfg.heroScoreMin
-    ) {
-        scoreFont -= 4f
-        scoreStyle = TextStyle(fontSize = scoreFont.sp, fontWeight = FontWeight.Bold, color = Color.White)
-    }
-    flow.text(scoreText, scoreStyle, maxWidth = maxScoreW, centeredX = cfg.center)
-    flow.gap(cfg.heroInnerGap)
-
-    flow.text(
-        texts.percentLine,
-        TextStyle(fontSize = cfg.heroPercentFont.sp, fontWeight = FontWeight.Medium, color = CardTeal),
-        centeredX = cfg.center
-    )
-    flow.gap(cfg.gapAfterHero)
-
-    // ── 4. Stats grid (2×3): icon + label inline on one line, value below ──
-    val percentSuffix = if (stats.due > 0) " (${stats.percent}%)" else ""
-    val tiles = listOf(
-        TileSpec("🎯", texts.created, stats.created.toString(), Color.White, badge = false),
-        TileSpec("✅", texts.completed, stats.completed.toString() + percentSuffix, CardDone, badge = false),
-        TileSpec("⏳", texts.incomplete, stats.missed.toString() + percentSuffix, CardMissed, badge = false),
-        TileSpec(
-            "⚡", texts.currentStreak,
-            if (stats.firstWeek) texts.firstWeek else stats.currentStreak.toString() + texts.daysUnit,
-            if (stats.firstWeek) CardTextDim else Color.White,
-            badge = stats.firstWeek
-        ),
-        TileSpec("📈", texts.bestStreak, stats.bestStreak.toString() + texts.daysUnit, Color.White, badge = false),
-        TileSpec("📅", texts.activeDays, stats.activeDays.toString(), Color.White, badge = false)
-    )
-    val tileW = (cfg.width - cfg.tileGap) / 2f
-    for (row in 0 until 3) {
-        val rowY = flow.y
-        // Equal heights within a row: both tiles' backgrounds stretch to the
-        // taller tile so the 2-column grid always reads as a clean, even pair
-        // (the inner text stays top-aligned inside each tile).
-        val leftTile = buildTile(tiles[row * 2], cfg.left, tileW, rowY, cfg, measure)
-        val rightTile = buildTile(tiles[row * 2 + 1], cfg.left + tileW + cfg.tileGap, tileW, rowY, cfg, measure)
-        val rowH = maxOf(leftTile.rect.height, rightTile.rect.height)
-        blocks += leftTile.copy(rect = leftTile.rect.copy(bottom = leftTile.rect.top + rowH))
-        blocks += rightTile.copy(rect = rightTile.rect.copy(bottom = rightTile.rect.top + rowH))
-        flow.y = rowY + rowH
-        if (row < 2) flow.gap(cfg.tileRowGap)
-    }
-    flow.gap(cfg.gapAfterTiles)
-
-    // ── 5. Skills & habits pills (wrapped, width-constrained) ──
-    flow.text(
-        texts.skillsTitle,
-        TextStyle(
-            fontSize = cfg.skillsTitleFont.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = CardTextDim,
-            letterSpacing = (cfg.skillsTitleFont * 0.24f).sp
-        )
-    )
-    flow.gap(cfg.gapAfterSkillsTitle)
-
-    val pillStyle = TextStyle(fontSize = cfg.pillFont.sp, fontWeight = FontWeight.SemiBold, color = CardTeal)
-    val skills = stats.skills.take(cfg.pillCount).map { it.take(cfg.pillCharCap) }
-    if (skills.isEmpty()) {
-        flow.text(texts.skillsEmpty, TextStyle(fontSize = cfg.pillFont.sp, color = CardTextDim))
-    } else {
-        var px = cfg.left
-        var py = flow.y
-        skills.forEach { skill ->
-            val size = measure.measure(skill, pillStyle, cfg.width)
-            val pillW = size.width + cfg.pillPadX * 2f
-            if (px + pillW > cfg.right && px > cfg.left) {
-                px = cfg.left
-                py += cfg.pillH + cfg.pillGap
-            }
-            val textTop = py + (cfg.pillH - size.height) / 2f
-            blocks += CardBlock.Pill(
-                rect = CardRect(px, py, px + pillW, py + cfg.pillH),
-                textRect = CardRect(px + cfg.pillPadX, textTop, px + cfg.pillPadX + size.width, textTop + size.height),
-                text = skill,
-                style = pillStyle
+    flow.gap(cfg.scoreGap)
+    if (texts.scoreLine != null) {
+        // Auto-shrink so the score never exceeds the padded column.
+        val maxScoreW = cfg.width * 0.96f
+        var font = cfg.scoreFont
+        var style = TextStyle(fontSize = font.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        while (measure.measure(texts.scoreLine, style, maxScoreW).width > maxScoreW && font > cfg.scoreMin) {
+            font -= 2f
+            style = TextStyle(fontSize = font.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        }
+        flow.text(texts.scoreLine, style, maxWidth = maxScoreW, centeredX = cfg.center)
+        texts.percentLine?.let { percent ->
+            flow.gap(cfg.scorePercentGap)
+            flow.text(
+                percent,
+                TextStyle(
+                    fontSize = cfg.scorePercentFont.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = CardTeal
+                ),
+                centeredX = cfg.center
             )
-            px += pillW + cfg.pillGap
         }
-        flow.y = py + cfg.pillH
-    }
-    flow.gap(cfg.gapAfterPills)
-
-    // ── 6. Heatmap strip: own row, cleared from the section above ──
-    flow.text(
-        texts.lastDays,
-        TextStyle(
-            fontSize = cfg.heatTitleFont.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = CardTextDim,
-            letterSpacing = (cfg.heatTitleFont * 0.20f).sp
+    } else {
+        flow.text(
+            texts.emptyRange,
+            TextStyle(fontSize = cfg.scoreTitleFont.sp, color = CardTextDim),
+            centeredX = cfg.center
         )
-    )
-    flow.gap(cfg.gapAfterSkillsTitle)
-
-    val dots = stats.heatmap
-    if (dots.isNotEmpty()) {
-        var dotSize = if (dots.size <= 7) cfg.heatDot7 else cfg.heatDot30
-        val dotGap = if (dots.size <= 7) cfg.heatGap7 else cfg.heatGap30
-        var totalW = dots.size * dotSize + (dots.size - 1) * dotGap
-        while (totalW > cfg.width && dotSize > 10f) {
-            dotSize -= 2f
-            totalW = dots.size * dotSize + (dots.size - 1) * dotGap
-        }
-        var dx = cfg.center - totalW / 2f
-        val dotY = flow.y
-        dots.forEach { day ->
-            blocks += CardBlock.Dot(CardRect(dx, dotY, dx + dotSize, dotY + dotSize), day.heat)
-            dx += dotSize + dotGap
-        }
-        flow.y = dotY + dotSize
     }
-    flow.gap(cfg.gapAfterHeat)
+    flow.gap(cfg.gapAfterScore)
 
-    // ── 7. Motivational line ──
-    flow.text(
-        texts.motivational,
-        TextStyle(fontSize = cfg.motivFont.sp, fontWeight = FontWeight.Bold, color = CardTeal),
-        centeredX = cfg.center
-    )
-    flow.gap(cfg.gapAfterMotiv)
+    // ── 4. Hairline divider ──
+    val lineY = flow.y
+    blocks += CardBlock.Line(CardRect(cfg.left, lineY, cfg.right, lineY + 2f))
+    flow.y = lineY + 2f
+    flow.gap(cfg.dividerGap)
 
-    // ── 8. Watermark footer (icon + "Made with …", centered as one unit) ──
+    // ── 5. The five stats: emoji + label left, value right ──
+    listOf(
+        "🎯" to 0,
+        "✅" to 1,
+        "⏳" to 2,
+        "🔥" to 3,
+        "🟢" to 4
+    ).forEach { (emoji, index) ->
+        statRow(flow, blocks, cfg, emoji, texts.statLabels[index], texts.statValues[index],
+            badge = texts.firstWeekBadge && index == 3, measure)
+    }
+
+    // ── 6. Watermark footer (icon + "Made with …"), pinned near the bottom ──
     val footerStyle = TextStyle(fontSize = cfg.footerFont.sp, color = CardTextDim)
     val madeSize = measure.measure(texts.madeWith, footerStyle, cfg.width)
-    val unitW = madeSize.width + 16f + cfg.footerIcon
+    val unitW = madeSize.width + cfg.statGap + cfg.footerIcon
     val startX = cfg.center - unitW / 2f
-    val footerY = flow.y
+    // Pinned near the canvas bottom so the minimal card never leaves the
+    // watermark floating mid-card — but never above where content already ends
+    // (an overflowing layout stays flagged by the QA gate).
+    val canvasH = if (isStory) 1920f else 1080f
+    val footerY = maxOf(flow.y, canvasH - cfg.footerIcon - cfg.top)
     blocks += CardBlock.Icon(
         CardRect(startX, footerY, startX + cfg.footerIcon, footerY + cfg.footerIcon),
         appIconPresent
     )
     flow.text(
         texts.madeWith, footerStyle, cfg.width,
-        x = startX + cfg.footerIcon + 16f,
+        x = startX + cfg.footerIcon + cfg.statGap,
         y = footerY + (cfg.footerIcon - madeSize.height) / 2f
     )
     flow.y = footerY + cfg.footerIcon
@@ -444,49 +311,47 @@ internal fun layoutProgressCard(
     return blocks
 }
 
-/** One 2×3-grid tile: emoji + label share the top line, value sits below. */
-private fun buildTile(
-    spec: TileSpec,
-    x: Float,
-    w: Float,
-    y: Float,
+/** One stat row: emoji + label on the left, value right-aligned on the same line. */
+private fun statRow(
+    flow: Flow,
+    blocks: MutableList<CardBlock>,
     cfg: CardConfig,
+    emoji: String,
+    label: String,
+    value: String,
+    badge: Boolean,
     measure: CardMeasurer
-): CardBlock.Tile {
-    val emojiStyle = TextStyle(fontSize = cfg.tileEmojiFont.sp)
-    val emojiSize = measure.measure(spec.emoji, emojiStyle, w)
-    val labelStyle = TextStyle(fontSize = cfg.tileLabelFont.sp, color = CardTextDim)
-    val labelMax = w - cfg.tilePadX * 2f - emojiSize.width - 10f
-    val labelSize = measure.measure(spec.label, labelStyle, labelMax)
-    val labelRowH = maxOf(emojiSize.height, labelSize.height)
+) {
+    val emojiStyle = TextStyle(fontSize = cfg.statIconFont.sp)
+    val emojiSize = measure.measure(emoji, emojiStyle, cfg.width)
     val valueStyle = TextStyle(
-        fontSize = (if (spec.badge) cfg.tileBadgeFont else cfg.tileValueFont).sp,
+        fontSize = (if (badge) cfg.statBadgeFont else cfg.statValueFont).sp,
         fontWeight = FontWeight.Bold,
-        color = spec.valueColor
+        color = if (badge) CardTextDim else Color.White
     )
-    val valueSize = measure.measure(spec.value, valueStyle, w - cfg.tilePadX * 2f)
-    val h = cfg.tilePadY + labelRowH + cfg.tileVGap + valueSize.height + cfg.tilePadY
-
-    val innerLeft = x + cfg.tilePadX
-    val labelTop = y + cfg.tilePadY
-    return CardBlock.Tile(
-        rect = CardRect(x, y, x + w, y + h),
-        emoji = spec.emoji,
-        emojiRect = CardRect(innerLeft, labelTop, innerLeft + emojiSize.width, labelTop + emojiSize.height),
-        emojiStyle = emojiStyle,
-        label = spec.label,
-        labelRect = CardRect(
-            innerLeft + emojiSize.width + 10f, labelTop,
-            innerLeft + emojiSize.width + 10f + labelSize.width, labelTop + labelSize.height
-        ),
-        labelStyle = labelStyle,
-        value = spec.value,
-        valueRect = CardRect(
-            innerLeft, y + cfg.tilePadY + labelRowH + cfg.tileVGap,
-            innerLeft + valueSize.width, y + cfg.tilePadY + labelRowH + cfg.tileVGap + valueSize.height
-        ),
-        valueStyle = valueStyle
+    val valueSize = measure.measure(value, valueStyle, cfg.width)
+    val labelStyle = TextStyle(fontSize = cfg.statFont.sp, color = CardTextDim)
+    val labelMax = (cfg.width - emojiSize.width - cfg.statGap - valueSize.width - 20f).coerceAtLeast(1f)
+    val labelSize = measure.measure(label, labelStyle, labelMax)
+    val rowH = maxOf(emojiSize.height, valueSize.height, labelSize.height)
+    val y = flow.y
+    blocks += CardBlock.Text(
+        CardRect(cfg.left, y, cfg.left + emojiSize.width, y + emojiSize.height),
+        emoji, emojiStyle
     )
+    blocks += CardBlock.Text(
+        CardRect(
+            cfg.left + emojiSize.width + cfg.statGap, y,
+            cfg.left + emojiSize.width + cfg.statGap + labelSize.width, y + labelSize.height
+        ),
+        label, labelStyle
+    )
+    blocks += CardBlock.Text(
+        CardRect(cfg.right - valueSize.width, y, cfg.right, y + valueSize.height),
+        value, valueStyle
+    )
+    flow.y = y + rowH
+    flow.gap(cfg.statRowGap)
 }
 
 /**

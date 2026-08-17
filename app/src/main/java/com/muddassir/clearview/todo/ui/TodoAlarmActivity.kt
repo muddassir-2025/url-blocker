@@ -5,9 +5,7 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -127,10 +125,6 @@ class TodoAlarmActivity : ComponentActivity() {
                             }
                         )
                         finish()
-                    },
-                    onDismiss = {
-                        TodoNotifier.cancelDayNotification(this, todoId, epochDay)
-                        finish()
                     }
                 )
             }
@@ -155,13 +149,14 @@ class TodoAlarmActivity : ComponentActivity() {
     }
 }
 
-/** The full-screen alarm UI: big clock, todo, and Complete / Snooze / Dismiss. */
+/** The full-screen alarm UI: big clock, todo, and Complete / Snooze. There is
+ * deliberately NO Dismiss — an alarm is either completed or snoozed; the
+ * ringing service still stops on its own after a minute either way. */
 @Composable
 private fun AlarmScreen(
     item: TodoItem,
     onComplete: () -> Unit,
-    onSnooze: () -> Unit,
-    onDismiss: () -> Unit
+    onSnooze: () -> Unit
 ) {
     var now by remember { mutableStateOf(LocalDateTime.now()) }
     LaunchedEffect(Unit) {
@@ -244,32 +239,16 @@ private fun AlarmScreen(
                     )
                 }
                 Spacer(Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                OutlinedButton(
+                    onClick = onSnooze,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
                 ) {
-                    OutlinedButton(
-                        onClick = onSnooze,
-                        modifier = Modifier.weight(1f).height(52.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-                    ) {
-                        Text(
-                            text = stringResource(R.string.todo_notification_snooze),
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.weight(1f).height(52.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White.copy(alpha = 0.8f))
-                    ) {
-                        Text(
-                            text = stringResource(R.string.todo_notification_dismiss),
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
+                    Text(
+                        text = stringResource(R.string.todo_notification_snooze),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
         }

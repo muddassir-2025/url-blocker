@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.muddassir.clearview.service.UrlBlockerService
 import com.muddassir.clearview.ui.theme.UrlblockerTheme
 
 /**
@@ -127,22 +128,37 @@ class BlockOverlayActivity : ComponentActivity() {
         }
         Log.i(TAG, "Exiting to Home")
         try {
-            val intent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_HOME)
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TASK or
-                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-            }
-            // Only launch Home if a home activity actually resolves (launcher
-            // disabled/updating, kiosk mode…). If none, fall straight through
-            // to the graceful fallback below instead of relying on the catch.
-            if (intent.resolveActivity(packageManager) != null) {
-                startActivity(intent)
-                // No enter animation for the launcher: prevents the "floating
-                // app icon" fly animation some launchers play when Home appears.
-                overridePendingTransition(0, 0)
-            } else {
-                Log.w(TAG, "No home activity resolved; dismissing overlay only")
+            // Prefer the accessibility service's GLOBAL_ACTION_HOME — literally
+            // the same event as the user pressing the navigation-bar Home
+            // button. The EXISTING launcher task is brought to the front
+            // untouched, so the launcher never re-renders its grid and no icon
+            // animation plays.
+            //
+            // The previous implementation launched a NEW Home intent with
+            // FLAG_ACTIVITY_CLEAR_TASK — that finishes and recreates the
+            // launcher task/activity, forcing a full grid reflow that shows one
+            // app icon sliding away and snapping back.
+            if (!UrlBlockerService.pressHome()) {
+                Log.w(TAG, "Accessibility service not running — falling back to a Home intent")
+                // Fallback (service not connected): launch Home WITHOUT clearing
+                // or recreating the launcher task. NEW_TASK alone brings the
+                // existing launcher task forward, matching a normal Home press.
+                val intent = Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_HOME)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                }
+                // Only launch Home if a home activity actually resolves (launcher
+                // disabled/updating, kiosk mode…). If none, fall straight through
+                // to the graceful fallback below instead of relying on the catch.
+                if (intent.resolveActivity(packageManager) != null) {
+                    startActivity(intent)
+                    // No enter animation for the launcher: prevents the "floating
+                    // app icon" fly animation some launchers play when Home appears.
+                    overridePendingTransition(0, 0)
+                } else {
+                    Log.w(TAG, "No home activity resolved; dismissing overlay only")
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to exit to Home: ${e.message}")

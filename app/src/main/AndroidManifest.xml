@@ -4,6 +4,12 @@
 
     <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE"
         tools:ignore="ProtectedPermissions" />
+    <!-- Phone Limit screen time: read today's real screen usage for the
+         widget/sheet. A protected permission — the user must opt in via the
+         system's Usage Access settings for it to actually grant anything; the
+         UI falls back to its static hints when it isn't granted. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Alarm-style todo reminders show a full-screen notification (peeks over
@@ -16,6 +22,10 @@
          notification controls) when the app is backgrounded / screen off. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Phone Limit countdown runs as a specialUse foreground service (Android
+         14+ requires a declared FGS type; the countdown is a user-facing
+         timer, not a data-sync/media job). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Todo reminders: re-schedule AlarmManager alarms after a reboot (the OS
          clears all alarms on boot). -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -67,6 +77,11 @@
              default scale-based close animation is what makes some launchers
              play a "floating app icon" animation when the overlay exits to
              Home, so a pure fade is applied instead. -->
+        <!-- Required declaration for the specialUse foreground service type. -->
+        <property
+            android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+            android:value="phone_limit_countdown" />
+
         <activity
             android:name=".ui.BlockOverlayActivity"
             android:exported="false"
@@ -97,6 +112,37 @@
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/quran_reminder_widget_info" />
+        </receiver>
+
+        <!-- Phone Limit countdown service: a foreground service that keeps the
+             timer running (and the remaining time visible) in the background;
+             expires by locking the phone via DevicePolicyManager.lockNow when
+             the app is a Device Admin. specialUse (declared subtype above). -->
+        <service
+            android:name=".phonelimit.PhoneLimitService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
+
+        <!-- Phone Limit receiver: expiry alarm backstop, widget START button,
+             and boot recovery (re-arm the alarm + resume the countdown). -->
+        <receiver
+            android:name=".phonelimit.PhoneLimitReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Phone Limit home-screen widget (small square; start / countdown). -->
+        <receiver
+            android:name=".phonelimit.PhoneLimitWidgetProvider"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/phone_limit_widget_info" />
         </receiver>
 
         <!-- Accessibility Service -->

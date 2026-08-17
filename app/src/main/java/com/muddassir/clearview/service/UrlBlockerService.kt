@@ -34,6 +34,26 @@ class UrlBlockerService : AccessibilityService() {
 
     companion object {
         private const val TAG = "UrlBlockerService"
+
+        /**
+         * Live reference to the running service, set in [onCreate] and cleared
+         * in [onDestroy]. Lets the block overlay — a plain activity, not an
+         * accessibility service — ask the service to press the REAL Home key
+         * via [pressHome] instead of launching a Home intent of its own.
+         */
+        @Volatile private var instance: UrlBlockerService? = null
+
+        /**
+         * Presses the HOME key through the accessibility service
+         * ([AccessibilityService.GLOBAL_ACTION_HOME]) — exactly the same
+         * transition as the user tapping the navigation-bar Home button: the
+         * existing launcher task is simply brought to the front, never
+         * recreated, so the launcher does not re-render its icon grid.
+         * Returns false when no service instance is running, so callers can
+         * fall back to a Home intent.
+         */
+        fun pressHome(): Boolean =
+            instance?.performGlobalAction(GLOBAL_ACTION_HOME) ?: false
         private const val POLLING_INTERVAL_MS = 500L
         private const val GOOGLE_POLLING_INTERVAL_MS = 500L
         // Embedded browsers (in-app WebViews in non-target apps) are monitored at
@@ -67,7 +87,6 @@ class UrlBlockerService : AccessibilityService() {
         // Cap ALL event-driven scans to one per 250ms — the 500ms poll loop and
         // the immediate window-event path cover the rest.
         private const val EVENT_SCAN_MIN_INTERVAL_MS = 250L
-        private const val OUR_PACKAGE = "com.muddassir.clearview"
         private const val GOOGLE_PACKAGE = "com.google.android.googlequicksearchbox"
     }
 
@@ -161,6 +180,7 @@ class UrlBlockerService : AccessibilityService() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         repository = BlockRepository(applicationContext)
         keywordMatcher = KeywordMatcher(repository)
         Log.i(TAG, "UrlBlockerService created")
@@ -181,6 +201,7 @@ class UrlBlockerService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
+        instance = null
         Log.i(TAG, "UrlBlockerService destroyed")
     }
 
@@ -226,8 +247,11 @@ class UrlBlockerService : AccessibilityService() {
             handlePackageChange(packageName)
         }
 
-        // 2. Ignore our own app (overlay)
-        if (currentForegroundPackage == OUR_PACKAGE) {
+        // 2. Ignore our own app (overlay). The service's own package is used
+        //    (not a hardcoded constant) so the app keeps working under any
+        //    applicationId — including the ".debug"-suffixed dev build that
+        //    installs side-by-side with the Play Store release.
+        if (currentForegroundPackage == packageName) {
             return
         }
 
@@ -327,7 +351,7 @@ class UrlBlockerService : AccessibilityService() {
         if (currentForegroundPackage != newPackage) {
             Log.d(TAG, "Foreground package changed: $currentForegroundPackage -> $newPackage")
 
-            if (newPackage == OUR_PACKAGE) {
+            if (newPackage == packageName) {
                 // We reached the block overlay
                 blockingState = BlockingState.OVERLAY_ACTIVE
                 stopPolling()
@@ -336,7 +360,7 @@ class UrlBlockerService : AccessibilityService() {
                 return
             }
 
-            if (currentForegroundPackage == OUR_PACKAGE) {
+            if (currentForegroundPackage == packageName) {
                 blockingState = BlockingState.NORMAL
                 lastCheckedSnapshotId = null
                 lastBlockedResult = null
@@ -735,7 +759,7 @@ class UrlBlockerService : AccessibilityService() {
         pollingJob = serviceScope.launch {
             while (isActive) {
                 val pkg = currentForegroundPackage ?: packageName
-                if (pkg != OUR_PACKAGE && (blockingState == BlockingState.NORMAL ||
+                if (pkg != packageName && (blockingState == BlockingState.NORMAL ||
                             blockingState == BlockingState.WAITING_FOR_SAFE_STATE)) {
                     evaluateCurrentState(pkg, null)
                 }
@@ -1400,8 +1424,9 @@ class UrlBlockerService : AccessibilityService() {
             // Simple, clean: incognito tab closed → land on HOME. The service
             // stays alive (accessibility remains enabled), so opening Chrome
             // again re-enables monitoring. lastBlockedResult is cleared too:
-            // the old overlay round-trip used to clear it via OUR_PACKAGE
-            // handlePackageChange, which no longer runs for incognito — leaving
+            // the old overlay round-trip used to clear it via the service's own
+            // package (packageName) handlePackageChange, which no longer runs
+            // for incognito — leaving
             // a stale INCOGNITO result behind.
             blockingState = BlockingState.NORMAL
             lastCheckedSnapshotId = null

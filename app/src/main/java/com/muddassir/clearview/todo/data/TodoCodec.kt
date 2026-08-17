@@ -120,9 +120,13 @@ object TodoCodec {
                 .filter { it in 1..7 }
                 .toSet()
                 .takeIf { it.isNotEmpty() },
-            timeMinutes = if (o.isNull("time")) null else o.optInt("time"),
-            timeStartMinutes = if (o.isNull("timeStart")) null else o.optInt("timeStart"),
-            timeEndMinutes = if (o.isNull("timeEnd")) null else o.optInt("timeEnd"),
+            // Times are validated on decode: minutes-from-midnight outside
+            // 0..1439 (corrupt data, an older buggy build) are dropped instead
+            // of ever reaching LocalTime.of — where 1440 ("24:00") or a
+            // negative value would crash with a DateTimeException.
+            timeMinutes = if (o.isNull("time")) null else o.optInt("time").takeIf { it in 0..1439 },
+            timeStartMinutes = if (o.isNull("timeStart")) null else o.optInt("timeStart").takeIf { it in 0..1439 },
+            timeEndMinutes = if (o.isNull("timeEnd")) null else o.optInt("timeEnd").takeIf { it in 0..1439 },
             reminder = if (o.isNull("reminder")) null else {
                 val r = o.getJSONObject("reminder")
                 ReminderConfig(
@@ -201,9 +205,11 @@ object TodoCodec {
     // day can never be completed afterwards.
 
     /** Epoch millis of [day] at [minutes] past midnight (system zone). */
-    fun dayTimeMillis(day: LocalDate, minutes: Int): Long =
-        LocalDateTime.of(day, LocalTime.of(minutes / 60, minutes % 60))
+    fun dayTimeMillis(day: LocalDate, minutes: Int): Long {
+        val m = normalizedMinutes(minutes)
+        return LocalDateTime.of(day, LocalTime.of(m / 60, m % 60))
             .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    }
 
     /** True when [item] has a strict completion window. */
     fun hasStrictInterval(item: TodoItem): Boolean =
@@ -683,13 +689,13 @@ object TodoCodec {
 
     /** "8:00 PM" / "9:00 AM · 1:00 PM · 8:00 PM" for the reminder times. */
     fun reminderLabel(item: TodoItem): String? =
-        item.reminder?.timesMinutes?.joinToString(" · ") {
-            TIME.format(java.time.LocalTime.of(it / 60, it % 60))
-        }
+        item.reminder?.timesMinutes?.joinToString(" · ") { timeLabel(it) }
 
-    /** "10:00 PM" for a minutes-of-day value. */
-    fun timeLabel(minutes: Int): String =
-        TIME.format(java.time.LocalTime.of(minutes / 60, minutes % 60))
+    /** "10:00 PM" for a minutes-of-day value (never throws — see [normalizedMinutes]). */
+    fun timeLabel(minutes: Int): String {
+        val m = normalizedMinutes(minutes)
+        return TIME.format(java.time.LocalTime.of(m / 60, m % 60))
+    }
 
     /** "2:08 PM" for an epoch-millis instant (snoozed reminder fire times). */
     fun timeLabelFromMillis(millis: Long): String =
@@ -722,7 +728,18 @@ object TodoCodec {
         if (n == 1 || span == 0) return listOf(startMinutes)
         return (0 until n).map { i ->
             startMinutes + Math.round(i * span.toDouble() / (n - 1)).toInt()
-        }.distinct()
+        }.map { it.coerceIn(0, 1439) }.distinct()
+    }
+
+    /**
+     * Maps any minutes-of-day value into the valid 0..1439 range so a time
+     * can never throw: 1440 ("24:00" — e.g. the exclusive end of a 22:00–24:00
+     * productive window) wraps to 0 (midnight), and negative / huge corrupt
+     * values wrap the same way (java.time mod semantics: -1 → 23:59).
+     */
+    private fun normalizedMinutes(minutes: Int): Int {
+        if (minutes in 0..1439) return minutes
+        return ((minutes % 1440) + 1440) % 1440
     }
 
     private val DAY_NAMES = arrayOf("", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -730,7 +747,7 @@ object TodoCodec {
 
 /** The list filters offered by the Todo screen (in the exact UI order). */
 enum class TodoFilter {
-    TODAY, UPCOMING, ALL, HISTORY, TEMPORARY, PERMANENT
+    TODAY, UPCOMING, HISTORY, ALL, TEMPORARY, PERMANENT
 }
 
 /** The list sort orders offered by the Todo screen. */

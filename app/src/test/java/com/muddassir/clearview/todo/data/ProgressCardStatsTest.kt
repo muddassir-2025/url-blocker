@@ -12,10 +12,10 @@ import org.junit.Test
 
 class ProgressCardStatsTest {
 
-    // 2026-08-12 is a Wednesday → the current week runs Mon 2026-08-10 …
-    // Sun 08-16, and the applicable days are 08-10 (Mon), 08-11 (Tue), 08-12 (Wed).
+    // 2026-08-12 is a Wednesday. WEEK = trailing 7 days (2026-08-06 .. 08-12);
+    // MONTH = trailing 30; DAY90 = trailing 90. All ranges end at today.
     private val today: LocalDate = LocalDate.of(2026, 8, 12)
-    private val monday: LocalDate = TodoStats.mondayOf(today) // 2026-08-10
+    private val monday: LocalDate = LocalDate.of(2026, 8, 10)
 
     private fun millis() = 1L
 
@@ -44,33 +44,38 @@ class ProgressCardStatsTest {
     // ── Ranges ──────────────────────────────────────────────────────
 
     @Test
-    fun `resolveRange week is monday through today`() {
+    fun `resolveRange today is a single day`() {
+        val (from, to) = ProgressCardStats.resolveRange(
+            ProgressCardStats.RangeKind.TODAY, emptyList(), today
+        )
+        assertEquals(today, from)
+        assertEquals(today, to)
+    }
+
+    @Test
+    fun `resolveRange week is the trailing seven days`() {
         val (from, to) = ProgressCardStats.resolveRange(
             ProgressCardStats.RangeKind.WEEK, emptyList(), today
         )
-        assertEquals(monday, from)
+        assertEquals(today.minusDays(6), from)
         assertEquals(today, to)
     }
 
     @Test
-    fun `resolveRange month is the first of the month through today`() {
+    fun `resolveRange month is the trailing thirty days`() {
         val (from, to) = ProgressCardStats.resolveRange(
             ProgressCardStats.RangeKind.MONTH, emptyList(), today
         )
-        assertEquals(LocalDate.of(2026, 8, 1), from)
+        assertEquals(today.minusDays(29), from)
         assertEquals(today, to)
     }
 
     @Test
-    fun `resolveRange all time starts at the earliest todo`() {
-        val items = listOf(
-            item("a", start = LocalDate.of(2026, 5, 2)),
-            item("b", start = LocalDate.of(2026, 1, 20))
-        )
+    fun `resolveRange day90 is the trailing ninety days`() {
         val (from, to) = ProgressCardStats.resolveRange(
-            ProgressCardStats.RangeKind.ALL, items, today
+            ProgressCardStats.RangeKind.DAY90, emptyList(), today
         )
-        assertEquals(LocalDate.of(2026, 1, 20), from)
+        assertEquals(today.minusDays(89), from)
         assertEquals(today, to)
     }
 
@@ -91,7 +96,7 @@ class ProgressCardStatsTest {
         assertEquals(LocalDate.of(2026, 8, 1), inverted.second)
     }
 
-    // ── Counts & percentages ────────────────────────────────────────
+    // ── Counts ──────────────────────────────────────────────────────
 
     @Test
     fun `week counts completed and missed occurrences`() {
@@ -104,24 +109,142 @@ class ProgressCardStatsTest {
         val stats = ProgressCardStats.compute(
             items, ProgressCardStats.RangeKind.WEEK, today
         )
+        // Active only Mon..Wed: Mon+Tue completed, Wed (today) pending.
         assertEquals(2, stats.completed)
-        assertEquals(1, stats.missed) // today still uncompleted
+        assertEquals(1, stats.missed)
         assertEquals(3, stats.due)
         assertEquals(66, stats.percent)
         assertEquals(2, stats.activeDays)
+        assertEquals(2, stats.perfectDays)
+        assertEquals(7, stats.rangeDays)
     }
 
     @Test
-    fun `created counts todos created inside the range only`() {
+    fun `created counts todo instances created inside the range only`() {
         val items = listOf(
-            item("a", createdAt = monday),               // in range
-            item("b", createdAt = today),                // in range
-            item("c", createdAt = monday.minusDays(3))   // previous week → out of range
+            item("a", createdAt = monday),             // in range
+            item("b", createdAt = today),              // in range
+            item("c", createdAt = monday.minusDays(10)) // before the range → out
         )
         val stats = ProgressCardStats.compute(
             items, ProgressCardStats.RangeKind.WEEK, today
         )
         assertEquals(2, stats.created)
+    }
+
+    // ── Unique todos ────────────────────────────────────────────────
+
+    @Test
+    fun `unique counts are distinct titles in each category`() {
+        val items = listOf(
+            // Two instances of the same title → one unique "created".
+            item("q1", title = "Read Qur'an", createdAt = monday),
+            item("q2", title = "Read Qur'an", createdAt = monday.plusDays(1)),
+            item("f", title = "Fajr Salah", createdAt = today,
+                completions = mapOf(today to millis())),
+            // Created before the range, completed in it.
+            item("s", title = "Study", createdAt = monday.minusDays(10),
+                completions = mapOf(monday to millis())),
+            // Created in the range but never due/completed in it.
+            item("g", title = "Gym", start = today.plusDays(2), createdAt = today)
+        )
+        val stats = ProgressCardStats.compute(
+            items, ProgressCardStats.RangeKind.WEEK, today
+        )
+        // Distinct titles created in range: Read Qur'an, Fajr Salah, Gym.
+        assertEquals(3, stats.uniqueCreated)
+        // Distinct titles completed in range: Fajr Salah, Study.
+        assertEquals(2, stats.uniqueCompleted)
+        // Distinct titles with ZERO completions but ≥1 occurrence: Read Qur'an
+        // only (Study was completed at least once, so it goes under Completed).
+        assertEquals(1, stats.uniqueIncomplete)
+    }
+
+    @Test
+    fun `completed todos are titles with completions sorted by ratio`() {
+        val items = listOf(
+            item("a", title = "Always", completions = mapOf(
+                monday to millis(), monday.plusDays(1) to millis(), today to millis()
+            )), // 3/3
+            item("b", title = "Patchy", completions = mapOf(monday to millis())), // 1/3
+            item("c", title = "Untouched", completions = emptyMap()) // 0/3 → incomplete
+        )
+        val stats = ProgressCardStats.compute(
+            items, ProgressCardStats.RangeKind.WEEK, today
+        )
+        assertEquals(listOf("Always", "Patchy"), stats.completedTodos.map { it.title })
+        assertEquals("3/3", ratioOf(stats.completedTodos.first()))
+        // A partially-done todo still appears in Completed with its true ratio.
+        assertEquals("1/3", ratioOf(stats.completedTodos.last()))
+    }
+
+    @Test
+    fun `incomplete todos are zero-completion titles sorted by last active`() {
+        val items = listOf(
+            item("old", title = "Old", start = monday),                 // last active Mon
+            item("new", title = "New", start = today)                   // last active today
+        )
+        val stats = ProgressCardStats.compute(
+            items, ProgressCardStats.RangeKind.WEEK, today
+        )
+        assertEquals(listOf("New", "Old"), stats.incompleteTodos.map { it.title })
+        assertTrue(stats.incompleteTodos.all { it.done == 0 })
+    }
+
+    @Test
+    fun `best day picks the highest completion ratio`() {
+        // A three-day custom range. Both todos due every day; only day 1 has a
+        // completion (1 of 2 done) — the best (and only positive) day.
+        val from = today.minusDays(2)
+        val items = listOf(
+            item("a", start = from, completions = mapOf(from to millis())),
+            item("b", start = from)
+        )
+        val stats = ProgressCardStats.compute(
+            items, ProgressCardStats.RangeKind.CUSTOM, today,
+            customFrom = from, customTo = today
+        )
+        val best = stats.bestDay
+        assertEquals(from, best?.date)
+        assertEquals(1, best?.done)
+        assertEquals(2, best?.due)
+    }
+
+    @Test
+    fun `most consistent prefers a meaningful sample and most repeated is by occurrences`() {
+        val items = listOf(
+            item("x", title = "One Hit", completions = mapOf(monday to millis())),   // 1/1
+            item("y", title = "Steady", completions = mapOf(
+                monday to millis(), monday.plusDays(1) to millis()
+            )),                                                                    // 2/3
+            item("z", title = "Heavy", start = monday, completions = emptyMap())     // 0/3
+        )
+        val stats = ProgressCardStats.compute(
+            items, ProgressCardStats.RangeKind.WEEK, today
+        )
+        // "Steady" (2/3 over a real sample) beats "One Hit" (1/1).
+        assertEquals("Steady", stats.mostConsistent?.title)
+        // "Heavy" and "Steady" both have 3 occurrences; tie-break favours the
+        // one with more completions.
+        assertEquals("Steady", stats.mostRepeated?.title)
+    }
+
+    @Test
+    fun `most consistent falls back when no title has three occurrences`() {
+        val stats = ProgressCardStats.compute(
+            listOf(item("x", title = "Only", completions = mapOf(monday to millis()))),
+            ProgressCardStats.RangeKind.WEEK, today
+        )
+        assertEquals("Only", stats.mostConsistent?.title)
+    }
+
+    @Test
+    fun `avg per day divides by the range length`() {
+        val stats = ProgressCardStats.compute(
+            listOf(item("q", completions = mapOf(monday to millis(), monday.plusDays(1) to millis()))),
+            ProgressCardStats.RangeKind.WEEK, today
+        )
+        assertEquals(2f / 7f, stats.avgPerDay, 0.001f)
     }
 
     // ── Streaks ─────────────────────────────────────────────────────
@@ -157,9 +280,6 @@ class ProgressCardStatsTest {
 
     @Test
     fun `best streak finds the longest run while current streak ends at today`() {
-        // Custom range Aug 1..12. Completed Aug 1-3 (run of 3), then a long
-        // gap, then Aug 10-11 (run of 2). Today (Aug 12) is uncompleted, so
-        // the CURRENT streak is 2 but the BEST is 3.
         val from = LocalDate.of(2026, 8, 1)
         val completions = mapOf(
             from to millis(),
@@ -177,78 +297,85 @@ class ProgressCardStatsTest {
         assertEquals(2, stats.currentStreak)
     }
 
-    // ── Skills ──────────────────────────────────────────────────────
-
-    @Test
-    fun `skills are distinct titles with completions, most frequent first`() {
-        val items = listOf(
-            item("a", title = "Read Qur'an", completions = mapOf(monday to millis(), today to millis())),
-            item("b", title = "Fajr Salah", completions = mapOf(monday.plusDays(1) to millis())),
-            item("c", title = "Leetcode DSA", completions = emptyMap())
-        )
-        val stats = ProgressCardStats.compute(
-            items, ProgressCardStats.RangeKind.WEEK, today
-        )
-        assertEquals(listOf("Read Qur'an", "Fajr Salah"), stats.skills)
-    }
-
-    @Test
-    fun `skills are capped at six`() {
-        val items = (1..8).map { i ->
-            item("$i", title = "Habit $i", completions = mapOf(monday to millis()))
-        }
-        val stats = ProgressCardStats.compute(
-            items, ProgressCardStats.RangeKind.WEEK, today
-        )
-        assertEquals(6, stats.skills.size)
-    }
-
     // ── Heatmap ─────────────────────────────────────────────────────
 
     @Test
-    fun `heatmap week is 7 days with done missed and scheduled dots`() {
+    fun `heatmap week is the seven trailing days with done missed and none cells`() {
         val items = listOf(
-            item("q", completions = mapOf(monday to millis()))
+            item("q", completions = mapOf(monday to millis(), monday.plusDays(1) to millis()))
         )
         val stats = ProgressCardStats.compute(
             items, ProgressCardStats.RangeKind.WEEK, today
         )
         assertEquals(7, stats.heatmap.size)
-        assertEquals(ProgressCardStats.Heat.DONE, stats.heatmap.first().heat)
-        // 2026-08-13 (Thu) is still future in the week range → scheduled.
-        val future = stats.heatmap.last()
-        assertTrue(future.date.isAfter(today))
-        assertEquals(ProgressCardStats.Heat.SCHEDULED, future.heat)
-    }
-
-    @Test
-    fun `heatmap long ranges are capped at 30 days`() {
-        // A todo that started 45 days ago makes the ALL range longer than 30
-        // days, so the strip shows the trailing 30 days.
-        val items = listOf(
-            item("q", start = today.minusDays(45), permanent = true, completions = emptyMap())
-        )
-        val stats = ProgressCardStats.compute(
-            items, ProgressCardStats.RangeKind.ALL, today
-        )
-        assertEquals(30, stats.heatmap.size)
-        assertEquals(today.minusDays(29), stats.heatmap.first().date)
+        assertEquals(today.minusDays(6), stats.heatmap.first().date)
         assertEquals(today, stats.heatmap.last().date)
+        // Before the todo starts (Thu..Sun) there is no activity.
+        assertTrue(stats.heatmap.take(4).all { it.heat == ProgressCardStats.Heat.NONE })
+        // Mon and Tue were completed, today is pending → NONE (not missed yet).
+        assertEquals(ProgressCardStats.Heat.DONE, stats.heatmap[4].heat)
+        assertEquals(ProgressCardStats.Heat.DONE, stats.heatmap[5].heat)
+        assertEquals(ProgressCardStats.Heat.NONE, stats.heatmap[6].heat)
     }
 
     @Test
-    fun `heatmap marks missed days red for passed uncompleted occurrences`() {
-        // Permanent daily todo with NO completions at all — every past day in
-        // the week was missed, today is still actionable (scheduled).
+    fun `heatmap marks missed days red and today pending gray`() {
+        // Permanent daily todo with NO completions: Mon+Tue were missed,
+        // today is still actionable.
         val stats = ProgressCardStats.compute(
             listOf(item("q", completions = emptyMap())),
             ProgressCardStats.RangeKind.WEEK, today
         )
-        val past = stats.heatmap.filter { it.date.isBefore(today) }
-        assertTrue(past.isNotEmpty())
-        assertTrue(past.all { it.heat == ProgressCardStats.Heat.MISSED })
-        val todayDot = stats.heatmap.first { it.date == today }
-        assertEquals(ProgressCardStats.Heat.SCHEDULED, todayDot.heat)
+        assertEquals(ProgressCardStats.Heat.MISSED, stats.heatmap[4].heat)
+        assertEquals(ProgressCardStats.Heat.MISSED, stats.heatmap[5].heat)
+        assertEquals(ProgressCardStats.Heat.NONE, stats.heatmap[6].heat)
+    }
+
+    @Test
+    fun `heatmap marks partially completed days amber`() {
+        val items = listOf(
+            item("a", completions = mapOf(monday to millis())),
+            item("b", completions = emptyMap())
+        )
+        val stats = ProgressCardStats.compute(
+            items, ProgressCardStats.RangeKind.WEEK, today
+        )
+        assertEquals(ProgressCardStats.Heat.PARTIAL, stats.heatmap[4].heat)
+    }
+
+    @Test
+    fun `month heatmap is thirty days and day90 is ninety`() {
+        val month = ProgressCardStats.compute(
+            emptyList(), ProgressCardStats.RangeKind.MONTH, today
+        )
+        assertEquals(30, month.heatmap.size)
+        assertEquals(today.minusDays(29), month.heatmap.first().date)
+
+        val day90 = ProgressCardStats.compute(
+            emptyList(), ProgressCardStats.RangeKind.DAY90, today
+        )
+        assertEquals(90, day90.heatmap.size)
+        assertEquals(today.minusDays(89), day90.heatmap.first().date)
+    }
+
+    @Test
+    fun `custom heatmap is capped at ninety days`() {
+        val from = today.minusDays(200)
+        val stats = ProgressCardStats.compute(
+            emptyList(), ProgressCardStats.RangeKind.CUSTOM, today,
+            customFrom = from, customTo = today
+        )
+        assertEquals(90, stats.heatmap.size)
+        assertEquals(today, stats.heatmap.last().date)
+    }
+
+    @Test
+    fun `today heatmap is a single day`() {
+        val stats = ProgressCardStats.compute(
+            listOf(item("q")), ProgressCardStats.RangeKind.TODAY, today
+        )
+        assertEquals(1, stats.heatmap.size)
+        assertEquals(ProgressCardStats.Heat.NONE, stats.heatmap.first().heat)
     }
 
     // ── First week & score ──────────────────────────────────────────
@@ -266,6 +393,7 @@ class ProgressCardStatsTest {
     fun `score is null without any occurrences and full when everything done`() {
         val none = ProgressCardStats.compute(emptyList(), ProgressCardStats.RangeKind.WEEK, today)
         assertNull(none.score)
+        assertNull(none.breakdown)
 
         // A 12-day custom range with EVERY day completed gives a streak of 7
         // (the cap) → Completion 55 + Consistency 20 + Streak 15 + Timeliness
@@ -278,6 +406,8 @@ class ProgressCardStatsTest {
             customFrom = from, customTo = today
         )
         assertEquals(100, stats.score)
+        assertEquals(100, stats.breakdown!!.completion + stats.breakdown.consistency +
+            stats.breakdown.streak + stats.breakdown.timeliness)
     }
 
     @Test
@@ -309,7 +439,6 @@ class ProgressCardStatsTest {
             )
         val highDone = weekWith(TodoPriority.HIGH, mapOf(monday to millis()))
         val highScore = highDone.score!!
-        // Same shape but the completion went to the LOW todo instead.
         val lowDone = ProgressCardStats.compute(
             listOf(
                 item("lo", priority = TodoPriority.LOW, completions = mapOf(monday to millis())),
@@ -333,10 +462,24 @@ class ProgressCardStatsTest {
             listOf(item("q", completions = completions)),
             ProgressCardStats.RangeKind.WEEK, today
         )
-        // The incomplete figure counts Tuesday (missed) AND today (pending).
         assertEquals(2, stats.missed)
         val score = stats.score!!
         assertTrue("score should be well below 100 (was $score)", score < 100)
         assertTrue(score > 0)
     }
+
+    @Test
+    fun `timeliness is excluded from the breakdown while nothing closed`() {
+        // A todo due only today (still pending, window open): no closed items,
+        // so Timeliness is excluded and the breakdown has 0 closedItems.
+        val stats = ProgressCardStats.compute(
+            listOf(item("q", start = today)),
+            ProgressCardStats.RangeKind.TODAY, today
+        )
+        assertEquals(0, stats.score)
+        assertEquals(0, stats.breakdown!!.closedItems)
+    }
+
+    private fun ratioOf(todo: ProgressCardStats.UniqueTodo): String =
+        "${todo.done}/${todo.due}"
 }

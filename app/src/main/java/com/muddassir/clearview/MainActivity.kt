@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -38,6 +39,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.worker.AudioWorkScheduler
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
+import com.muddassir.clearview.phonelimit.PhoneLimitCoordinator
 import com.muddassir.clearview.quran.worker.QuranWorkScheduler
 import com.muddassir.clearview.todo.data.TodoNotifier
 import com.muddassir.clearview.todo.data.TodoScheduler
@@ -70,11 +72,27 @@ open class MainActivity : ComponentActivity() {
             intent.removeExtra(TodoNotifier.EXTRA_OPEN_TODO)
             todoRequestState.value = true
         }
+        // Phone Limit deep link (widget START fallback / expiry notification).
+        if (intent.getBooleanExtra(PhoneLimitCoordinator.EXTRA_OPEN_PHONE_LIMIT, false)) {
+            intent.removeExtra(PhoneLimitCoordinator.EXTRA_OPEN_PHONE_LIMIT)
+            phoneLimitRequestState.value = true
+        }
     }
 
     /** Clears the warm-start request after MainScreen has handled it. */
     fun consumeTodoScreenRequest() {
         todoRequestState.value = false
+    }
+
+    // ── Phone Limit deep link (widget fallback / expiry notification) ──
+
+    /** Warm-start request for the Phone Limit sheet (same pattern as Todo). */
+    private val phoneLimitRequestState = mutableStateOf(false)
+    val phoneLimitScreenRequested: Boolean get() = phoneLimitRequestState.value
+
+    /** Clears the warm-start request after MainScreen has handled it. */
+    fun consumePhoneLimitScreenRequest() {
+        phoneLimitRequestState.value = false
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -163,7 +181,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     // either from a cold start (the launcher intent carries EXTRA_OPEN_TODO) or
     // a warm start (onNewIntent set todoScreenRequested). Both switch to the
     // Quran tab first so the top bar that hosts the Todo screen is composed.
-    val activity = LocalContext.current as? MainActivity
+    val activity = LocalActivity.current as? MainActivity
     LaunchedEffect(Unit) {
         if (activity?.intent?.getBooleanExtra(TodoNotifier.EXTRA_OPEN_TODO, false) == true) {
             activity.intent.removeExtra(TodoNotifier.EXTRA_OPEN_TODO)
@@ -179,6 +197,31 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
             selectedTab = MainTab.QURAN
             hub.selectedTab = ContentTab.QURAN
             hub.showTodoScreen = true
+        }
+    }
+
+    // A Phone Limit deep link (widget START fallback, expiry notification tap)
+    // opens straight into the Phone Limit sheet — the "timer window", not just
+    // the Quran tab. Cold start: the launcher intent carries the flag; warm
+    // start: onNewIntent set phoneLimitRequested.
+    LaunchedEffect(Unit) {
+        if (activity?.intent?.getBooleanExtra(
+                PhoneLimitCoordinator.EXTRA_OPEN_PHONE_LIMIT, false
+            ) == true
+        ) {
+            activity.intent.removeExtra(PhoneLimitCoordinator.EXTRA_OPEN_PHONE_LIMIT)
+            selectedTab = MainTab.QURAN
+            hub.selectedTab = ContentTab.QURAN
+            hub.showPhoneLimitSheet = true
+        }
+    }
+    val phoneLimitRequested = activity?.phoneLimitScreenRequested == true
+    LaunchedEffect(phoneLimitRequested) {
+        if (phoneLimitRequested) {
+            activity?.consumePhoneLimitScreenRequest()
+            selectedTab = MainTab.QURAN
+            hub.selectedTab = ContentTab.QURAN
+            hub.showPhoneLimitSheet = true
         }
     }
 

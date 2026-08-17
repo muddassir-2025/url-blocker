@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.HttpURLConnection
 import java.util.concurrent.ConcurrentHashMap
 
@@ -77,9 +78,17 @@ object AudioDownloads {
         if (appContext != null) return
         appContext = context.applicationContext
         store = AudioDownloadStore(context)
-        refresh()
-        // One maintenance pass on startup (orphans / stale parts).
-        scope.launch { runMaintenance() }
+        scope.launch {
+            // One-time migration: legacy downloads that lived in the cache
+            // (cache/audio) move to the permanent filesDir/downloads home —
+            // BEFORE the first refresh reads the registry, so the list never
+            // briefly shows an empty library. Idempotent; a cheap no-op after
+            // the first successful run.
+            withContext(Dispatchers.IO) { store?.migrateLegacyDownloads() }
+            refresh()
+            // One maintenance pass on startup (orphans / stale parts).
+            scope.launch { runMaintenance() }
+        }
     }
 
     private fun storeOrThrow(): AudioDownloadStore =
@@ -98,6 +107,15 @@ object AudioDownloads {
 
     fun isDownloaded(videoId: String): Boolean =
         items.value.any { it.videoId == videoId }
+
+    /**
+     * Resolves the on-disk file of a finished download (`filesDir/downloads`).
+     * Falls back to a path-only resolution when the manager has not been
+     * initialized yet, so playback code can never crash on an uninitialized
+     * store — a file that does not exist just won't play.
+     */
+    fun audioFile(context: Context, item: DownloadItem): File =
+        store?.audioFile(item) ?: AudioDownloadStore(context).audioFile(item)
 
     fun itemFor(videoId: String): DownloadItem? =
         items.value.firstOrNull { it.videoId == videoId }
@@ -226,8 +244,9 @@ object AudioDownloads {
 
     /**
      * Imports audio files the user picked from the device (SAF document Uris)
-     * into the offline library — copied into the audio cache and registered
-     * so they appear in the Downloads list and play like any download.
+     * into the offline library — copied into the permanent downloads folder
+     * (filesDir/downloads) and registered so they appear in the Downloads
+     * list and play like any download.
      * [channelId]/[channelName] tag the imports with the Downloads view's
      * current channel scope (so they show up where the user added them).
      * [onResult] fires with the number actually imported, and [onImported]
@@ -280,18 +299,6 @@ object AudioDownloads {
         }
     }
 
-    fun clearAll() {
-        OfflineAudioPlayer.stop()
-        // Abort any in-flight download before sweeping the audio dir, so a
-        // running download can't keep writing into a deleted .part file.
-        active.keys.forEach { cancelRequested[it] = true }
-        val s = storeOrThrow()
-        scope.launch {
-            withContext(Dispatchers.IO) { s.clearAll() }
-            refresh()
-        }
-    }
-
     /** Records that [videoId] was listened to (drives "recently played"). */
     fun markPlayed(videoId: String) {
         val s = store ?: return
@@ -311,6 +318,14 @@ object AudioDownloads {
      * and nothing is evicted. SUSPEND so callers (the WorkManager worker)
      * actually wait for the cleanup to finish. Returns the number of things
      * removed.
+     */
+    /**
+     * Maintenance may race the startup migration ([AudioCleanupWorker] calls
+     * it right after [initialize], which launches the migration asynchronously)
+     * — that is SAFE only because the migration moves audio files before
+     * metadata.json: maintenance reads the NEW registry, so it either sees no
+     * registry yet (nothing to orphan) or a complete one whose files are all
+     * already in place. Do not reorder the migration without revisiting this.
      */
     suspend fun runMaintenance(): Int {
         val s = store ?: return 0

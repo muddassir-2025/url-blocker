@@ -229,10 +229,12 @@ fun MediaTab(
     var selectedUserPlaylistId by remember { mutableStateOf<String?>(null) }
     // The feed filter is persisted per context (survives restarts): the All
     // Feed filter when no channel is selected, each channel's own filter when
-    // one is, and each user playlist's own filter while it's open — so a
-    // playlist's Source / Type choices never leak into the All Feed (or back).
+    // one is, and each playlist's own filter while it's open (imported by URL
+    // or user-created) — so a playlist's filter choices never leak into the
+    // All Feed (or back), and the All Feed's never leak into a playlist.
     val feedFilterSlot: String? = when {
         selectedUserPlaylistId != null -> "user-playlist-" + selectedUserPlaylistId
+        selectedPlaylistId != null -> "imported-playlist-" + selectedPlaylistId
         else -> filterChannelId
     }
     var feedFilter by remember(feedFilterSlot) {
@@ -436,8 +438,12 @@ fun MediaTab(
     // User playlists keep their hand-picked ORDER — only the Source (By URL /
     // From device) and Type (Video / Audio) filters apply there, and only then
     // does the Type filter see the Source-filtered list; search still on top.
+    // Imported YouTube playlists are treated the same way: a curated list that
+    // ALWAYS shows every one of its videos in playlist order — the All Feed's
+    // date / content / watch / sort filters never apply to it (different
+    // context, different behavior).
     val displayed = remember(
-        channelVideos, feedFilter, manualIds, feedIsUserPlaylist
+        channelVideos, feedFilter, manualIds, feedIsUserPlaylist, feedIsPlaylist
     ) {
         when {
             feedIsUserPlaylist -> {
@@ -464,6 +470,9 @@ fun MediaTab(
                     }
                 }
             }
+            // Imported playlist: no filtering at all — every playlist video is
+            // shown, in the order YouTube provides it.
+            feedIsPlaylist -> channelVideos
             else -> applyFeedFilter(
                 channelVideos,
                 feedFilter,
@@ -675,6 +684,9 @@ fun MediaTab(
                 canEditPlaylist = feedIsUserPlaylist,
                 // Feed-only ⋮ menu entries stay off while inside a playlist.
                 isPlaylistContext = inPlaylistContext,
+                // An imported YouTube playlist always shows every video — no
+                // filter button or filter summary there (it's not the All Feed).
+                filterEnabled = !feedIsPlaylist,
                 searchActive = searchActive && !downloadsFilter,
                 searchQuery = searchQuery,
                 searchEnabled = !downloadsFilter,
@@ -774,12 +786,11 @@ fun MediaTab(
                 // User playlist with items hidden by the Source / Type filters.
                 feedIsUserPlaylist && userPlaylistVideos.isNotEmpty() && displayed.isEmpty() ->
                     ErrorCard("No videos match these filters.")
-                // Imported playlist: the feed filter hid every video.
+                // Imported playlist: empty. The feed filter never applies to a
+                // playlist (it's a curated list that always shows every video),
+                // so this is simply an empty playlist.
                 feedIsPlaylist && displayed.isEmpty() ->
-                    ErrorCard(
-                        if (feedFilter.isActive) "No videos match your filters."
-                        else "No videos in this playlist yet."
-                    )
+                    ErrorCard("No videos in this playlist yet.")
                 // Playlist (user or imported) with a search that matches none.
                 inPlaylistContext && isSearching && searchResults.isEmpty() ->
                     ErrorCard("No videos match your search.")
@@ -2055,6 +2066,10 @@ private fun FeedHeader(
     /** Inside a playlist the ⋮ menu drops the feed-only entries (Hidden
      *  videos, My playlists, Add playlist by URL) — those belong to the feed. */
     isPlaylistContext: Boolean = false,
+    /** When false (an imported YouTube playlist) the filter button and the
+     *  active-filter summary are hidden — a playlist always shows every one
+     *  of its videos, so there is nothing to filter (or reset). */
+    filterEnabled: Boolean = true,
     searchActive: Boolean,
     searchQuery: String,
     /** When false the search toggle is hidden (e.g. the Downloads view, which
@@ -2225,17 +2240,19 @@ private fun FeedHeader(
                     )
                 }
             }
-            IconButton(
-                onClick = onOpenFilter,
-                modifier = Modifier.size(40.dp)
-            ) {
-                Icon(
-                    Icons.Filled.FilterList,
-                    contentDescription = "Filter feed",
-                    tint = if (filter.isActive) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(22.dp)
-                )
+            if (filterEnabled) {
+                IconButton(
+                    onClick = onOpenFilter,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.FilterList,
+                        contentDescription = "Filter feed",
+                        tint = if (filter.isActive) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             }
             // Exit the playlist context (imported or user playlist).
             if (onClose != null) {
@@ -2284,7 +2301,7 @@ private fun FeedHeader(
                 )
             }
         }
-        if (filter.isActive || summaryOverride != null) {
+        if (filterEnabled && (filter.isActive || summaryOverride != null)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically

@@ -1,6 +1,5 @@
 package com.muddassir.clearview.media.ui
 
-import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -9,6 +8,7 @@ import android.net.Uri
 import android.text.format.DateUtils
 import android.util.Log
 import android.widget.Toast
+import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
@@ -146,7 +146,7 @@ fun VideoPlayerScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val activity = context as? Activity
+    val activity = LocalActivity.current
 
     // All player state is keyed on the current videoId so it resets
     // SYNCHRONOUSLY the moment the source changes (opening a video, swiping

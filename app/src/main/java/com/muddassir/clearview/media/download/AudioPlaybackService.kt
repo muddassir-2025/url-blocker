@@ -68,7 +68,7 @@ class AudioPlaybackService : Service() {
 
         /** Starts background playback of the downloaded audio [item]. */
         fun play(context: Context, item: DownloadItem) {
-            val file = File(context.cacheDir, "audio/${item.fileName}")
+            val file = AudioDownloads.audioFile(context, item)
             if (!file.exists()) return
             val intent = Intent(context, AudioPlaybackService::class.java).apply {
                 action = ACTION_PLAY

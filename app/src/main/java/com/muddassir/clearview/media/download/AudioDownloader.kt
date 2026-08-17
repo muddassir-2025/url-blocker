@@ -18,20 +18,24 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * Downloads a video's audio entirely ON-DEVICE, straight into `cache/audio/`.
+ * Downloads a video's audio entirely ON-DEVICE, straight into the app's
+ * permanent downloads folder (`filesDir/downloads/`).
  *
  * 1. [OnDeviceStreamExtractor] resolves the direct audio-stream URL via
  *    NewPipeExtractor's innertube client — from the phone's own residential /
  *    mobile IP, so YouTube trusts the request (no server involved at all).
- * 2. The bytes are streamed from that URL, saved as `<videoId>.<ext>` via a
- *    `<videoId>.part` file that is renamed on success, so an interrupted
- *    download never looks like a complete one.
+ * 2. The bytes are streamed from that URL through a `<videoId>.part` file in
+ *    the CACHE (temporary storage, so interrupted downloads never occupy the
+ *    permanent folder) that is renamed into the downloads folder on success —
+ *    an interrupted download never looks like a complete one.
  *
  * FAST PATH: when the CDN answers with `Accept-Ranges`-style partial content
  * (YouTube's media servers do), the file is downloaded in up to
  * [MAX_PARALLEL_CHUNKS] PARALLEL HTTP range requests, one per segment, which
  * typically finishes several times faster than a single stream. Servers that
  * don't support ranges fall back to the single-stream GET automatically.
+ * The parallel path kicks in from a small size on, so SHORT videos (whose
+ * audio files are small) get the same fast download as long ones.
  *
  * Audio-only streams — no FFmpeg/merge anywhere. Transient network failures
  * are retried once; extraction failures surface the specific reason (e.g.
@@ -47,10 +51,19 @@ object AudioDownloader {
     private const val USER_AGENT = "Mozilla/5.0 (Linux; Android) ClearView/1.4"
 
     // Parallel range-download settings: at most MAX_PARALLEL_CHUNKS
-    // simultaneous connections. Files below MIN_CHUNK_BYTES stay on a single
-    // connection — the parallel overhead isn't worth it for small files.
-    private const val MAX_PARALLEL_CHUNKS = 3
-    private const val MIN_CHUNK_BYTES = 4L * 1024 * 1024
+    // simultaneous connections. Files under MIN_PARALLEL_BYTES stay on a single
+    // connection — only sub-minute clips (under ~1 MB of audio) are that small,
+    // and they finish almost instantly either way. Everything ≥ MIN_PARALLEL_BYTES
+    // uses the parallel fast path, so SHORT videos download as quickly as long
+    // ones. Chunk count scales with size so every chunk stays large enough for
+    // parallel connections to pay off (a 3-way split of a 1.5 MB file would lose
+    // the transfer to connection setup): 2 chunks 1–3 MB, 3 chunks 3–10 MB, and
+    // the full [MAX_PARALLEL_CHUNKS] fan-out for very large files (≥ 10 MB) to
+    // push their downloads even faster.
+    private const val MAX_PARALLEL_CHUNKS = 4
+    private const val MIN_PARALLEL_BYTES = 1024L * 1024
+    private const val FULL_PARALLEL_BYTES = 3L * 1024 * 1024
+    private const val VERY_LARGE_BYTES = 10L * 1024 * 1024
 
     /** Report progress at most every this many new bytes (UI throttle). */
     private const val PROGRESS_REPORT_BYTES = 512 * 1024
@@ -86,7 +99,8 @@ object AudioDownloader {
         /** Called with the total size in bytes before the transfer starts. */
         onSizeKnown: (Long) -> Unit = {}
     ): Result {
-        val audioDir = AudioDownloadStore(context).audioDir
+        val store = AudioDownloadStore(context)
+        val audioDir = store.audioDir
         var source: OnDeviceStreamExtractor.AudioSource? = null
         var lastError: DownloadException? = null
 
@@ -124,7 +138,7 @@ object AudioDownloader {
 
             // 2) Stream the bytes (parallel ranges when supported, else one
             //    plain GET). The .part file is cleaned up on any failure.
-            val part = File(audioDir, "$videoId.part")
+            val part = store.partFile(videoId)
             val finalFile = File(audioDir, "$videoId.${source!!.extension}")
             try {
                 return streamFile(
@@ -479,15 +493,17 @@ object AudioDownloader {
     }
 
     /**
-     * Splits [total] bytes into the parallel chunk ranges: 1 chunk for small
-     * files, up to [MAX_PARALLEL_CHUNKS] equal chunks for large ones. Pure
+     * Splits [total] bytes into the parallel chunk ranges: 1 chunk for tiny
+     * files (under ~1 MB), 2 chunks up to 3 MB, 3 chunks up to 10 MB, then the
+     * full [MAX_PARALLEL_CHUNKS] fan-out for very large files. Pure
      * (unit-testable). Ranges are inclusive byte ranges (HTTP semantics).
      */
     internal fun chunkRanges(total: Long): List<LongRange> {
         if (total <= 0L) return emptyList()
         val count = when {
-            total >= 3 * MIN_CHUNK_BYTES -> MAX_PARALLEL_CHUNKS
-            total >= 2 * MIN_CHUNK_BYTES -> 2
+            total >= VERY_LARGE_BYTES -> MAX_PARALLEL_CHUNKS
+            total >= FULL_PARALLEL_BYTES -> 3
+            total >= MIN_PARALLEL_BYTES -> 2
             else -> 1
         }
         if (count <= 1) return listOf(0L..(total - 1).coerceAtLeast(0L))

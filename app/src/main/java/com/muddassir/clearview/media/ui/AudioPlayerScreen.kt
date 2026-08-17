@@ -82,7 +82,7 @@ fun AudioPlayerScreen(
     // foreground [AudioPlaybackService], so it keeps playing when the app is
     // backgrounded or the screen is off (media notification attached).
     LaunchedEffect(item.videoId) {
-        val file = File(context.cacheDir, "audio/${item.fileName}")
+        val file = AudioDownloads.audioFile(context, item)
         if (file.exists()) {
             OfflineAudioPlayer.play(context, item)
             AudioDownloads.markPlayed(item.videoId)

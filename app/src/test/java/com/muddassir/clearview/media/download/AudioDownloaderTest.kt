@@ -5,36 +5,63 @@ import org.junit.Test
 
 class AudioDownloaderTest {
 
-    private val MB = 1024L * 1024
+    // The parallel fast path thresholds in AudioDownloader: 2 chunks from 1 MB
+    // (MIN_PARALLEL_BYTES), 3 chunks from 3 MB (FULL_PARALLEL_BYTES), and the
+    // full 4-way fan-out from 10 MB (VERY_LARGE_BYTES) — so even short videos'
+    // small audio files parallelize, and very large files go even faster.
+    private val MIN = 1024L * 1024
+    private val FULL = 3L * 1024 * 1024
+    private val VERY_LARGE = 10L * 1024 * 1024
 
     @Test
-    fun `small files stay on a single chunk`() {
-        assertEquals(listOf(0L..(4L * MB - 1)), AudioDownloader.chunkRanges(4L * MB))
+    fun `tiny files stay on a single chunk`() {
+        assertEquals(listOf(0L..(MIN - 2)), AudioDownloader.chunkRanges(MIN - 1))
         assertEquals(listOf(0L..99L), AudioDownloader.chunkRanges(100))
     }
 
     @Test
-    fun `medium files split into two equal chunks`() {
-        // 8 MB → two 4 MB chunks; 10 MB → two 5 MB chunks.
+    fun `small files split into two equal chunks`() {
+        // 1 MB → two 512 KB chunks; 2 MB → two 1 MB chunks.
         assertEquals(
-            listOf(0L..(4L * MB - 1), (4L * MB)..(8L * MB - 1)),
-            AudioDownloader.chunkRanges(8L * MB)
+            listOf(0L..(MIN / 2 - 1), (MIN / 2)..(MIN - 1)),
+            AudioDownloader.chunkRanges(MIN)
         )
         assertEquals(
-            listOf(0L..(5L * MB - 1), (5L * MB)..(10L * MB - 1)),
-            AudioDownloader.chunkRanges(10L * MB)
+            listOf(0L..(MIN - 1), MIN..(2L * MIN - 1)),
+            AudioDownloader.chunkRanges(2L * MIN)
         )
     }
 
     @Test
     fun `large files split into three chunks covering the whole file`() {
-        val total = 12L * MB
+        val total = FULL
         val ranges = AudioDownloader.chunkRanges(total)
         assertEquals(3, ranges.size)
         // Contiguous, no overlap, no gaps, last chunk ends at total-1.
         assertEquals(0L, ranges.first().first)
         ranges.zipWithNext().forEach { (a, b) -> assertEquals(a.last + 1, b.first) }
         assertEquals(total - 1, ranges.last().last)
+    }
+
+    @Test
+    fun `very large files split into four chunks covering the whole file`() {
+        val total = VERY_LARGE
+        val ranges = AudioDownloader.chunkRanges(total)
+        assertEquals(4, ranges.size)
+        // Contiguous, no overlap, no gaps, last chunk ends at total-1.
+        assertEquals(0L, ranges.first().first)
+        ranges.zipWithNext().forEach { (a, b) -> assertEquals(a.last + 1, b.first) }
+        assertEquals(total - 1, ranges.last().last)
+    }
+
+    @Test
+    fun `files just under ten MB stay at three chunks`() {
+        // 10 MB - 1 is still below the very-large tier → 3 chunks.
+        val ranges = AudioDownloader.chunkRanges(VERY_LARGE - 1)
+        assertEquals(3, ranges.size)
+        assertEquals(0L, ranges.first().first)
+        ranges.zipWithNext().forEach { (a, b) -> assertEquals(a.last + 1, b.first) }
+        assertEquals(VERY_LARGE - 2, ranges.last().last)
     }
 
     @Test

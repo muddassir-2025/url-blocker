@@ -1,9 +1,9 @@
 package com.muddassir.clearview.quran.ui
 
-import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -60,6 +60,7 @@ class QuranVerseActivity : ComponentActivity() {
 @Composable
 private fun HubScreen() {
     val context = LocalContext.current
+    val activity = LocalActivity.current
     val landscape = isLandscape()
     val hub = rememberContentHubState()
 
@@ -93,7 +94,7 @@ private fun HubScreen() {
             if (!isFullscreen) {
                 ContentHubTopBar(
                     state = hub,
-                    onBack = { (context as? Activity)?.finish() }
+                    onBack = { activity?.finish() }
                 )
             }
         }

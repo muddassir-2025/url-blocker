@@ -39,10 +39,11 @@ class FeedFiltersTest {
     )
 
     @Test
-    fun `default filter returns everything newest first`() {
+    fun `default filter returns the last 3 days newest first`() {
         val result = applyFeedFilter(videos(), FeedFilter(), now)
+        // The default date preset is Last 3 days — older uploads are excluded.
         assertEquals(
-            listOf("today", "yesterday", "three", "eight", "forty"),
+            listOf("today", "yesterday", "three"),
             result.map { it.videoId }
         )
         assertFalse(FeedFilter().isActive)
@@ -109,8 +110,10 @@ class FeedFiltersTest {
             FeedFilter(sort = FeedSortOrder.OLDEST_FIRST),
             now
         )
+        // The default date preset (Last 3 days) still applies — the order
+        // flips within the kept window.
         assertEquals(
-            listOf("forty", "eight", "three", "yesterday", "today"),
+            listOf("three", "yesterday", "today"),
             result.map { it.videoId }
         )
     }
@@ -233,6 +236,22 @@ class FeedFiltersTest {
             progressOf = { if (it == "today-watched" || it == "old-watched") 1f else 0f }
         )
         assertEquals(listOf("today-watched"), result.map { it.videoId })
+    }
+
+    @Test
+    fun `persisted ALL_TIME date is preserved, not migrated`() {
+        // "All time" is still a first-class option in the filter sheet, so a
+        // persisted ALL_TIME is as likely to be the user's explicit choice as
+        // an old default. Decoding must NOT rewrite it (the old migration
+        // silently discarded the user's "All time" pick on every restart).
+        // Fresh installs get the Last 3 days default via the constructor, not
+        // by mangling stored user choices.
+        val oldJson = "{\"date\":\"ALL_TIME\",\"content\":\"ALL\"," +
+            "\"sort\":\"NEWEST_FIRST\",\"watchStatus\":\"UNWATCHED\"}"
+        val decoded = decodeFeedFilter(oldJson)
+        assertEquals(FeedDateFilter.ALL_TIME, decoded?.date)
+        // And the preserved filter round-trips stably.
+        assertEquals(decoded, decodeFeedFilter(encodeFeedFilter(decoded!!)))
     }
 
     @Test
@@ -360,7 +379,8 @@ class FeedFiltersTest {
             FeedFilter(source = FeedSourceFilter.BY_URL, watchStatus = FeedWatchStatus.ALL),
             resultCount = 2
         )
-        assertEquals("All time · By URL · 2 videos", summary)
+        // The default date preset is Last 3 days.
+        assertEquals("Last 3 days · By URL · 2 videos", summary)
     }
 
     @Test

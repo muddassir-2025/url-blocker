@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.widget.Toast
+import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.Icons
@@ -54,6 +55,7 @@ import com.muddassir.clearview.media.ui.AudioPlayerScreen
 import com.muddassir.clearview.media.ui.LiveTab
 import com.muddassir.clearview.media.ui.MediaTab
 import com.muddassir.clearview.media.ui.VideoPlayerScreen
+import com.muddassir.clearview.phonelimit.ui.PhoneLimitSheet
 import com.muddassir.clearview.media.worker.MediaNotifier
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
 import com.muddassir.clearview.quran.data.IslamicDateStore
@@ -133,6 +135,8 @@ class ContentHubState(appContext: Context) {
     var showDhikrCounter by mutableStateOf(false)
     // Todo screen opened from the settings sheet's Todo card.
     var showTodoScreen by mutableStateOf(false)
+    // Phone Limit sheet opened from the settings sheet's "Set Phone Limit" card.
+    var showPhoneLimitSheet by mutableStateOf(false)
 
     // ── Islamic date (Umm al-Qura) on the Quran tab ────────────────
     // The user's ±1 day adjustment (0 = the default calculated date),
@@ -802,6 +806,11 @@ fun ContentHubTopBar(
             onDismiss = { state.showIslamicDateSheet = false }
         )
     }
+    // Phone Limit: countdown that locks the phone when it expires. Opened from
+    // the settings sheet's "Set Phone Limit" card (Quran tab ⋮ menu).
+    if (state.showPhoneLimitSheet) {
+        PhoneLimitSheet(onDismiss = { state.showPhoneLimitSheet = false })
+    }
 }
 
 // ── Constants shared with QuranTab's interval picker ──────────────
@@ -844,8 +853,7 @@ fun contentHubNavItems(): List<ContentHubNavItem> = listOf(
  */
 @Composable
 fun ApplyImmersiveIfNeeded(isFullscreen: Boolean) {
-    val context = LocalContext.current
-    val activity = context as? Activity
+    val activity = LocalActivity.current
     LaunchedEffect(isFullscreen) {
         if (activity != null) {
             val window = activity.window

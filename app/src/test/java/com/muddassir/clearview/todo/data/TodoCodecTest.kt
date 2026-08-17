@@ -586,4 +586,41 @@ class TodoCodecTest {
         ))
         assertNull(TodoCodec.reminderLabel(item("a", start = TODAY)))
     }
+
+    @Test
+    fun `timeLabel never throws on out-of-range minutes`() {
+        // The reported crash: the productive window can be 22:00–24:00, and
+        // 24 * 60 = 1440 minutes used to throw "Invalid value for HourOfDay:
+        // 24". 24:00 is midnight — it wraps to 12:00 AM instead of crashing.
+        assertEquals("12:00 AM", TodoCodec.timeLabel(1440))
+        assertEquals("12:00 AM", TodoCodec.timeLabel(0))
+        assertEquals("11:59 PM", TodoCodec.timeLabel(1439))
+        // Corrupt values wrap the same way (java.time mod semantics).
+        assertEquals("11:59 PM", TodoCodec.timeLabel(-1))
+        assertEquals("12:00 AM", TodoCodec.timeLabel(2880))
+        // The window end flows through scheduledTimeLabel too.
+        val range = item("a", start = TODAY, timeStart = 22 * 60, timeEnd = 1440)
+        assertEquals("10:00 PM – 12:00 AM", TodoCodec.scheduledTimeLabel(range))
+        assertNull(TodoCodec.scheduledTimeLabel(item("a", start = TODAY)))
+    }
+
+    @Test
+    fun `decode drops out-of-range times instead of keeping them`() {
+        // Corrupt / legacy data with an invalid minutes value must never
+        // survive a load (it would crash LocalTime.of at render time).
+        val corrupt = item(
+            id = "bad",
+            start = TODAY,
+            time = 1440,
+            timeStart = -30,
+            timeEnd = 25 * 60,
+            reminder = ReminderConfig(listOf(1440, 9 * 60, 99 * 60), repeat = true)
+        )
+        val decoded = TodoCodec.decode(TodoCodec.encode(listOf(corrupt))).first()
+        assertNull(decoded.timeMinutes)
+        assertNull(decoded.timeStartMinutes)
+        assertNull(decoded.timeEndMinutes)
+        // Reminder times were already filtered to 0..1439; 1440 drops out.
+        assertEquals(listOf(9 * 60), decoded.reminder!!.timesMinutes)
+    }
 }

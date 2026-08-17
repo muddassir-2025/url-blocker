@@ -14,22 +14,8 @@ class BlockRepository(context: Context) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    /**
-     * Caches for the expensive derived sets (keywords + domains). The matching
-     * hot path — every accessibility event and the 500ms poll — reads these
-     * sets many times per scan. Without caching, each access rebuilt them from
-     * scratch: flattening ~700 built-in keywords into a new set, re-reading
-     * SharedPreferences, and re-normalizing every stored domain (Uri.parse +
-     * regex) on every single call. The caches are invalidated only when the
-     * underlying prefs actually change (Strict Mode toggle, user keyword /
-     * domain edits), so the hot path reuses stable immutable sets. Volatile
-     * because the service reads them from several threads.
-     */
-    @Volatile private var builtInKeywordsCache: Set<String>? = null
-    @Volatile private var websiteKeywordsCache: Set<String>? = null
-    @Volatile private var userKeywordsCache: Set<String>? = null
-    @Volatile private var blockedDomainsCache: Set<String>? = null
-    @Volatile private var allBlockedDomainsCache: Set<String>? = null
+    // The derived-set caches live in the companion object (process-wide) —
+    // see BlockRepository.Companion for why.
 
     /** Whether the Strict Mode keyword preset is enabled. */
     var isStrictMode: Boolean
@@ -214,6 +200,34 @@ class BlockRepository(context: Context) {
     // ── SharedPreferences keys ─────────────────────────────────────
 
     companion object {
+
+        /**
+         * Process-wide caches for the expensive derived sets (keywords +
+         * domains). The matching hot path — every accessibility event and the
+         * 500ms poll — reads these sets many times per scan. Without caching,
+         * each access rebuilt them from scratch: flattening ~700 built-in
+         * keywords into a new set, re-reading SharedPreferences, and
+         * re-normalizing every stored domain (Uri.parse + regex) on every
+         * single call.
+         *
+         * These MUST be static (shared across every [BlockRepository]
+         * instance), not per-instance: the app (MainViewModel) and the
+         * long-lived accessibility service (UrlBlockerService) each construct
+         * their own instance, and only the instance that wrote a change
+         * invalidated its own cache. With per-instance caches the service kept
+         * its initially-read (often empty) user keyword / domain set forever —
+         * keywords and websites added later in the app silently never blocked.
+         * SharedPreferences is process-wide, so a process-wide cache is the
+         * correct scope. Invalidated only when the underlying prefs actually
+         * change (Strict Mode toggle, user keyword / domain edits), so the hot
+         * path reuses stable immutable sets. Volatile because the service
+         * reads them from several threads.
+         */
+        @Volatile private var builtInKeywordsCache: Set<String>? = null
+        @Volatile private var websiteKeywordsCache: Set<String>? = null
+        @Volatile private var userKeywordsCache: Set<String>? = null
+        @Volatile private var blockedDomainsCache: Set<String>? = null
+        @Volatile private var allBlockedDomainsCache: Set<String>? = null
 
         private const val PREFS_NAME = "url_blocker_prefs"
         private const val KEY_USER_KEYWORDS = "user_keywords"
