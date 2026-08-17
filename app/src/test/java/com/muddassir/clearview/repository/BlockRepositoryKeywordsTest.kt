@@ -157,27 +157,52 @@ class BlockRepositoryKeywordsTest {
 
     @Test
     fun `combination halves are wired correctly`() {
-        // Generic discovery halves (female gender terms live ONLY here).
-        listOf("woman", "women", "girl", "girls", "female", "females",
-            "lady", "ladies", "beach", "pool", "poolside").forEach {
+        // Generic discovery halves (gender/person terms live ONLY here).
+        listOf(
+            "woman", "women", "girl", "girls", "female", "females",
+            "lady", "ladies", "beach", "pool", "poolside",
+            // Women / female / girl / transgender patterns.
+            "transgender", "trans", "male", "males", "man", "men",
+            "boy", "boys", "guy", "guys", "teen", "teens",
+            // Female relation terms.
+            "mother", "mom", "moms", "stepmom", "stepmother", "wife", "wives",
+            "sister", "sisters", "stepsister", "daughter", "daughters",
+            "stepdaughter", "aunt", "aunts", "niece", "nieces",
+            "girlfriend", "girlfriends", "bride", "brides", "grandmother",
+            "grandma", "grandmas", "granddaughter", "granddaughters",
+            "schoolgirl", "schoolgirls"
+        ).forEach {
             assertTrue("'$it' must be a generic combination half", it in comboGeneric)
         }
-        // Female gender terms must NOT be standalone strict keywords.
-        listOf("woman", "women", "girl", "girls", "female", "females",
-            "lady", "ladies").forEach {
+        // Gender/person terms must NOT be standalone strict keywords.
+        listOf(
+            "woman", "women", "girl", "girls", "female", "females",
+            "lady", "ladies", "transgender", "trans", "male", "males",
+            "man", "men", "boy", "boys", "guy", "guys", "teen", "teens",
+            "mother", "mom", "wife", "sister", "daughter", "girlfriend"
+        ).forEach {
             assertFalse("'$it' must not be in strict mode (context-combination only)", it in strictMode)
         }
-        // Risky halves.
-        listOf("bikini", "bikinis", "swimsuit", "swimsuits", "swimwear", "beachwear",
+        // Risky halves — hot, beach and EVERY strict-mode word combine here.
+        listOf(
+            "bikini", "bikinis", "swimsuit", "swimsuits", "swimwear", "beachwear",
             "lingerie", "underwear", "panties", "thong", "bra", "cleavage",
             "skimpy", "revealing", "pics", "pictures", "photos", "images",
-            "wallpaper").forEach {
+            "wallpaper",
+            "hot", "beach", "swimming", "seduction", "sensual",
+            "hottie", "hotties", "breastfeeding", "breast feeding"
+        ).forEach {
             assertTrue("'$it' must be a risky combination half", it in comboRisky)
         }
         // Always-block words must not be duplicated as risky halves.
         assertFalse(comboRisky.contains("nude"))
         assertFalse(comboRisky.contains("sexy"))
         assertFalse(comboRisky.contains("topless"))
+        // "beach" is deliberately BOTH a generic and a risky half —
+        // KeywordMatcher.checkCombinationTerms guards against self-combining
+        // it (a bare "beach" must stay innocent), so its presence in both
+        // lists is by design.
+        assertTrue("'beach' must be a generic half too", "beach" in comboGeneric)
     }
 
     // ── Fully innocent / over-broad words: not blocked anywhere ────

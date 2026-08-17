@@ -1285,21 +1285,72 @@ class BlockRepository(context: Context) {
 
         /** Generic discovery halves: innocent alone, sexualized in combination. */
         val COMBINATION_GENERIC_TERMS: Set<String> = linkedSetOf(
+            // Locations / settings (innocent alone).
             "beach",
+            "pool",
+            "poolside",
+            // Gender / person patterns (women, female, girl, transgender, ...).
+            // NEVER blocked standalone — they only block combined with a risky
+            // half below ("women bikini", "girl hot", "transgender beach").
             "female",
             "females",
             "girl",
             "girls",
             "ladies",
             "lady",
-            "pool",
-            "poolside",
             "woman",
             "women",
+            "transgender",
+            "trans",
+            "male",
+            "males",
+            "man",
+            "men",
+            "boy",
+            "boys",
+            "guy",
+            "guys",
+            "teen",
+            "teens",
+            // Female relation terms (innocent alone; combined with a risky half
+            // they flag clearly adult-intent discovery, e.g. "hot mom").
+            "mother",
+            "mom",
+            "moms",
+            "stepmom",
+            "stepmother",
+            "wife",
+            "wives",
+            "sister",
+            "sisters",
+            "stepsister",
+            "daughter",
+            "daughters",
+            "stepdaughter",
+            "aunt",
+            "aunts",
+            "niece",
+            "nieces",
+            "girlfriend",
+            "girlfriends",
+            "bride",
+            "brides",
+            "grandmother",
+            "grandma",
+            "grandmas",
+            "granddaughter",
+            "granddaughters",
+            "schoolgirl",
+            "schoolgirls",
         )
 
         /** Risky halves: the term that sexualizes a generic discovery half. */
         val COMBINATION_RISKY_TERMS: Set<String> = linkedSetOf(
+            // Hot / beach-adjacent discovery terms (innocent alone; "beach" is
+            // ALSO a generic half — see KeywordMatcher.checkCombinationTerms
+            // for the self-combination guard).
+            "hot",
+            "beach",
             "beachwear",
             "bikini",
             "bikinis",
@@ -1333,6 +1384,16 @@ class BlockRepository(context: Context) {
             "underwear",
             "voluptuous",
             "wallpaper",
+            // Every Strict-Mode discovery term is a risky half too, so gender
+            // words combine with them in NORMAL mode (in Strict Mode the terms
+            // already block standalone).
+            "swimming",
+            "seduction",
+            "sensual",
+            "hottie",
+            "hotties",
+            "breastfeeding",
+            "breast feeding",
         )
 
         /**

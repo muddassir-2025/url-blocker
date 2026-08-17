@@ -16,6 +16,7 @@ import com.muddassir.clearview.matching.MatchResult
 import com.muddassir.clearview.matching.MatchType
 import com.muddassir.clearview.matching.MatchSource
 import com.muddassir.clearview.repository.BlockRepository
+import com.muddassir.clearview.youtubetest.LongVideoBlockCoordinator
 import com.muddassir.clearview.youtubetest.YouTubeChromeTestCoordinator
 import com.muddassir.clearview.youtubetest.YoutubeTestKeywordRepository
 import kotlinx.coroutines.*
@@ -103,6 +104,15 @@ class UrlBlockerService : AccessibilityService() {
      * the overlay. See [YouTubeChromeTestCoordinator].
      */
     private var youtubeChromeTest: YouTubeChromeTestCoordinator? = null
+
+    /**
+     * Long-video (watch-page) blocker — fully isolated from the Shorts
+     * coordinator above. Owns Chrome YouTube /watch pages while the
+     * experiment toggle is on: pauses blocked videos once, raises the dark
+     * full-screen overlay with "Go to YouTube Home", and never touches
+     * Shorts logic. See [LongVideoBlockCoordinator].
+     */
+    private var longVideoBlock: LongVideoBlockCoordinator? = null
 
     // Per-event/per-poll debug logging is EXPENSIVE (string formatting + logcat
     // I/O on the accessibility/main thread). Release builds keep the detection
@@ -199,6 +209,7 @@ class UrlBlockerService : AccessibilityService() {
         // matcher (the normal KeywordMatcher is deliberately not used).
         val testKeywordRepository = YoutubeTestKeywordRepository(applicationContext)
         youtubeChromeTest = YouTubeChromeTestCoordinator(this, repository, testKeywordRepository)
+        longVideoBlock = LongVideoBlockCoordinator(this, repository, keywordMatcher)
         Log.i(TAG, "UrlBlockerService created")
     }
 
@@ -213,12 +224,14 @@ class UrlBlockerService : AccessibilityService() {
         stopPolling()
         stopGooglePolling()
         youtubeChromeTest?.stop()
+        longVideoBlock?.stop()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
         youtubeChromeTest?.stop()
+        longVideoBlock?.stop()
         instance = null
         Log.i(TAG, "UrlBlockerService destroyed")
     }
@@ -233,6 +246,9 @@ class UrlBlockerService : AccessibilityService() {
         // The full event is passed so the coordinator can detect player clicks
         // (VIEW_CLICKED) for immediate re-enforcement of a blocked Short.
         youtubeChromeTest?.onAccessibilityEvent(event)
+
+        // Long-video blocker hook (isolated from Shorts). Also cheap.
+        longVideoBlock?.onAccessibilityEvent(event)
 
         // Debug: log every event for target packages so detection issues (why an
         // incognito window was / wasn't caught) can be diagnosed from logcat.
@@ -378,6 +394,9 @@ class UrlBlockerService : AccessibilityService() {
             // Stage 1 experiment hook: track the foreground package so the
             // coordinator only runs while Chrome is the active app.
             youtubeChromeTest?.onForegroundPackageChanged(newPackage)
+
+            // Long-video blocker hook (isolated from Shorts).
+            longVideoBlock?.onForegroundPackageChanged(newPackage)
 
             if (newPackage == packageName) {
                 // We reached the block overlay
@@ -922,16 +941,41 @@ class UrlBlockerService : AccessibilityService() {
                                     return
                                 }
 
-                                // ── ALL BLOCKS ARE FULL BLOCKS ──
-                                // Every match — whether from a URL, search query,
-                                // video title, or feed card — triggers the full
-                                // block overlay (BlockOverlayActivity). Feed cards
-                                // used to get a floating badge marker, but that
-                                // behavior has been removed: every blocked keyword
-                                // triggers a full block screen.
-                                Log.w(TAG, "BLOCK DETECTED in $packageName! Matched: ${result.matchedItem} (${result.matchType}) source=${result.matchSource}")
-                                lastBlockedResult = result
-                                initiateBlockingSequence(rootNode, packageName)
+                                // ── LONG-VIDEO EXPERIMENT: DELEGATE WATCH-PAGE TITLE BLOCKS ──
+                                // While the YouTube-in-Chrome experiment is on, the
+                                // coordinator owns LONG-video blocking:
+                                //  - a TITLE match on a /watch page is delegated to
+                                //    LongVideoBlockCoordinator (pause + dark overlay +
+                                //    "Go to YouTube Home") — the legacy full-block overlay
+                                //    must not fire for the same video or the two flows
+                                //    would fight over it;
+                                //  - a FEED pre-check (matchSource FEED) is Phase 2 and
+                                //    deliberately deferred — it must not pop the legacy
+                                //    full-block overlay on the feed (e.g. right after
+                                //    "Go to YouTube Home" lands on the home feed).
+                                // Domain rules, incognito and search-query blocks are
+                                // untouched.
+                                val onYouTubeInChrome = ContentExtractor.isYouTubeDomain(snapshot.url)
+                                val delegateLongVideoBlock = longVideoBlock != null &&
+                                    repository.youTubeChromeTest &&
+                                    onYouTubeInChrome &&
+                                    ((result.matchSource == MatchSource.TITLE &&
+                                        snapshot.url?.contains("/watch") == true) ||
+                                        result.matchSource == MatchSource.FEED)
+                                if (delegateLongVideoBlock) {
+                                    Log.i(TAG, "LONG_VIDEO_LEGACY_BLOCK_SUPPRESSED url=${snapshot.url} source=${result.matchSource} keyword=${result.matchedItem} — coordinator owns long-video blocking; feed pre-checks deferred")
+                                } else {
+                                    // ── ALL BLOCKS ARE FULL BLOCKS ──
+                                    // Every match — whether from a URL, search query,
+                                    // video title, or feed card — triggers the full
+                                    // block overlay (BlockOverlayActivity). Feed cards
+                                    // used to get a floating badge marker, but that
+                                    // behavior has been removed: every blocked keyword
+                                    // triggers a full block screen.
+                                    Log.w(TAG, "BLOCK DETECTED in $packageName! Matched: ${result.matchedItem} (${result.matchType}) source=${result.matchSource}")
+                                    lastBlockedResult = result
+                                    initiateBlockingSequence(rootNode, packageName)
+                                }
                             }
                         }
                     }

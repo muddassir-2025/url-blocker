@@ -179,7 +179,13 @@ class KeywordMatcher(
         // still matches (the space after "breast" is a boundary).
         internal val boundaryProtectedKeywords: Set<String> = setOf(
             "breast",
-            "breasts"
+            "breasts",
+            // "trans" is a gender/transgender generic combo half; as a bare
+            // 5-letter word it would otherwise substring-match inside innocent
+            // words (transmission, transport, transparent, transaction). A
+            // word boundary keeps "trans girl" a hit while "hot transmission"
+            // can never false-positive.
+            "trans"
         )
 
         // ── Weighted risk-score model for pre-emptive feed blocking ──
@@ -298,6 +304,36 @@ class KeywordMatcher(
     }
 
     /**
+     * Content-only check for LONG (non-Short) YouTube videos watched inside
+     * Chrome. Matches the extracted video title and description/text against
+     * the SAME active rules the YouTube-app path uses (active built-in +
+     * user keywords, plus the context-combination tier) — the authoritative
+     * check the long-video coordinator runs on the actual watch page after
+     * the user opens the video.
+     *
+     * URL/query are deliberately NOT consulted: the long-video flow decides
+     * on real video content only (a blocked DOMAIN rule is still applied by
+     * the normal Chrome pipeline, unaffected by this method). Returns
+     * Blocked with MatchSource.TITLE / .DESCRIPTION naming the exact keyword,
+     * or Allowed.
+     */
+    fun checkLongVideoContent(title: String?, description: String?): MatchResult {
+        if (!title.isNullOrBlank()) {
+            val titleRes = checkString(title, isUrl = false)
+            if (titleRes is MatchResult.Blocked) {
+                return titleRes.copy(matchSource = MatchSource.TITLE)
+            }
+        }
+        if (!description.isNullOrBlank()) {
+            val descRes = checkString(description, isUrl = false)
+            if (descRes is MatchResult.Blocked) {
+                return descRes.copy(matchSource = MatchSource.DESCRIPTION)
+            }
+        }
+        return MatchResult.Allowed
+    }
+
+    /**
      * Chrome-specific check: URL is the ONLY source of truth.
      * Domain matching is already handled inside checkString(isUrl=true).
      *
@@ -374,14 +410,19 @@ class KeywordMatcher(
             }
         }
 
-        // Google Images/Videos search inside Chrome: mobile Chrome's address-bar
-        // URL often OMITS the q= parameter (e.g. Images URL is just
-        // "...&udm=2&fbs=..." with no query text). Recover the query from the
-        // URL's q= param when present, else from the structured Google-search
-        // window title ("... - Google Search") — a Google signal, not arbitrary
-        // page text. This runs ONLY on positively-identified Images/Videos tab
-        // searches, so ordinary websites are unaffected.
-        if (isImageVideoTab) {
+        // Google search inside Chrome: block the USER'S SEARCH QUERY on EVERY
+        // tab (All, Images, Videos, News, Shopping, ...) — the keyword + pattern
+        // (context-combination) blocking must work everywhere, not only on
+        // Images/Videos. Mobile Chrome's address-bar URL often OMITS the q=
+        // parameter (e.g. Images URL is just "...&udm=2&fbs=..." with no query
+        // text), so the query is recovered from the URL's q= param when present,
+        // else from the structured Google-search window title ("... - Google
+        // Search") — a Google signal, not arbitrary page text. Gated on
+        // positively identifying a Google SEARCH page, so ordinary websites are
+        // unaffected.
+        val isGoogleSearchPage = snapshot.url?.contains("google.com/search") == true ||
+            snapshot.title?.let(GoogleSignalParser::queryFromWindowTitle) != null
+        if (isGoogleSearchPage) {
             val chromeQuery = extractGoogleQuery(snapshot)
                 ?: snapshot.title?.let(GoogleSignalParser::queryFromWindowTitle)
             if (!chromeQuery.isNullOrBlank()) {
@@ -895,11 +936,20 @@ class KeywordMatcher(
         for (term in generic) {
             if (containsKeyword(lowercaseText, term, protectShortWords = true)) {
                 genericHit = term
-                break
+                // Some terms are BOTH a generic and a risky half ("beach"): a
+                // term must never self-combine, so a bare "beach" stays
+                // innocent — it only blocks together with a DIFFERENT generic
+                // ("women beach") or risky ("beach bikini") half. Prefer a
+                // generic half that is NOT also risky ("women" over "beach"
+                // in "women beach"), so the risky copy stays available to
+                // combine with it.
+                if (term !in risky) break
             }
         }
         if (genericHit == null) return null
         for (term in risky) {
+            // Self-combination guard: a bare "beach" must never block.
+            if (term == genericHit) continue
             if (containsKeyword(lowercaseText, term, protectShortWords = true)) {
                 return "$genericHit + $term"
             }

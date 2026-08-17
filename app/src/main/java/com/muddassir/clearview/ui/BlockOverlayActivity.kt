@@ -23,6 +23,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -37,9 +39,8 @@ import com.muddassir.clearview.ui.theme.UrlblockerTheme
  *   1. Immediately covers the blocked content
  *   2. Shows a blocking message
  *   3. STAYS on screen until the user dismisses it manually — the ✕ button
- *      (top-right) or the "Return Home" button both navigate to Home. There
- *      is NO auto-exit: the overlay must not flash and vanish on its own,
- *      and the user decides when to leave.
+ *      (top-right) navigates Home. There is NO auto-exit: the overlay must
+ *      not flash and vanish on its own, and the user decides when to leave.
  *
  * The user cannot dismiss this overlay to reveal the blocked content
  * underneath — dismissal always goes Home.
@@ -50,8 +51,8 @@ class BlockOverlayActivity : ComponentActivity() {
         private const val TAG = "BlockOverlayActivity"
     }
 
-    /** True once the destination navigation has run (button, ✕ and
-     *  onBackPressed can all fire; only the first may navigate). */
+    /** True once the destination navigation has run (✕ and onBackPressed
+     *  can both fire; only the first may navigate). */
     private var exited = false
 
     /**
@@ -219,17 +220,27 @@ private fun BlockOverlayScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background),
+                // Soft vertical wash: a touch of surface tone at the top that
+                // melts into the solid background — subtle depth behind the
+                // message without fighting the dark theme.
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+                            MaterialTheme.colorScheme.background
+                        )
+                    )
+                ),
             // Center the message block vertically; the ✕ overrides its own
             // alignment below.
             contentAlignment = Alignment.Center
         ) {
-            // ✕ close button — top-right, always visible. The overlay stays on
-            // screen until the user taps it (or "Return Home").
+            // ✕ close button — top-right, always visible, the ONLY control.
+            // The overlay stays on screen until the user taps it.
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(8.dp)
+                    .padding(10.dp)
                     .size(44.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
@@ -254,21 +265,38 @@ private fun BlockOverlayScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
+                // Hero line — reverent, elegant serif.
                 Text(
-                    text = "🛡️",
-                    fontSize = 64.sp
-                )
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Text(
-                    text = "Content Blocked",
-                    style = MaterialTheme.typography.headlineMedium,
+                    text = "FEAR GOD",
+                    fontFamily = FontFamily.Serif,
                     fontWeight = FontWeight.Bold,
+                    fontSize = 42.sp,
+                    letterSpacing = 6.sp,
                     color = MaterialTheme.colorScheme.onBackground
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Thin accent divider.
+                Box(
+                    modifier = Modifier
+                        .width(56.dp)
+                        .height(2.dp)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.55f))
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Status — wide-tracked caps.
+                Text(
+                    text = "BLOCKED",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                    letterSpacing = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(32.dp))
 
                 Text(
                     text = when (blockedType) {
@@ -312,25 +340,14 @@ private fun BlockOverlayScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(40.dp))
 
                 Text(
-                    text = "Tap ✕ to dismiss when ready",
+                    text = "Tap ✕ to dismiss",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                     textAlign = TextAlign.Center
                 )
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Button(
-                    onClick = onDismiss,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Text("Return Home")
-                }
             }
         }
     }
