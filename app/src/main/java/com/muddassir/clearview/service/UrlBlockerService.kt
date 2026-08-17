@@ -8,6 +8,7 @@ import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.muddassir.clearview.extractor.ContentExtractor
 import java.util.Locale
 import com.muddassir.clearview.matching.ContentSnapshot
@@ -81,6 +82,12 @@ class UrlBlockerService : AccessibilityService() {
         // event fires, so a one-shot delayed re-scan is scheduled this long after
         // the event to catch the rendered state.
         private const val CHROME_DELAYED_SCAN_MS = 400L
+        // Safe-tab redirect for NORMAL Chrome blocks: the CURRENT tab is
+        // navigated to this URL so reopening Chrome never shows the blocked
+        // page. Delay between the omnibox SET_TEXT and pressing the IME enter
+        // key (the soft keyboard needs a moment to appear).
+        private const val SAFE_REDIRECT_URL = "https://www.google.com"
+        private const val SAFE_REDIRECT_SCAN_DELAY_MS = 400L
         // Throttle Chrome diagnostic tree dumps so they don't spam logcat.
         private const val CHROME_DIAG_INTERVAL_MS = 2000L
         // Event-driven full-tree scans are expensive (a full accessibility-tree
@@ -1224,16 +1231,13 @@ class UrlBlockerService : AccessibilityService() {
             blockingState = BlockingState.WAITING_FOR_SAFE_STATE
             armSafeStateTimeout(packageName)
         } else if (contentExtractor.isChromePackage(packageName)) {
-            // Normal (non-incognito) Chrome block: close ALL of Chrome's tabs so
-            // reopening Chrome doesn't restore the blocked tab (the user's
-            // report: after the block, reopening Chrome brought back the same
-            // tab). NOTE: no clearTargetApp() here — its BACK press can exit
-            // Chrome entirely on a single-tab session (no history to walk
-            // back), and Chrome then restores the tab on the next launch.
-            // Closing the tabs first leaves Chrome on its empty "No tabs"
-            // state, and the block overlay inside closeAllChromeTabsAndBlock()
-            // lands Home.
-            closeAllChromeTabsAndBlock(packageName)
+            // Normal (non-incognito) Chrome block: redirect the CURRENT tab to
+            // a safe page (Google) instead of closing tabs — closing Chrome's
+            // tabs is unreliable on many devices (the tab is restored on the
+            // next launch anyway). Redirecting the tab itself leaves Chrome
+            // with a clean, safe tab: when the overlay is dismissed and Chrome
+            // is reopened, the tab is still there but its content is Google.
+            redirectChromeTabAndBlock(packageName)
         } else {
             clearTargetApp(rootNode, packageName)
             blockingState = BlockingState.WAITING_FOR_SAFE_STATE
@@ -1664,8 +1668,12 @@ class UrlBlockerService : AccessibilityService() {
     }
 
     /**
-     * Normal-Chrome block path: close ALL of Chrome's tabs, then land Home via
-     * the block overlay. This fixes the user's report that after a block,
+     * SUPERSEDED by [redirectChromeTabAndBlock] — kept only as reference; no
+     * longer called from the block sequence (closing all tabs is unreliable
+     * and the blocked tab is restored on the next launch anyway).
+     *
+     * Old behavior: close ALL of Chrome's tabs, then land Home via
+     * the block overlay. This fixed the user's report that after a block,
      * reopening Chrome restored the same blocked tab — with every tab closed,
      * Chrome starts fresh next time.
      *
@@ -2120,6 +2128,212 @@ class UrlBlockerService : AccessibilityService() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send safe intent to $packageName: ${e.message}")
+        }
+    }
+
+    /**
+     * Normal-Chrome block path: redirect the CURRENT tab to the safe Google
+     * home page, then land Home via the block overlay. Closing all of
+     * Chrome's tabs proved unreliable (Chrome often restores the blocked tab
+     * on the next launch), so instead the tab itself is navigated to a safe
+     * URL: when the user dismisses the overlay and reopens Chrome, the tab is
+     * still there (tabs can't always be closed) but its content is Google.
+     *
+     * Runs off the main thread so the UI actions can be spaced out. If the
+     * same-tab redirect can't be driven (omnibox or IME not reachable), a
+     * safe intent opens Google in Chrome as a fallback so the blocked page is
+     * never the visible tab.
+     */
+    private fun redirectChromeTabAndBlock(packageName: String) {
+        blockingState = BlockingState.CLEARING_TARGET
+        safeStateTimeoutJob?.cancel()
+        serviceScope.launch {
+            val redirected = redirectChromeTabToSafeUrl(packageName)
+            Log.i(TAG, "SAFE_REDIRECT: redirected=$redirected")
+            if (!isActive) return@launch
+            if (!redirected) {
+                Log.w(TAG, "SAFE_REDIRECT: omnibox redirect unavailable — safe-intent fallback")
+                navigateToSafeIntent(packageName)
+                delay(SAFE_REDIRECT_SCAN_DELAY_MS)
+            }
+            transitionToHome(packageName)
+        }
+    }
+
+    /**
+     * Redirect the CURRENT Chrome tab to [SAFE_REDIRECT_URL] by typing it
+     * into the omnibox and submitting with the soft keyboard's enter key.
+     * Chrome's omnibox (address bar) is always present in the tree, so this
+     * is the reliable same-tab redirect. Returns true when the navigation was
+     * initiated.
+     */
+    private suspend fun redirectChromeTabToSafeUrl(packageName: String): Boolean {
+        val rootNode = try { rootInActiveWindow } catch (e: Exception) { null } ?: return false
+        val urlBar = try { findChromeOmnibox(rootNode) } finally {
+            try { rootNode.recycle() } catch (e: Exception) {}
+        }
+        if (urlBar == null) {
+            Log.w(TAG, "SAFE_REDIRECT: omnibox not found in tree")
+            return false
+        }
+        val typed = try {
+            urlBar.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            val args = Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    SAFE_REDIRECT_URL
+                )
+            }
+            urlBar.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        } catch (e: Exception) {
+            Log.e(TAG, "SAFE_REDIRECT: SET_TEXT failed: ${e.message}")
+            false
+        } finally {
+            try { urlBar.recycle() } catch (e: Exception) {}
+        }
+        if (!typed) return false
+        Log.i(TAG, "SAFE_REDIRECT: omnibox SET_TEXT -> $SAFE_REDIRECT_URL")
+        // Give the IME + omnibox suggestions a moment to appear, then submit
+        // the navigation IN THE SAME TAB:
+        //   1. press the soft keyboard's enter key, else
+        //   2. click Chrome's first omnibox suggestion (the typed URL is always
+        //      the top suggestion, and clicking it navigates the current tab).
+        delay(SAFE_REDIRECT_SCAN_DELAY_MS)
+        var submitted = pressImeEnterKey()
+        if (!submitted) {
+            Log.i(TAG, "SAFE_REDIRECT: IME enter not found — clicking first omnibox suggestion")
+            submitted = clickOmniboxSuggestion()
+        }
+        Log.i(TAG, "SAFE_REDIRECT: submitted=$submitted")
+        return submitted
+    }
+
+    /**
+     * Find Chrome's address bar (omnibox): an editable node whose class or
+     * view id marks it as the URL/location bar.
+     */
+    private fun findChromeOmnibox(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+        var depth = 0
+        var visited = 0
+        while (queue.isNotEmpty() && depth < 60 && visited < 2000) {
+            visited++
+            val node = queue.removeFirst()
+            val isRoot = node === rootNode
+            val cls: String = try { node.className?.toString() ?: "" } catch (e: Exception) { "" }
+            val viewId: String = try { node.viewIdResourceName?.toString() ?: "" } catch (e: Exception) { "" }
+            val editable = try { node.isEditable } catch (e: Exception) { false }
+            // The omnibox is any EditText (always editable) OR an editable node
+            // whose view id marks it as the URL/location bar.
+            val isOmnibox = cls.contains("EditText") || cls.contains("AutoCompleteTextView") ||
+                (editable && (viewId.contains("url_bar") || viewId.contains("omnibox") ||
+                    viewId.contains("url-bar") || viewId.contains("location_bar")))
+            if (isOmnibox) return node
+            val count = try { node.childCount } catch (e: Exception) { 0 }
+            for (i in 0 until count) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            if (!isRoot) try { node.recycle() } catch (e: Exception) {}
+            depth++
+        }
+        return null
+    }
+
+    /**
+     * Press the soft keyboard's enter/search key via the IME window's
+     * accessibility tree (Gboard exposes its key nodes). Returns true when a
+     * key was clicked.
+     */
+    private fun pressImeEnterKey(): Boolean {
+        val windows = try { windows } catch (e: Exception) { return false }
+        if (windows == null) return false
+        for (w in windows) {
+            if (w.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            val root = try { w.root } catch (e: Exception) { null } ?: continue
+            try {
+                if (clickImeEnterKey(root)) return true
+            } finally {
+                try { root.recycle() } catch (e: Exception) {}
+            }
+        }
+        return false
+    }
+
+    private fun clickImeEnterKey(root: AccessibilityNodeInfo): Boolean {
+        val enterLabels = setOf("go", "enter", "search", "done", "arrow", "next", "return", "→", "↵", "✓")
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var depth = 0
+        var visited = 0
+        while (queue.isNotEmpty() && depth < 30 && visited < 1000) {
+            visited++
+            val node = queue.removeFirst()
+            val isRoot = node === root
+            val text = try { node.text?.toString()?.trim() } catch (e: Exception) { null }
+            val desc = try { node.contentDescription?.toString()?.trim() } catch (e: Exception) { null }
+            val label = (text ?: "").lowercase(Locale.ROOT)
+            val descLabel = (desc ?: "").lowercase(Locale.ROOT)
+            // Match the enter/search key by its label; click the key itself or
+            // walk up to its clickable ancestor (some keyboards expose the
+            // label on a leaf node).
+            if (label in enterLabels || descLabel in enterLabels) {
+                val ok = clickNodeOrClickableAncestor(node)
+                Log.i(TAG, "SAFE_REDIRECT: IME enter key click=$ok text=$text desc=$desc")
+                if (!isRoot) try { node.recycle() } catch (e: Exception) {}
+                return ok
+            }
+            val count = try { node.childCount } catch (e: Exception) { 0 }
+            for (i in 0 until count) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            if (!isRoot) try { node.recycle() } catch (e: Exception) {}
+            depth++
+        }
+        return false
+    }
+
+    /**
+     * Click Chrome's omnibox suggestion for the typed safe URL — the top
+     * suggestion is always the URL itself ("Go to https://www.google.com"),
+     * and clicking it navigates the CURRENT tab (same-tab redirect). Returns
+     * true when a suggestion row was clicked.
+     */
+    private fun clickOmniboxSuggestion(): Boolean {
+        val rootNode = try { rootInActiveWindow } catch (e: Exception) { null } ?: return false
+        return try {
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(rootNode)
+            var depth = 0
+            var visited = 0
+            while (queue.isNotEmpty() && depth < 60 && visited < 2000) {
+                visited++
+                val node = queue.removeFirst()
+                val isRoot = node === rootNode
+                val text = try { node.text?.toString() } catch (e: Exception) { null }
+                val desc = try { node.contentDescription?.toString() } catch (e: Exception) { null }
+                val combined = ((text ?: "") + " " + (desc ?: "")).lowercase(Locale.ROOT)
+                if (combined.contains("google.com")) {
+                    val clicked = clickNodeOrClickableAncestor(node)
+                    Log.i(TAG, "SAFE_REDIRECT: suggestion click=$clicked text=\"$text\"")
+                    if (clicked) {
+                        if (!isRoot) try { node.recycle() } catch (e: Exception) {}
+                        return true
+                    }
+                }
+                val count = try { node.childCount } catch (e: Exception) { 0 }
+                for (i in 0 until count) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    queue.add(child)
+                }
+                if (!isRoot) try { node.recycle() } catch (e: Exception) {}
+                depth++
+            }
+            false
+        } finally {
+            try { rootNode.recycle() } catch (e: Exception) {}
         }
     }
 
