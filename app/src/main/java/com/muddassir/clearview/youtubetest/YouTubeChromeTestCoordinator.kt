@@ -25,6 +25,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
@@ -163,6 +164,12 @@ class YouTubeChromeTestCoordinator(
         private const val SWIPE_DIAGONAL_RATIO = 1.15f
         private const val GESTURE_STROKE_MS = 80L
         private const val SWIPE_REPLAY_DURATION_MS = 300L
+        // Alpha (0-255) of the black wash painted over a protected player —
+        // 255 = fully opaque: the protected player is completely hidden
+        // behind black (the overlay also carries the centered "SWIPE / FEAR
+        // GOD / BLOCK BRAIN ROT" message). Visual only; the gesture logic is
+        // untouched.
+        private const val BLACK_OVERLAY_ALPHA = 255
         // Delay between removing the overlay and dispatching the replayed
         // swipe — lets the overlay surface finish tearing down (Surface::
         // disconnect) so Chrome receives the gesture, not the dying overlay.
@@ -326,6 +333,17 @@ class YouTubeChromeTestCoordinator(
 
     // ── Fallback accessibility overlay (only when state is unknown) ─
     private var overlayView: View? = null
+
+    /**
+     * Visual-only: whether the player overlay currently shows the translucent
+     * black tint. Kept SEPARATE from the block states so existing state
+     * transitions are untouched — it is set when the overlay is enabled in a
+     * protected state (confirmed-paused or protected-unknown) and cleared
+     * whenever the overlay goes away (new Short / release / reset / swipe
+     * replay). Never true during classification, waiting, or on allowed
+     * videos, because the overlay itself only exists in protected states.
+     */
+    private var protectedPausedOverlayVisible = false
     // True while a replayed swipe is being dispatched into Chrome — the
     // enforcement loop must not re-add the overlay mid-gesture (the injected
     // gesture would land on the overlay and loop forever). Held for the WHOLE
@@ -840,7 +858,11 @@ class YouTubeChromeTestCoordinator(
                             pauseAttempts = 0
                         }
                         noControlTicks = 0
-                        if (overlayView != null) removePlayerOverlay("pause control found")
+                        // Confirmed paused → raise the black protection overlay
+                        // (idempotent; already up in UNKNOWN). It must stay up
+                        // in the protected state so taps can never reveal the
+                        // controls or resume the video.
+                        enablePlayerOverlay(root)
                     } else {
                         pauseAttempts++
                         noControlTicks = 0
@@ -868,7 +890,8 @@ class YouTubeChromeTestCoordinator(
                         pauseAttempts = 0
                     }
                     noControlTicks = 0
-                    if (overlayView != null) removePlayerOverlay("already paused")
+                    // Already paused → raise the black protection overlay.
+                    enablePlayerOverlay(root)
                 }
                 null -> {
                     // No Play/Pause control exposed.
@@ -1182,10 +1205,85 @@ class YouTubeChromeTestCoordinator(
      * still swipe between Shorts. Horizontal drags (seeking) are consumed like
      * taps — they are player playback interaction.
      */
-    private inner class GestureAwarePlayerOverlay(context: android.content.Context) : View(context) {
+    private inner class GestureAwarePlayerOverlay(
+        context: android.content.Context,
+        tinted: Boolean
+    ) : View(context) {
         private var downX = 0f
         private var downY = 0f
         private var touching = false
+        private val tintPaint = if (tinted) {
+            android.graphics.Paint().apply {
+                color = android.graphics.Color.BLACK
+                alpha = BLACK_OVERLAY_ALPHA
+            }
+        } else {
+            null
+        }
+        // Centered message paints (created once; sizes set per-frame in
+        // onDraw so they scale with the player bounds).
+        private val titlePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            textAlign = android.graphics.Paint.Align.CENTER
+            typeface = android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.BOLD)
+        }
+        private val bodyPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            textAlign = android.graphics.Paint.Align.CENTER
+            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+        }
+        private val dividerPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            alpha = 90
+            strokeWidth = 2f
+        }
+
+        // Visual only: a fully opaque black wash over the protected player,
+        // with the "SWIPE / FEAR GOD / BLOCK BRAIN ROT" message centered on
+        // it. The view itself has no background; this fills exactly the player
+        // bounds. No buttons/icons — gesture handling is untouched by drawing.
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            super.onDraw(canvas)
+            tintPaint?.let {
+                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), it)
+                drawProtectionMessage(canvas)
+            }
+        }
+
+        /** Draws the centered "SWIPE — FEAR GOD — BLOCK BRAIN ROT" message. */
+        private fun drawProtectionMessage(canvas: android.graphics.Canvas) {
+            val cx = width / 2f
+            val cy = height / 2f
+            val unit = min(width, height)
+
+            // Title: large with wide letter-spacing.
+            titlePaint.textSize = unit * 0.095f
+            titlePaint.letterSpacing = 0.20f
+            val title = "SWIPE"
+            val titleY = cy - unit * 0.115f
+            canvas.drawText(title, cx, titleY, titlePaint)
+            val titleWidth = titlePaint.measureText(title)
+
+            // Hairline divider under the title.
+            val dividerY = cy - unit * 0.035f
+            canvas.drawLine(
+                cx - titleWidth * 0.75f, dividerY,
+                cx + titleWidth * 0.75f, dividerY,
+                dividerPaint
+            )
+
+            // Middle line.
+            bodyPaint.alpha = 220
+            bodyPaint.textSize = unit * 0.052f
+            bodyPaint.letterSpacing = 0.12f
+            canvas.drawText("FEAR GOD", cx, cy + unit * 0.03f, bodyPaint)
+
+            // Bottom line: quieter, more transparent.
+            bodyPaint.alpha = 150
+            bodyPaint.textSize = unit * 0.04f
+            bodyPaint.letterSpacing = 0.08f
+            canvas.drawText("BLOCK BRAIN ROT", cx, cy + unit * 0.10f, bodyPaint)
+        }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
             when (event.actionMasked) {
@@ -1231,6 +1329,9 @@ class YouTubeChromeTestCoordinator(
     /** A vertical swipe on the blocked player — replay it into Chrome. */
     private fun onOverlayVerticalSwipe(startX: Float, startY: Float, endX: Float, endY: Float) {
         Log.i(TAG, "YT_BLOCK_VERTICAL_SWIPE start=($startX,$startY) end=($endX,$endY)")
+        if (protectedPausedOverlayVisible) {
+            Log.i(TAG, "YT_BLOCK_BLACK_OVERLAY_SWIPE_ALLOWED videoId=${currentVideoId ?: "unknown"}")
+        }
         replayVerticalSwipe(startX, startY, endX, endY)
     }
 
@@ -1363,11 +1464,13 @@ class YouTubeChromeTestCoordinator(
         replayFinalizeJob = null
         swipeReplayInFlight = false
         if (restore) {
-            // The overlay belongs ONLY to BLOCKED_UNKNOWN_STATE and only for
-            // the SAME blocked Short. An allowed new Short, a NEEDS_PAUSE
+            // The overlay belongs ONLY to the protected states
+            // (BLOCKED_ENFORCING / BLOCKED_UNKNOWN_STATE) and only for the
+            // SAME blocked Short. An allowed new Short, a NEEDS_PAUSE
             // sequence, or a released block must never be covered.
             if (chromeYoutubeVisible &&
-                blockState == YoutubeBlockState.BLOCKED_UNKNOWN_STATE &&
+                (blockState == YoutubeBlockState.BLOCKED_ENFORCING ||
+                    blockState == YoutubeBlockState.BLOCKED_UNKNOWN_STATE) &&
                 blockedVideoId == currentVideoId &&
                 overlayView == null
             ) {
@@ -1403,7 +1506,10 @@ class YouTubeChromeTestCoordinator(
                 Log.i(TAG, "YT_BLOCK_OVERLAY_SKIP videoId=${currentVideoId ?: "unknown"} — no player bounds")
                 return
             }
-            val view = GestureAwarePlayerOverlay(service)
+            // The overlay exists only in protected states (confirmed-paused or
+            // protected-unknown), so it always carries the translucent black
+            // tint. Gesture handling is identical either way.
+            val view = GestureAwarePlayerOverlay(service, tinted = true)
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -1419,8 +1525,10 @@ class YouTubeChromeTestCoordinator(
             val wm = service.getSystemService(WindowManager::class.java)
             wm.addView(view, params)
             overlayView = view
+            protectedPausedOverlayVisible = true
             Log.i(TAG, "YT_BLOCK_OVERLAY_ENABLED videoId=${currentVideoId ?: "unknown"} bounds=$bounds")
             Log.i(TAG, "YT_BLOCK_PLAYER_PROTECTED videoId=${currentVideoId ?: "unknown"} bounds=$bounds")
+            Log.i(TAG, "YT_BLOCK_BLACK_OVERLAY_ENABLED videoId=${currentVideoId ?: "unknown"}")
         } catch (e: Exception) {
             Log.e(TAG, "ERROR overlay addView: ${e.message}")
         } finally {
@@ -1437,6 +1545,10 @@ class YouTubeChromeTestCoordinator(
             Log.e(TAG, "ERROR overlay removeView: ${e.message}")
         }
         overlayView = null
+        if (protectedPausedOverlayVisible) {
+            protectedPausedOverlayVisible = false
+            Log.i(TAG, "YT_BLOCK_BLACK_OVERLAY_REMOVED videoId=${currentVideoId ?: "unknown"} reason=$reason")
+        }
     }
 
     // ── Chrome/YouTube visibility helpers ──────────────────────────
