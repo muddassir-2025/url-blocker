@@ -137,9 +137,14 @@ class YouTubeChromeTestCoordinator(
         private const val PAUSE_RETRY_DELAY_MS = 150L
         private const val MAX_PAUSE_ATTEMPTS = 4
         // Pause-phase cadences. The player node can appear AFTER the Short is
-        // detected, so player acquisition and post-gesture observation are
-        // bounded time windows, not instant decisions.
-        private const val PLAYER_ACQUIRE_TIMEOUT_MS = 1200L
+        // detected (Chrome renders the page asynchronously), so player
+        // acquisition is a bounded retry window — WAIT_FOR_PLAYER polls for
+        // valid player bounds at PLAYER_WAIT_RETRY_MS intervals for up to
+        // PLAYER_ACQUIRE_TIMEOUT_MS total before giving up and escalating to
+        // the UNKNOWN/protection fallback. Post-gesture observation is also a
+        // bounded time window.
+        private const val PLAYER_ACQUIRE_TIMEOUT_MS = 1500L
+        private const val PLAYER_WAIT_RETRY_MS = 150L
         private const val CONTROLS_WAIT_MS = 500L
         private const val PAUSE_OBSERVE_MS = 800L
         // YT_BLOCK_REENFORCE log throttle (the loop runs every 300ms).
@@ -198,6 +203,51 @@ class YouTubeChromeTestCoordinator(
             "loading"
         )
 
+        // Browser/accessibility UI strings that must never be treated as the
+        // Short's content title. Chrome's window title is "Chrome: YouTube"
+        // (or similar) while a Short is still loading, and the tree exposes
+        // these strings in every frame — matching against them causes false
+        // blocks (and stale-tree false matches) during Short transitions.
+        private val GENERIC_UI_TITLES = setOf(
+            "youtube",
+            "open the home page",
+            "new tab",
+            "customize and control google chrome",
+            "connection is secure",
+            "back",
+            "previous video",
+            "next video",
+            "search youtube",
+            "more actions",
+            "share this video",
+            "share",
+            "subscribe",
+            "see more videos using this sound",
+            "go to channel",
+            "view comments",
+            "watch on youtube",
+            "youtube home",
+            "see 1 tab"
+        )
+
+        /**
+         * True when [title] is plausible real YouTube Short content rather than
+         * a generic Chrome/YouTube UI string or an empty fragment. The matcher
+         * prefers such a title over raw tree text, because the accessibility
+         * tree can still contain the PREVIOUS Short's text while Chrome is
+         * swapping in the new one (observed: "Spider Mahn…" window title with
+         * "Ishq de Fanniyar … Aesthetic status …" still in the tree → the
+         * stale tree text caused a false "aesthetic" block).
+         */
+        private fun isValidYouTubeShortTitle(title: String?): Boolean {
+            if (title.isNullOrBlank()) return false
+            val t = title.trim()
+            if (t.length < 3) return false
+            val lower = t.lowercase(Locale.ROOT)
+            if (lower in GENERIC_UI_TITLES) return false
+            return true
+        }
+
     }
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -243,12 +293,35 @@ class YouTubeChromeTestCoordinator(
     // (reveal) → WAIT_FOR_CONTROLS → PAUSE_REQUEST (ONE tap) → OBSERVE.
     private var pausePhase = PausePhase.WAIT_FOR_PLAYER
     private var pausePhaseSince = 0L
-    // Exactly ONE physical pause gesture per Short (reset on new Short /
-    // release / reset). Guards against duplicate taps from event storms.
-    private var pauseGestureSentForVideoId: String? = null
+    // The authoritative visible playback instance. currentVisibleVideoId is the
+    // video id of the Short currently on screen; visibleInstanceGeneration is
+    // bumped ONLY when the visible video id genuinely transitions (A → B → A
+    // gives A-gen1, B-gen2, A-gen3; A → A stays gen1). Nothing else — scans,
+    // WINDOW_CONTENT_CHANGED, text changes, repeated matching, player bounds —
+    // may start a new instance. The pause bookkeeping below is tied to this
+    // generation, so the same visible Short is never re-paused or re-revealed.
+    private var currentVisibleVideoId: String? = null
+    private var visibleInstanceGeneration = 0L
+    // Exactly ONE physical pause gesture per VISIBLE INSTANCE. Set only
+    // immediately before the actual pause dispatch; cleared when the visible
+    // instance changes. A → B → A therefore gets a fresh pause attempt for the
+    // second A, while A → A → A never re-pauses.
+    private var pauseGestureSentGeneration: Long? = null
     // Player bounds captured when the player node first became available —
     // reused for the tap so the gesture does not depend on a fresh tree.
     private var lastKnownPlayerBounds: Rect? = null
+    // Bounded WAIT_FOR_PLAYER retry: while the pause phase waits for the
+    // player node to appear, a dedicated retry job polls the tree every
+    // PLAYER_WAIT_RETRY_MS for up to PLAYER_ACQUIRE_TIMEOUT_MS. It is
+    // generation/video guarded — every retry verifies the same visible
+    // instance is still current, and it is cancelled by resetPausePhase() on
+    // any instance change / release / reset. Repeated scans of the same video
+    // merely advance this one pending wait; they never restart the sequence.
+    private var playerWaitJob: Job? = null
+    private var playerWaitVideoId: String? = null
+    private var playerWaitGeneration = 0L
+    private var playerWaitStartedAt = 0L
+    private var playerWaitAttempts = 0
 
 
     // ── Fallback accessibility overlay (only when state is unknown) ─
@@ -375,6 +448,8 @@ class YouTubeChromeTestCoordinator(
         enforcementJob = null
         replayFinalizeJob?.cancel()
         replayFinalizeJob = null
+        playerWaitJob?.cancel()
+        playerWaitJob = null
         swipeReplayInFlight = false
         removePlayerOverlay("service stopped")
         Log.i(TAG, "STOPPED")
@@ -537,7 +612,19 @@ class YouTubeChromeTestCoordinator(
         Log.i(TAG, "YT_TEST_MATCH_INPUT videoId=${videoId ?: "unknown"}")
         Log.i(TAG, "YT_TEST_MATCH_INPUT title=\"${title ?: "null"}\"")
 
-        val matchInput = if (combined.isNotBlank()) combined else title.orEmpty()
+        // Match against the FRESH window title whenever it is genuine Short
+        // content. The raw tree text (combined) can lag behind the visible
+        // Short during transitions — it may still contain the previous Short's
+        // title, which produced a false block for a clean Short. Only fall
+        // back to tree text when the title is generic UI text or unavailable.
+        val matchInput = if (isValidYouTubeShortTitle(title)) {
+            title!!
+        } else if (combined.isNotBlank()) {
+            combined
+        } else {
+            title.orEmpty()
+        }
+        Log.i(TAG, "YT_TEST_MATCH_SOURCE ${if (isValidYouTubeShortTitle(title)) "title" else "tree-text"}")
         val matched = testKeywords.firstOrNull { kw -> matchInput.contains(kw, ignoreCase = true) }
 
         if (matched != null) {
@@ -545,10 +632,17 @@ class YouTubeChromeTestCoordinator(
             Log.w(TAG, "YT_TEST_KEYWORD_MATCH keyword=$matched")
             Log.w(TAG, "YT_TEST_MATCHED_KEYWORD $matched")
             if (blockState == YoutubeBlockState.NORMAL) {
-                // First time this video is seen as blocked → BLOCKED_NEEDS_PAUSE.
+                // Not blocked yet for the current visible instance → enter the
+                // pause flow (BLOCKED_NEEDS_PAUSE). handleVideoChanged already
+                // reset the per-instance pause bookkeeping when the visible
+                // video id transitioned, so this runs at most once per
+                // instance: repeated scans of the SAME Short can never restart
+                // the pause sequence.
                 blockVideo(stateId, videoId, matched)
             } else if (blockedVideoId == stateId) {
-                // Already blocked — the enforcement loop keeps monitoring.
+                // Same visible instance, already blocked — the enforcement loop
+                // keeps monitoring/pausing as needed. NEVER resets the pause
+                // phase, never re-reveals controls, never re-sends the tap.
                 Log.i(TAG, "YT_BLOCK_REENFORCE videoId=${videoId ?: "unknown"} (still matched)")
             }
         } else {
@@ -564,29 +658,60 @@ class YouTubeChromeTestCoordinator(
     // ── Video transitions ─────────────────────────────────────────
 
     /**
-     * A new video id is now the active Short. Remove the old overlay, reset
-     * the enforcement counters, and re-evaluate blocking from scratch — the
-     * caller applies the BLOCKED state right after if the keyword matches
-     * (returning to a previously blocked Short re-blocks it).
+     * The current visible Short changed. Only a REAL video-id transition may
+     * start a new visible instance — this is the ONLY place the generation is
+     * bumped and the pause bookkeeping is reset. Repeated scans, accessibility
+     * text changes, or repeated keyword matches of the same Short never reach
+     * here (doScan guards on stateId != currentVideoId, and the stateId is
+     * derived from the video id).
      */
     private fun handleVideoChanged(newStateId: String, videoId: String?) {
-        removePlayerOverlay("video changed")
-        blockedVideoId = newStateId
-        transitionBlockState(YoutubeBlockState.NORMAL, videoId)
-        pauseAttempts = 0
-        lastPauseAttemptAt = 0L
-        lastReenforceLogAt = 0L
-        playerNodesDiagnosed = false
-        noControlTicks = 0
-        nonChromeRootTicks = 0
-        resetPausePhase()
+        val oldVideoId = currentVisibleVideoId
+        // Authoritative visible identity: prefer the extracted video id; only
+        // fall back to the text-derived stateId when the URL has no /shorts/
+        // (text changes of the SAME Short then keep the same stateId, so this
+        // still does not fire on every scan).
+        val newVisibleId = videoId ?: newStateId
+        if (newVisibleId != oldVideoId) {
+            currentVisibleVideoId = newVisibleId
+            visibleInstanceGeneration++
+            Log.i(
+                TAG,
+                "YT_BLOCK_VISIBLE_INSTANCE_CHANGED old=${oldVideoId ?: "null"} new=$newVisibleId " +
+                    "generation=$visibleInstanceGeneration"
+            )
+            removePlayerOverlay("video changed")
+            blockedVideoId = newStateId
+            transitionBlockState(YoutubeBlockState.NORMAL, videoId)
+            pauseAttempts = 0
+            lastPauseAttemptAt = 0L
+            lastReenforceLogAt = 0L
+            playerNodesDiagnosed = false
+            noControlTicks = 0
+            nonChromeRootTicks = 0
+            resetPausePhase()
+        } else {
+            // Same visible video id re-detected (e.g. transient text-only
+            // stateId fluctuation) — NOT a new instance. Keep all state.
+            Log.i(TAG, "YT_BLOCK_SAME_VISIBLE_INSTANCE videoId=${videoId ?: "unknown"} generation=$visibleInstanceGeneration")
+        }
     }
 
-    /** Resets the pause-phase machine (new Short / release / reset). */
+    /** Resets the pause-phase machine (new visible instance / release / reset). */
     private fun resetPausePhase() {
+        playerWaitJob?.cancel()
+        playerWaitJob = null
+        playerWaitVideoId = null
+        playerWaitGeneration = 0L
+        playerWaitStartedAt = 0L
+        playerWaitAttempts = 0
         pausePhase = PausePhase.WAIT_FOR_PLAYER
-        pausePhaseSince = 0L
-        pauseGestureSentForVideoId = null
+        // Start the phase clock NOW — never 0. The WAIT_FOR_PLAYER bounded
+        // window is measured from when the pause phase actually begins; a 0
+        // here makes the first missing-bounds check look like a long-elapsed
+        // timeout and kills the pause sequence before the player exists.
+        pausePhaseSince = now()
+        pauseGestureSentGeneration = null
         lastKnownPlayerBounds = null
     }
 
@@ -807,21 +932,16 @@ class YouTubeChromeTestCoordinator(
         val now = now()
         when (pausePhase) {
             PausePhase.WAIT_FOR_PLAYER -> {
-                val player = findVideoPlayerNode(root)
-                val bounds = player?.let { boundsOf(it.node) }
-                try { player?.node?.recycle() } catch (e: Exception) {}
-                if (bounds != null) {
-                    lastKnownPlayerBounds = bounds
-                    Log.i(TAG, "YT_BLOCK_PAUSE_PLAYER_BOUNDS_FOUND videoId=$videoId bounds=$bounds")
-                    pausePhase = PausePhase.PLAYER_READY
-                    pausePhaseSince = now
-                } else {
-                    Log.i(TAG, "YT_BLOCK_PAUSE_WAITING_FOR_PLAYER videoId=$videoId — no player bounds yet")
-                    if (now - pausePhaseSince >= PLAYER_ACQUIRE_TIMEOUT_MS) {
-                        Log.i(TAG, "YT_BLOCK_PAUSE_PLAYER_BOUNDS_TIMEOUT videoId=$videoId")
-                        playbackUnknown(videoId, root)
-                    }
+                // The player node may not exist yet (Chrome renders the Short
+                // page asynchronously). Start (or keep advancing) the single
+                // pending bounded wait — repeated scans of the SAME video must
+                // not restart or abandon it. All retries run inside
+                // [playerWaitJob]; this branch only ensures that job exists.
+                if (playerWaitJob?.isActive != true) {
+                    startPlayerWait(videoId, root, now)
                 }
+                // No immediate timeout here: the wait job owns the bounded
+                // window and the transition out of WAIT_FOR_PLAYER.
             }
             PausePhase.PLAYER_READY -> {
                 revealPlayerControls(videoId, root)
@@ -838,14 +958,21 @@ class YouTubeChromeTestCoordinator(
                 }
             }
             PausePhase.PAUSE_REQUEST -> {
-                if (pauseGestureSentForVideoId != videoId) {
+                // Single-shot guard tied to the CURRENT VISIBLE INSTANCE
+                // generation. Cleared only by resetPausePhase() on a genuine
+                // video-id transition, so within one instance the physical
+                // pause tap can never fire twice — even across many
+                // WINDOW_CONTENT_CHANGED events and scans.
+                if (pauseGestureSentGeneration != visibleInstanceGeneration) {
                     requestPhysicalPause(videoId, root, lastKnownPlayerBounds)
-                    pauseGestureSentForVideoId = videoId
+                    pauseGestureSentGeneration = visibleInstanceGeneration
                     Log.i(TAG, "YT_BLOCK_PAUSE_OBSERVE_START videoId=$videoId")
                     pausePhase = PausePhase.OBSERVE
                     pausePhaseSince = now
                 } else {
-                    // Defensive: already sent for this Short — observe instead.
+                    // Defensive: already sent for this visible instance —
+                    // observe instead, never re-toggle.
+                    Log.i(TAG, "YT_BLOCK_PAUSE_SUPPRESSED videoId=$videoId reason=already_paused_current_instance")
                     pausePhase = PausePhase.OBSERVE
                     pausePhaseSince = now
                 }
@@ -870,6 +997,79 @@ class YouTubeChromeTestCoordinator(
         enablePlayerOverlay(root)
     }
 
+    /**
+     * Starts the single bounded WAIT_FOR_PLAYER retry for the current visible
+     * instance. Polls the tree for valid player bounds every
+     * PLAYER_WAIT_RETRY_MS for up to PLAYER_ACQUIRE_TIMEOUT_MS. Every retry is
+     * generation/video guarded — if the visible instance changed (swipe,
+     * navigation) or the block state moved on, the job cancels itself and
+     * does nothing. Only after the bounded window is genuinely exhausted does
+     * it escalate to playbackUnknown(). One job per visible instance; a new
+     * one is never started while the previous is still pending, and
+     * resetPausePhase() cancels it on any instance change.
+     */
+    private fun startPlayerWait(videoId: String, root: AccessibilityNodeInfo, phaseStartedAt: Long) {
+        playerWaitVideoId = videoId
+        playerWaitGeneration = visibleInstanceGeneration
+        playerWaitStartedAt = phaseStartedAt
+        playerWaitAttempts = 0
+        playerWaitJob = scope.launch {
+            var jobStart = now()
+            while (isActive) {
+                // Generation/video guard: the visible instance must still be
+                // the one this wait started for, and we must still be in the
+                // pause phase. Otherwise the wait is stale — cancel silently.
+                if (playerWaitVideoId != videoId ||
+                    playerWaitGeneration != visibleInstanceGeneration ||
+                    blockState != YoutubeBlockState.BLOCKED_NEEDS_PAUSE
+                ) {
+                    playerWaitJob = null
+                    return@launch
+                }
+
+                val currentRoot = try { service.rootInActiveWindow } catch (e: Exception) { null }
+                val player = currentRoot?.let { findVideoPlayerNode(it) }
+                val bounds = player?.let { boundsOf(it.node) }
+                try { player?.node?.recycle() } catch (e: Exception) {}
+                try { currentRoot?.recycle() } catch (e: Exception) {}
+
+                val elapsed = now() - playerWaitStartedAt
+                playerWaitAttempts++
+                Log.i(
+                    TAG,
+                    "YT_BLOCK_PAUSE_WAITING_FOR_PLAYER videoId=$videoId " +
+                        "attempt=$playerWaitAttempts elapsedMs=$elapsed boundsFound=${bounds != null} " +
+                        "generation=$visibleInstanceGeneration"
+                )
+
+                if (bounds != null) {
+                    lastKnownPlayerBounds = bounds
+                    Log.i(TAG, "YT_BLOCK_PAUSE_PLAYER_BOUNDS_FOUND videoId=$videoId bounds=$bounds")
+                    pausePhase = PausePhase.PLAYER_READY
+                    pausePhaseSince = now()
+                    playerWaitJob = null
+                    return@launch
+                }
+
+                if (now() - jobStart >= PLAYER_ACQUIRE_TIMEOUT_MS) {
+                    Log.i(TAG, "YT_BLOCK_PAUSE_PLAYER_BOUNDS_TIMEOUT videoId=$videoId")
+                    val freshRoot = try { service.rootInActiveWindow } catch (e: Exception) { null }
+                    if (freshRoot != null) {
+                        try {
+                            playbackUnknown(videoId, freshRoot)
+                        } finally {
+                            try { freshRoot.recycle() } catch (e: Exception) {}
+                        }
+                    }
+                    playerWaitJob = null
+                    return@launch
+                }
+                delay(PLAYER_WAIT_RETRY_MS)
+            }
+            playerWaitJob = null
+        }
+    }
+
 
 
 
@@ -892,13 +1092,14 @@ class YouTubeChromeTestCoordinator(
 
     /**
      * One physical pause request: a short tap at the player center. Fired at
-     * most once per Short (guarded by [pauseGestureSentForVideoId]), right
-     * after the reveal click showed the on-screen controls, so it acts as a
-     * pause rather than a blind toggle. dispatchGesture() acceptance is logged
-     * — never treated as proof that playback paused; the observation phase
-     * decides. Falls back to [fallbackBounds] captured when the player first
-     * became available, so a tree that briefly hides the player cannot abort
-     * the tap.
+     * most once per VISIBLE INSTANCE of a Short (guarded by
+     * [pauseGestureSentGeneration], reset whenever the visible instance
+     * changes), right after the reveal click showed the on-screen controls,
+     * so it acts as a pause rather than a blind toggle. dispatchGesture()
+     * acceptance is logged — never treated as proof that playback paused; the
+     * observation phase decides. Falls back to [fallbackBounds] captured when
+     * the player first became available, so a tree that briefly hides the
+     * player cannot abort the tap.
      */
     private fun requestPhysicalPause(videoId: String, root: AccessibilityNodeInfo, fallbackBounds: Rect?) {
         val player = findVideoPlayerNode(root)
@@ -1341,6 +1542,12 @@ class YouTubeChromeTestCoordinator(
         noControlTicks = 0
         nonChromeRootTicks = 0
         resetPausePhase()
+        playerWaitJob?.cancel()
+        playerWaitJob = null
+        playerWaitVideoId = null
+        playerWaitGeneration = 0L
+        playerWaitStartedAt = 0L
+        playerWaitAttempts = 0
         replayFinalizeJob?.cancel()
         replayFinalizeJob = null
         swipeReplayInFlight = false
