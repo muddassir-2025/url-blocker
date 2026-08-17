@@ -158,6 +158,18 @@ class UrlBlockerService : AccessibilityService() {
      */
     private var incognitoBlockCooldownUntil = 0L
 
+    /**
+     * True only while OUR OWN incognito-close sequence is still running (or
+     * Chrome is still settling right after it). INCOGNITO re-blocks are
+     * suppressed ONLY during this window. Once the close sequence completes and
+     * we land on Home, a fresh incognito detection is a NEW session the user
+     * opened — it must be blocked again even if the timestamp cooldown hasn't
+     * expired yet. This closes the reported bypass: fast re-opening of incognito
+     * within the old 4s cooldown slipped in and was never re-checked afterwards
+     * (once past the NTP, incognito pages expose no detection signal).
+     */
+    private var incognitoCloseInProgress = false
+
     /** Whether a one-shot delayed Chrome re-scan is already scheduled. */
     private var chromeDelayedScanScheduled = false
 
@@ -936,9 +948,10 @@ class UrlBlockerService : AccessibilityService() {
                                 // normal tab). Normal URL/keyword blocks are NOT
                                 // affected by this guard.
                                 if (result.matchType == MatchType.INCOGNITO &&
+                                    incognitoCloseInProgress &&
                                     System.currentTimeMillis() < incognitoBlockCooldownUntil
                                 ) {
-                                    Log.d(TAG, "INCOGNITO_BLOCK_SUPPRESSED (cooldown until $incognitoBlockCooldownUntil) — still settling after previous block")
+                                    Log.d(TAG, "INCOGNITO_BLOCK_SUPPRESSED (close sequence in progress until $incognitoBlockCooldownUntil) — still settling after previous block")
                                     // Clear the dedup cache so that once the cooldown
                                     // expires the very next poll re-evaluates and
                                     // re-blocks if the user is still in incognito
@@ -1213,6 +1226,10 @@ class UrlBlockerService : AccessibilityService() {
             // settles) would re-initiate the block in a loop.
             incognitoBlockCooldownUntil = System.currentTimeMillis() + INCOGNITO_BLOCK_COOLDOWN_MS
             Log.i(TAG, "INCOGNITO_BLOCK_ARMED cooldownUntil=$incognitoBlockCooldownUntil")
+            // Mark our close sequence as in progress: re-blocks are suppressed
+            // only while this flag is set (see the suppression check in
+            // evaluateCurrentState). Cleared when the sequence completes.
+            incognitoCloseInProgress = true
 
             // Incognito must be killed, not just navigated away from: the
             // adaptive Back sequence closes ALL incognito tabs, then the overlay
@@ -1464,7 +1481,10 @@ class UrlBlockerService : AccessibilityService() {
             } else {
                 Log.i(TAG, "INCOGNITO_CLOSE: close-all button not reachable — using adaptive Back sequence")
                 for (i in 1..INCOGNITO_CLOSE_MAX_BACK_PRESSES) {
-                    if (!isActive) return@launch
+                    if (!isActive) {
+                        incognitoCloseInProgress = false
+                        return@launch
+                    }
                     // Chrome left the foreground (the last Back closed the final
                     // tab and exited Chrome): the incognito session is gone.
                     if (currentForegroundPackage != packageName) {
@@ -1480,7 +1500,10 @@ class UrlBlockerService : AccessibilityService() {
                     delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
                 }
             }
-            if (!isActive) return@launch
+            if (!isActive) {
+                incognitoCloseInProgress = false
+                return@launch
+            }
 
             // Re-arm the cooldown AFTER the closing sequence, not only at block
             // INITIATION: a settle scan right after the presses can still see
@@ -1504,6 +1527,11 @@ class UrlBlockerService : AccessibilityService() {
             // package (packageName) handlePackageChange, which no longer runs
             // for incognito — leaving
             // a stale INCOGNITO result behind.
+            // The close sequence is done: the incognito session is gone and the
+            // user is being sent Home. Clear the flag so the NEXT incognito
+            // detection (a fresh session the user opens) blocks immediately —
+            // the timestamp cooldown alone must never let a fast re-open in.
+            incognitoCloseInProgress = false
             blockingState = BlockingState.NORMAL
             lastCheckedSnapshotId = null
             lastBlockedResult = null

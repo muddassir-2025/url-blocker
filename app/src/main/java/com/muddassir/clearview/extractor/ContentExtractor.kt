@@ -137,7 +137,13 @@ class ContentExtractor {
         private val ACTIVE_STATE_TAB_OR_WINDOW_REV = Regex("\\b(tab|tabs|window|windows)\\s+incognito\\b")
         private val ACTIVE_STATE_COUNT = Regex("incognito\\s*[,:]?\\s*\\d")
         private val ACTIVE_STATE_COUNT_REV = Regex("\\d+\\s+incognito")
-        private val ACTIVE_STATE_OPEN_OFFER = Regex("open\\s+(a|an|a new|new)?\\s*incognito")
+        // Normal-mode OFFER actions that START incognito — "open (in) (a new)
+        // incognito (tab|window)". The "in" form is Chrome's bookmark /
+        // context-menu action ("Open in Incognito tab") — a reported false
+        // positive: it used to slip past this regex and match the active-state
+        // tab/window pattern below, blocking normal browsing when a bookmark's
+        // 3-dot menu was opened.
+        private val ACTIVE_STATE_OPEN_OFFER = Regex("open\\s+(?:in\\s+)?(?:a\\s+|an\\s+|a new\\s+|new\\s+)?incognito")
 
         // Normal-mode offer markers for isIncognitoChromeIdentifier — matched
         // against both underscore resource ids and CamelCase class names (see

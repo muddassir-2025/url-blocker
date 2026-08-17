@@ -72,6 +72,14 @@ class IncognitoDetectionTest {
         assertFalse(ContentExtractor.isActiveIncognitoStateText("What is incognito mode?"))
         assertFalse(ContentExtractor.isActiveIncognitoStateText("Incognito mode explained"))
         assertFalse(ContentExtractor.isActiveIncognitoStateText(""))
+        // Bookmark / context-menu offers ("Open in Incognito tab") — reported
+        // false positive: opening the 3-dot menu on a bookmark closed the tab
+        // because this offer text used to slip past the open-offer regex and
+        // match the active-state tab/window pattern.
+        assertFalse(ContentExtractor.isActiveIncognitoStateText("Open in Incognito tab"))
+        assertFalse(ContentExtractor.isActiveIncognitoStateText("Open in Incognito window"))
+        assertFalse(ContentExtractor.isActiveIncognitoStateText("Open in a new Incognito tab"))
+        assertFalse(ContentExtractor.isActiveIncognitoStateText("Open in new Incognito window"))
     }
 
     // ── Chrome incognito UI chrome (view resource ids / class names) ──
