@@ -12,6 +12,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import com.muddassir.clearview.repository.BlockRepository
+import com.muddassir.clearview.youtubetest.YoutubeTestKeywordRepository
 
 class MainViewModel : ViewModel() {
 
@@ -35,15 +36,19 @@ class MainViewModel : ViewModel() {
     // ── Repo ───────────────────────────────────────────────────────
 
     private var repository: BlockRepository? = null
+    private var youtubeTestKeywordRepository: YoutubeTestKeywordRepository? = null
 
     fun initialize(context: Context) {
         if (repository != null) return
         repository = BlockRepository(context.applicationContext)
+        youtubeTestKeywordRepository = YoutubeTestKeywordRepository(context.applicationContext)
         refreshKeywords()
         refreshDomains()
         checkHasPassword()
         refreshStrictMode()
-        refreshBlockGenderTermsInGoogleApp()
+        refreshBlockShorts()
+        refreshYouTubeChromeTest()
+        refreshYoutubeTestKeywords()
         ensureLauncherEnabled(context)   // cleanup stale disabled state first
         checkDeviceAdminStatus(context)  // then apply correct hide/show based on admin status
         // Auto-lock if password is set (app was restarted)
@@ -103,12 +108,6 @@ class MainViewModel : ViewModel() {
         // only explicitly from the App Lock card's "Set" button.
     }
 
-    /** Unlock the app (used after password verified). */
-    fun unlockApp() {
-        isAppLocked = false
-        appLockTriggered = false
-    }
-
     /** Clear the password and unlock. */
     fun clearAppPassword() {
         repository?.clearPassword()
@@ -138,23 +137,82 @@ class MainViewModel : ViewModel() {
         isStrictMode = repository?.isStrictMode ?: false
     }
 
-    // ── Google App gender terms (all tabs) ────────────────────────
+    // ── Block Shorts (YouTube Shorts) ────────────────────────────────
 
-    var blockGenderTermsInGoogleApp by mutableStateOf(false)
+    var blockShorts by mutableStateOf(false)
         private set
 
-    fun toggleBlockGenderTermsInGoogleApp() {
-        val newValue = !blockGenderTermsInGoogleApp
-        repository?.blockGenderTermsInGoogleApp = newValue
-        blockGenderTermsInGoogleApp = newValue
-        android.util.Log.i("MainViewModel", "Google App gender terms ${if (newValue) "enabled" else "disabled"}")
+    fun toggleBlockShorts() {
+        val newValue = !blockShorts
+        repository?.blockShorts = newValue
+        blockShorts = newValue
+        android.util.Log.i("MainViewModel", "Block Shorts ${if (newValue) "enabled" else "disabled"}")
     }
 
-    fun refreshBlockGenderTermsInGoogleApp() {
-        blockGenderTermsInGoogleApp = repository?.blockGenderTermsInGoogleApp ?: false
+    fun refreshBlockShorts() {
+        blockShorts = repository?.blockShorts ?: false
+    }
+
+    // ── YouTube Chrome Test (Stage 1 feasibility experiment) ────────
+
+    var youTubeChromeTest by mutableStateOf(false)
+        private set
+
+    fun toggleYouTubeChromeTest() {
+        val newValue = !youTubeChromeTest
+        repository?.youTubeChromeTest = newValue
+        youTubeChromeTest = newValue
+        android.util.Log.i("MainViewModel", "YouTube Chrome Test ${if (newValue) "enabled" else "disabled"}")
+    }
+
+    fun refreshYouTubeChromeTest() {
+        youTubeChromeTest = repository?.youTubeChromeTest ?: false
+    }
+
+    // ── YouTube Chrome Test Keywords (separate test-only list) ──────
+
+    var newYoutubeTestKeywordText by mutableStateOf("")
+        private set
+
+    val youtubeTestKeywords = mutableStateListOf<String>()
+
+    fun updateNewYoutubeTestKeyword(text: String) {
+        newYoutubeTestKeywordText = text
+    }
+
+    fun addYoutubeTestKeyword() {
+        val keyword = newYoutubeTestKeywordText.trim()
+        if (keyword.isEmpty()) return
+        youtubeTestKeywordRepository?.addKeyword(keyword)
+        newYoutubeTestKeywordText = ""
+        refreshYoutubeTestKeywords()
+    }
+
+    fun removeYoutubeTestKeyword(keyword: String) {
+        youtubeTestKeywordRepository?.removeKeyword(keyword)
+        refreshYoutubeTestKeywords()
+    }
+
+    private fun refreshYoutubeTestKeywords() {
+        youtubeTestKeywords.clear()
+        youtubeTestKeywords.addAll((youtubeTestKeywordRepository?.getKeywords() ?: emptySet()).sorted())
     }
 
     // ── Private DNS (network-level filtering) ───────────────────────
+
+    /**
+     * Cloudflare Family DNS hostname (1.1.1.3) — blocks malware AND adult
+     * content at the network level. Using the DoT hostname form so it works
+     * as an Android Private DNS provider on all networks.
+     */
+    fun cloudflareFamilyHostname(): String = "family.cloudflare-dns.com"
+
+    /**
+     * CleanBrowsing Family Filter hostname — blocks adult content + malware
+     * at the network level (185.228.168.168 / 185.228.169.168). The DoT
+     * hostname form works as an Android Private DNS provider.
+     */
+    fun cleanBrowsingFamilyHostname(): String = "family-filter-dns.cleanbrowsing.org"
 
     fun openPrivateDnsSettings(context: Context) {
         try {
@@ -177,18 +235,6 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    fun openDnsSetupGuide(context: Context) {
-        try {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                data = android.net.Uri.parse("https://cleanbrowsing.org/filters/")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            android.util.Log.e("MainViewModel", "Failed to open DNS guide: ${e.message}")
-        }
-    }
-
     // ── Accessibility ──────────────────────────────────────────────
 
     fun checkAccessibilityStatus(context: Context) {
@@ -207,9 +253,6 @@ class MainViewModel : ViewModel() {
     var isDeviceOwner by mutableStateOf(false)
         private set
 
-    var isUninstallBlocked by mutableStateOf(false)
-        private set
-
     fun checkDeviceAdminStatus(context: Context) {
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val component = ComponentName(context, com.muddassir.clearview.receiver.DeviceAdminReceiver::class.java)
@@ -226,25 +269,12 @@ class MainViewModel : ViewModel() {
             val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 isDeviceOwner = dpm.isDeviceOwnerApp(context.packageName)
-                if (isDeviceOwner) {
-                    val component = ComponentName(context, com.muddassir.clearview.receiver.DeviceAdminReceiver::class.java)
-                    isUninstallBlocked = try {
-                        // setUninstallBlocked doesn't have a getter, so we infer from admin status + owner
-                        dpm.isAdminActive(component) && isDeviceOwner
-                    } catch (e: Exception) {
-                        false
-                    }
-                } else {
-                    isUninstallBlocked = false
-                }
             } else {
                 isDeviceOwner = false
-                isUninstallBlocked = false
             }
         } catch (e: Exception) {
             android.util.Log.e("MainViewModel", "Failed to check Device Owner: ${e.message}")
             isDeviceOwner = false
-            isUninstallBlocked = false
         }
     }
 
@@ -283,7 +313,6 @@ class MainViewModel : ViewModel() {
             //    device owner app itself.
             dpm.clearDeviceOwnerApp(context.packageName)
             isDeviceOwner = false
-            isUninstallBlocked = false
             checkDeviceAdminStatus(context)
             android.util.Log.i("MainViewModel", "Device Owner removed — uninstall/updates allowed again")
         } catch (e: Exception) {
@@ -330,11 +359,6 @@ class MainViewModel : ViewModel() {
 
     fun removeKeyword(keyword: String) {
         repository?.removeUserKeyword(keyword)
-        refreshKeywords()
-    }
-
-    fun editKeyword(oldKeyword: String, newKeyword: String) {
-        repository?.replaceUserKeyword(oldKeyword, newKeyword)
         refreshKeywords()
     }
 

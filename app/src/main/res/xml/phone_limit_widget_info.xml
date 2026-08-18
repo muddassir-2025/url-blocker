@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Compact wide-strip Phone Limit widget (2x1 — half the height of the
+     original 2x2 square). The ACTIVE countdown is pushed by the foreground
+     service (per-second), never polled; the 30-minute updatePeriodMillis is
+     the Android minimum and only refreshes the IDLE screen-time label, which
+     nothing else would push while the timer is off. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:minWidth="110dp"
+    android:minHeight="104dp"
+    android:targetCellWidth="2"
+    android:targetCellHeight="2"
+    android:updatePeriodMillis="1800000"
+    android:initialLayout="@layout/widget_phone_limit"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen"
+    android:description="@string/widget_phone_limit_description"
+    android:previewLayout="@layout/widget_phone_limit"
+    tools:targetApi="31" />

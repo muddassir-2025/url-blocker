@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rounded chip for the Phone Limit widget's quick-set buttons. Subtle 12%
+     white fill (same as the Quran widget's action chips) so the buttons stay
+     visible on the dark card. App drawable only — RemoteViews-safe. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/widget_button_bg" />
+    <corners android:radius="8dp" />
+</shape>

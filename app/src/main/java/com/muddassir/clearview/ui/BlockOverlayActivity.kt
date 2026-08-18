@@ -15,16 +15,21 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.muddassir.clearview.service.UrlBlockerService
 import com.muddassir.clearview.ui.theme.UrlblockerTheme
 
 /**
@@ -34,9 +39,8 @@ import com.muddassir.clearview.ui.theme.UrlblockerTheme
  *   1. Immediately covers the blocked content
  *   2. Shows a blocking message
  *   3. STAYS on screen until the user dismisses it manually — the ✕ button
- *      (top-right) or the "Return Home" button both navigate to Home. There
- *      is NO auto-exit: the overlay must not flash and vanish on its own,
- *      and the user decides when to leave.
+ *      (top-right) navigates Home. There is NO auto-exit: the overlay must
+ *      not flash and vanish on its own, and the user decides when to leave.
  *
  * The user cannot dismiss this overlay to reveal the blocked content
  * underneath — dismissal always goes Home.
@@ -47,8 +51,8 @@ class BlockOverlayActivity : ComponentActivity() {
         private const val TAG = "BlockOverlayActivity"
     }
 
-    /** True once the destination navigation has run (button, ✕ and
-     *  onBackPressed can all fire; only the first may navigate). */
+    /** True once the destination navigation has run (✕ and onBackPressed
+     *  can both fire; only the first may navigate). */
     private var exited = false
 
     /**
@@ -66,8 +70,10 @@ class BlockOverlayActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Make this activity full-screen and impossible to bypass
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        // Make this activity full-screen and impossible to bypass. ALWAYS mode
+        // is only available from API 30 (Android 11) — older versions use the
+        // default cutout behavior, which is fine for the overlay.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         }
@@ -75,6 +81,9 @@ class BlockOverlayActivity : ComponentActivity() {
 
         val blockedItem = intent.getStringExtra("blocked_item") ?: "content"
         val blockedType = intent.getStringExtra("blocked_type") ?: "MATCHED"
+        // Whether this block came from Strict Mode's broad keywords — the
+        // overlay then shows a short note about searching the term legitimately.
+        val strictHit = intent.getBooleanExtra("strict_hit", false)
 
         // NOTE: incognito never reaches this overlay anymore — the service
         // closes the incognito tabs and lands the user on Home directly (simple,
@@ -87,6 +96,7 @@ class BlockOverlayActivity : ComponentActivity() {
                 BlockOverlayScreen(
                     blockedItem = blockedItem,
                     blockedType = blockedType,
+                    strictHit = strictHit,
                     onDismiss = { exitToDestination() }
                 )
             }
@@ -119,22 +129,37 @@ class BlockOverlayActivity : ComponentActivity() {
         }
         Log.i(TAG, "Exiting to Home")
         try {
-            val intent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_HOME)
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TASK or
-                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-            }
-            // Only launch Home if a home activity actually resolves (launcher
-            // disabled/updating, kiosk mode…). If none, fall straight through
-            // to the graceful fallback below instead of relying on the catch.
-            if (intent.resolveActivity(packageManager) != null) {
-                startActivity(intent)
-                // No enter animation for the launcher: prevents the "floating
-                // app icon" fly animation some launchers play when Home appears.
-                overridePendingTransition(0, 0)
-            } else {
-                Log.w(TAG, "No home activity resolved; dismissing overlay only")
+            // Prefer the accessibility service's GLOBAL_ACTION_HOME — literally
+            // the same event as the user pressing the navigation-bar Home
+            // button. The EXISTING launcher task is brought to the front
+            // untouched, so the launcher never re-renders its grid and no icon
+            // animation plays.
+            //
+            // The previous implementation launched a NEW Home intent with
+            // FLAG_ACTIVITY_CLEAR_TASK — that finishes and recreates the
+            // launcher task/activity, forcing a full grid reflow that shows one
+            // app icon sliding away and snapping back.
+            if (!UrlBlockerService.pressHome()) {
+                Log.w(TAG, "Accessibility service not running — falling back to a Home intent")
+                // Fallback (service not connected): launch Home WITHOUT clearing
+                // or recreating the launcher task. NEW_TASK alone brings the
+                // existing launcher task forward, matching a normal Home press.
+                val intent = Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_HOME)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                }
+                // Only launch Home if a home activity actually resolves (launcher
+                // disabled/updating, kiosk mode…). If none, fall straight through
+                // to the graceful fallback below instead of relying on the catch.
+                if (intent.resolveActivity(packageManager) != null) {
+                    startActivity(intent)
+                    // No enter animation for the launcher: prevents the "floating
+                    // app icon" fly animation some launchers play when Home appears.
+                    overridePendingTransition(0, 0)
+                } else {
+                    Log.w(TAG, "No home activity resolved; dismissing overlay only")
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to exit to Home: ${e.message}")
@@ -169,6 +194,9 @@ class BlockOverlayActivity : ComponentActivity() {
 private fun BlockOverlayScreen(
     blockedItem: String,
     blockedType: String,
+    /** When the block came from Strict Mode's broad keywords, a short note
+     *  explains that it's on and how to search the term legitimately. */
+    strictHit: Boolean = false,
     onDismiss: () -> Unit
 ) {
     var visible by remember { mutableStateOf(false) }
@@ -192,17 +220,27 @@ private fun BlockOverlayScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background),
+                // Soft vertical wash: a touch of surface tone at the top that
+                // melts into the solid background — subtle depth behind the
+                // message without fighting the dark theme.
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+                            MaterialTheme.colorScheme.background
+                        )
+                    )
+                ),
             // Center the message block vertically; the ✕ overrides its own
             // alignment below.
             contentAlignment = Alignment.Center
         ) {
-            // ✕ close button — top-right, always visible. The overlay stays on
-            // screen until the user taps it (or "Return Home").
+            // ✕ close button — top-right, always visible, the ONLY control.
+            // The overlay stays on screen until the user taps it.
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(8.dp)
+                    .padding(10.dp)
                     .size(44.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
@@ -220,25 +258,45 @@ private fun BlockOverlayScreen(
             Column(
                 modifier = Modifier
                     .padding(32.dp)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    // Scrolls so the Strict Mode note card can't push the
+                    // message off-screen on short displays (landscape etc.).
+                    .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
+                // Hero line — reverent, elegant serif.
                 Text(
-                    text = "🛡️",
-                    fontSize = 64.sp
-                )
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Text(
-                    text = "Content Blocked",
-                    style = MaterialTheme.typography.headlineMedium,
+                    text = "FEAR GOD",
+                    fontFamily = FontFamily.Serif,
                     fontWeight = FontWeight.Bold,
+                    fontSize = 42.sp,
+                    letterSpacing = 6.sp,
                     color = MaterialTheme.colorScheme.onBackground
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Thin accent divider.
+                Box(
+                    modifier = Modifier
+                        .width(56.dp)
+                        .height(2.dp)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.55f))
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Status — wide-tracked caps.
+                Text(
+                    text = "BLOCKED",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                    letterSpacing = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(32.dp))
 
                 Text(
                     text = when (blockedType) {
@@ -266,25 +324,30 @@ private fun BlockOverlayScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(32.dp))
+                if (strictHit) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        shape = MaterialTheme.shapes.medium
+                    ) {
+                        Text(
+                            text = "Strict Mode is on. This block came from its broad keywords — if you're searching this term for a legitimate reason (health, education, research), you can turn Strict Mode off in the app: Block tab → Strict Mode.",
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(40.dp))
 
                 Text(
-                    text = "Tap ✕ to dismiss when ready",
+                    text = "Tap ✕ to dismiss",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                     textAlign = TextAlign.Center
                 )
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Button(
-                    onClick = onDismiss,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Text("Return Home")
-                }
             }
         }
     }

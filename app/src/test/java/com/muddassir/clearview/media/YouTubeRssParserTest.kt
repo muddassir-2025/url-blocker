@@ -317,6 +317,44 @@ class ChannelIdResolverTest {
     }
 
     @Test
+    fun recognizesArabicHandles() {
+        // YouTube supports Unicode (Arabic) characters in handles — extraction
+        // must never be ASCII-only, and URLs with an Arabic handle must yield
+        // the same normalized handle.
+        assertEquals("@الفلاح-هدف", ChannelIdResolver.extractChannelId("@الفلاح-هدف"))
+        assertEquals(
+            "@الفلاح-هدف",
+            ChannelIdResolver.extractChannelId("https://m.youtube.com/@الفلاح-هدف/")
+        )
+        assertEquals(
+            "@الفلاح-هدف",
+            ChannelIdResolver.extractChannelId("https://www.youtube.com/@الفلاح-هدف")
+        )
+    }
+
+    @Test
+    fun percentEncodesArabicHandleForTheFetchUrl() {
+        assertEquals(
+            "@%D8%A7%D9%84%D9%81%D9%84%D8%A7%D8%AD-%D9%87%D8%AF%D9%81",
+            ChannelIdResolver.encodeHandlePath("@الفلاح-هدف")
+        )
+        // ASCII and already-encoded handles pass through untouched.
+        assertEquals("@SafinaSociety", ChannelIdResolver.encodeHandlePath("@SafinaSociety"))
+        assertEquals(
+            "@%D8%A7%D9%84%D9%81%D9%84%D8%A7%D8%AD-%D9%87%D8%AF%D9%81",
+            ChannelIdResolver.encodeHandlePath("@%D8%A7%D9%84%D9%81%D9%84%D8%A7%D8%AD-%D9%87%D8%AF%D9%81")
+        )
+    }
+
+    @Test
+    fun emailLikeInputYieldsACandidateHandle() {
+        // Not a regression (the old unanchored regex behaved the same), but
+        // pinned on purpose: an email-like input is accepted as a *candidate*
+        // handle and rejected downstream when the channel-page fetch fails.
+        assertEquals("@example.com", ChannelIdResolver.extractChannelId("user@example.com"))
+    }
+
+    @Test
     fun rejectsGarbage() {
         assertNull(ChannelIdResolver.extractChannelId(""))
         assertNull(ChannelIdResolver.extractChannelId("not a channel"))

@@ -4,8 +4,10 @@ import com.muddassir.clearview.media.model.FeedContentFilter
 import com.muddassir.clearview.media.model.FeedDateFilter
 import com.muddassir.clearview.media.model.FeedFilter
 import com.muddassir.clearview.media.model.FeedSortOrder
+import com.muddassir.clearview.media.model.FeedSourceFilter
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
+import com.muddassir.clearview.media.model.PlaylistTypeFilter
 import com.muddassir.clearview.media.model.startOfDayEpochMillis
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -28,13 +30,15 @@ const val STARTED_FRACTION_THRESHOLD = 0.02f
  * already-loaded videos are filtered), using [now] as the reference time for
  * the relative date presets. Filtering uses each video's real publication
  * timestamp. [progressOf] reports the watched fraction (0..1, null = never
- * started) — needed for the watch-status filter.
+ * started) — needed for the watch-status filter. [isManual] tells whether a
+ * video was added by URL — needed for the source filter.
  */
 fun applyFeedFilter(
     videos: List<MediaVideo>,
     filter: FeedFilter,
     now: Long = System.currentTimeMillis(),
-    progressOf: (String) -> Float? = { null }
+    progressOf: (String) -> Float? = { null },
+    isManual: (String) -> Boolean = { false }
 ): List<MediaVideo> {
     val start = when (filter.date) {
         FeedDateFilter.ALL_TIME -> null
@@ -66,7 +70,16 @@ fun applyFeedFilter(
             FeedWatchStatus.PARTIALLY_WATCHED ->
                 p != null && p >= STARTED_FRACTION_THRESHOLD && p < WATCHED_FRACTION_THRESHOLD
         }
-        afterStart && beforeEnd && typeOk && statusOk
+        val sourceOk = when (filter.source) {
+            FeedSourceFilter.ALL -> true
+            FeedSourceFilter.BY_URL -> isManual(v.videoId)
+            // "From channels": pulled automatically from the saved channels.
+            FeedSourceFilter.SYSTEM -> !isManual(v.videoId)
+            // "By RSS" is offered inside user playlists; in the All Feed it
+            // matches the same channel-feed videos as "From channels".
+            FeedSourceFilter.BY_RSS -> !isManual(v.videoId)
+        }
+        afterStart && beforeEnd && typeOk && statusOk && sourceOk
     }
 
     return when (filter.sort) {
@@ -95,10 +108,12 @@ fun feedFilterSummary(
     val typePart = if (filter.content == FeedContentFilter.ALL) null else filter.content.label
     val statusPart =
         if (filter.watchStatus == FeedWatchStatus.ALL) null else filter.watchStatus.label
+    val sourcePart = if (filter.source == FeedSourceFilter.ALL) null else filter.source.label
     return buildString {
         append(datePart)
         typePart?.let { append(" · ").append(it) }
         statusPart?.let { append(" · ").append(it) }
+        sourcePart?.let { append(" · ").append(it) }
         append(" · ").append(resultCount).append(if (resultCount == 1) " video" else " videos")
     }
 }
@@ -118,6 +133,8 @@ fun encodeFeedFilter(filter: FeedFilter): String =
         .put("content", filter.content.name)
         .put("sort", filter.sort.name)
         .put("watchStatus", filter.watchStatus.name)
+        .put("source", filter.source.name)
+        .put("playlistType", filter.playlistType.name)
         .put("customStart", filter.customStartEpochMillis ?: JSONObject.NULL)
         .put("customEnd", filter.customEndEpochMillis ?: JSONObject.NULL)
         .toString()
@@ -125,8 +142,9 @@ fun encodeFeedFilter(filter: FeedFilter): String =
 /**
  * Decodes a persisted filter; null when the value is missing or corrupt, so
  * callers can fall back to the default [FeedFilter]. Older persisted values
- * without the watch-status key decode to its default, and the removed
- * "library" (bookmarks) key is ignored entirely.
+ * without the watch-status key decode to its default, the removed "library"
+ * (bookmarks) key is ignored entirely, and the old "All time" date baseline
+ * (the previous default) is migrated to the current "Last 3 days" default.
  */
 fun decodeFeedFilter(json: String?): FeedFilter? {
     if (json.isNullOrBlank()) return null
@@ -141,16 +159,34 @@ fun decodeFeedFilter(json: String?): FeedFilter? {
         // the user with an active filter they can no longer reach. Migrate it to
         // All so the feed never silently locks to a hidden filter.
         if (content == FeedContentFilter.LIVE) content = FeedContentFilter.ALL
+        // NOTE: the persisted date is deliberately NOT migrated. "All time" is
+        // still a first-class option in the filter sheet, so a stored ALL_TIME
+        // value is just as likely to be the user's explicit choice as an old
+        // default — rewriting it to Last 3 days would silently discard their
+        // selection on every restart. Fresh installs get the new Last 3 days
+        // default through [FeedFilter]'s constructor default instead.
         val sort = runCatching { FeedSortOrder.valueOf(o.optString("sort", "")) }.getOrNull()
             ?: return null
         val watchStatus = runCatching {
             FeedWatchStatus.valueOf(o.optString("watchStatus", ""))
         }.getOrNull() ?: FeedWatchStatus.UNWATCHED
+        // The source filter is new — values saved by older builds (no key, or
+        // an unknown value) decode to its All default.
+        val source = runCatching {
+            FeedSourceFilter.valueOf(o.optString("source", ""))
+        }.getOrNull() ?: FeedSourceFilter.ALL
+        // The playlist media-type filter is new — unknown/missing values decode
+        // to its All default (it's only meaningful inside user playlists).
+        val playlistType = runCatching {
+            PlaylistTypeFilter.valueOf(o.optString("playlistType", ""))
+        }.getOrNull() ?: PlaylistTypeFilter.ALL
         FeedFilter(
             date = date,
             content = content,
             sort = sort,
             watchStatus = watchStatus,
+            source = source,
+            playlistType = playlistType,
             customStartEpochMillis = if (o.isNull("customStart")) null else o.optLong("customStart", 0L),
             customEndEpochMillis = if (o.isNull("customEnd")) null else o.optLong("customEnd", 0L)
         )

@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -41,6 +40,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -132,7 +132,8 @@ fun QuranSettingsSheet(state: ContentHubState, onDismiss: () -> Unit) {
     // auto-prompt must ALSO kick an immediate media check, otherwise channels
     // that already uploaded wait up to an hour for the periodic worker.
     LaunchedEffect(Unit) {
-        if ((state.mediaNotificationsEnabled || state.quranNotificationsEnabled) &&
+        if ((state.mediaNotificationsEnabled || state.quranNotificationsEnabled ||
+                state.todoNotificationsEnabled) &&
             needsNotificationPermission(context)
         ) {
             pendingPermissionApply = { granted ->
@@ -162,10 +163,215 @@ fun QuranSettingsSheet(state: ContentHubState, onDismiss: () -> Unit) {
             )
 
             Spacer(Modifier.height(20.dp))
+            // ── 1. Bookmark ──
+            // Closes settings first so the two sheets never stack on screen.
+            Card(
+                onClick = {
+                    onDismiss()
+                    state.showBookmarksSheet = true
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.Bookmark,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.quran_bookmarks_view),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = pluralStringResource(
+                                R.plurals.quran_bookmarks_note,
+                                state.bookmarkCount,
+                                state.bookmarkCount
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            // ── 2. Dhikr ──
+            // Directly below the Bookmark card. Closes settings first so the
+            // counter gets the whole screen.
+            Card(
+                onClick = {
+                    onDismiss()
+                    state.showDhikrCounter = true
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "📿",
+                        fontSize = 24.sp,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.dhikr_counter_card_title),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = stringResource(R.string.dhikr_counter_card_note),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            // ── 3. Todo ──
+            // Directly below the Dhikr card. Closes settings first so the
+            // Todo screen gets the whole screen.
+            Card(
+                onClick = {
+                    onDismiss()
+                    state.showTodoScreen = true
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "✅",
+                        fontSize = 24.sp,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.todo_card_title),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = stringResource(R.string.todo_card_note),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            // ── 4. Phone Limit ──
+            // Countdown that locks the phone when it expires; runs in the
+            // background via a foreground service. Closes settings first so
+            // the phone-limit sheet gets the screen.
+            Card(
+                onClick = {
+                    onDismiss()
+                    state.showPhoneLimitSheet = true
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.Timer,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.phone_limit_menu_title),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = stringResource(R.string.phone_limit_menu_note),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            // ── 5. Quran / New Verse ──
             Text(
-                text = stringResource(R.string.quran_verse_refresh_frequency),
+                text = stringResource(R.string.quran_settings_section_quran),
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = stringResource(R.string.quran_verse_refresh_frequency),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(8.dp))
             FlowRow(
@@ -190,6 +396,14 @@ fun QuranSettingsSheet(state: ContentHubState, onDismiss: () -> Unit) {
             Spacer(Modifier.height(16.dp))
             HorizontalDivider()
             Spacer(Modifier.height(16.dp))
+
+            // ── 5. Notifications ──
+            Text(
+                text = stringResource(R.string.quran_notifications_title),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(8.dp))
 
             // ── Media notifications toggle ──
             SettingsToggleRow(
@@ -248,56 +462,34 @@ fun QuranSettingsSheet(state: ContentHubState, onDismiss: () -> Unit) {
             )
 
             Spacer(Modifier.height(16.dp))
-            HorizontalDivider()
-            Spacer(Modifier.height(16.dp))
 
-            // ── Bookmarks manager ──
-            // Closes settings first so the two sheets never stack on screen.
-            Card(
-                onClick = {
-                    onDismiss()
-                    state.showBookmarksSheet = true
+            // ── Todo reminders toggle ──
+            SettingsToggleRow(
+                icon = {
+                    Icon(
+                        imageVector = if (state.todoNotificationsEnabled) Icons.Filled.Notifications
+                        else Icons.Outlined.Notifications,
+                        contentDescription = null,
+                        tint = if (state.todoNotificationsEnabled) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(26.dp)
+                    )
                 },
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                )
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Filled.Bookmark,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = stringResource(R.string.quran_bookmarks_view),
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            text = pluralStringResource(
-                                R.plurals.quran_bookmarks_note,
-                                state.bookmarkCount,
-                                state.bookmarkCount
-                            ),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                title = stringResource(R.string.todo_notifications),
+                note = stringResource(R.string.todo_notifications_note),
+                checked = state.todoNotificationsEnabled,
+                onCheckedChange = { enabled ->
+                    if (enabled && needsNotificationPermission(context)) {
+                        pendingPermissionApply = { granted ->
+                            state.setTodoNotifications(granted)
+                        }
+                        permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        state.setTodoNotifications(enabled)
                     }
-                    Icon(
-                        Icons.Filled.ChevronRight,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
-            }
+            )
+
         }
     }
 }
@@ -536,6 +728,10 @@ private fun SurahBrowseList(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // Read via stringResource (not context.getString) so the value tracks
+    // configuration changes — lint treats context reads inside composables as
+    // an error since they aren't recomposed when the configuration changes.
+    val verseUnavailable = stringResource(R.string.quran_verse_unavailable)
 
     // Filter the 114 surahs by the shared search field: a blank query shows
     // all of them; a pure number matches the surah number exactly ("2" →
@@ -585,11 +781,7 @@ private fun SurahBrowseList(
                             onOpenVerse(first)
                         } else {
                             // Not cached yet — the jump can't resolve.
-                            Toast.makeText(
-                                context,
-                                context.getString(R.string.quran_verse_unavailable),
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            Toast.makeText(context, verseUnavailable, Toast.LENGTH_SHORT).show()
                         }
                     }
                 },
@@ -780,20 +972,60 @@ fun BookmarksSheet(state: ContentHubState, onDismiss: () -> Unit) {
     // confirmation dialog below can also use it.
     val list = bookmarks
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.92f)
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 24.dp)
+    Dialog(
+        onDismissRequest = onDismiss,
+        // Full width + edge-to-edge so imePadding() below actually receives the
+        // IME insets and the list shrinks above the keyboard (same pattern as
+        // the Quran search screen).
+        //
+        // WHY A DIALOG, NOT A BOTTOM SHEET: ModalBottomSheet wraps its content
+        // in its own vertical scroll, so a LazyColumn nested inside it creates
+        // TWO competing scrollers. When the list hits the bottom and the user
+        // keeps scrolling, the overscroll propagates through the sheet's
+        // scroll container into its nested-scroll (drag-to-dismiss) connection
+        // — the whole sheet gets dragged down and springs back, which is the
+        // flicker/shake. A full-screen dialog gives the LazyColumn a single
+        // bounded, sole-scroller layout (no nested scrolling) — the exact
+        // setup that already works in the Quran search screen.
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background
         ) {
-            Text(
-                text = stringResource(R.string.quran_bookmarks_title),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(Modifier.height(12.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .imePadding()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 24.dp)
+            ) {
+                // Top bar: back arrow + title (the back arrow dismisses, like
+                // the Quran search screen).
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.quran_bookmarks_close)
+                        )
+                    }
+                    Text(
+                        text = stringResource(R.string.quran_bookmarks_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -867,6 +1099,7 @@ fun BookmarksSheet(state: ContentHubState, onDismiss: () -> Unit) {
                         }
                     }
                 }
+            }
             }
         }
     }
@@ -1036,6 +1269,81 @@ private fun SettingsToggleRow(
         }
         Spacer(Modifier.width(8.dp))
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/**
+ * Islamic Date Adjustment bottom sheet (opened from the Quran tab's edit icon
+ * beside the Islamic date): −1 day / Default / +1 day around the default
+ * Umm al-Qura date. Selecting updates the "Current adjustment" line live and
+ * persists via [ContentHubState.changeIslamicDateAdjustment]; the date under the
+ * verse updates immediately behind the sheet. The informational note appears
+ * ONLY here — never on the main Quran screen.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun IslamicDateAdjustmentSheet(
+    adjustment: Int,
+    onSelect: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 32.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.islamic_date_adjustment_title),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(-1, 0, 1).forEach { days ->
+                    FilterChip(
+                        selected = adjustment == days,
+                        onClick = { onSelect(days) },
+                        modifier = Modifier.weight(1f),
+                        label = {
+                            Text(
+                                stringResource(
+                                    when (days) {
+                                        -1 -> R.string.islamic_date_adjustment_minus
+                                        1 -> R.string.islamic_date_adjustment_plus
+                                        else -> R.string.islamic_date_adjustment_default
+                                    }
+                                )
+                            )
+                        }
+                    )
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = stringResource(
+                    R.string.islamic_date_current,
+                    stringResource(
+                        when (adjustment) {
+                            -1 -> R.string.islamic_date_adjustment_minus
+                            1 -> R.string.islamic_date_adjustment_plus
+                            else -> R.string.islamic_date_zero_days
+                        }
+                    )
+                ),
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = stringResource(R.string.islamic_date_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 

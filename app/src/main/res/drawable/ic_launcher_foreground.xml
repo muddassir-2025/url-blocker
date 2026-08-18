@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ClearView split-heart foreground (108dp adaptive-icon layer).
+     One smooth heart silhouette split down its vertical center:
+       · left half  — matte black (the old / dead / impure side)
+       · right half — deep red (life, renewal, a living heart)
+     Rendered as a full black heart with the red right half painted over it,
+     so both halves share an exact silhouette and the seam at x=54 is
+     perfectly clean and vertical. The heart spans x=32..76 and y=33.8..74.2
+     (44 wide × 40 tall on the 108 canvas) — deliberately small and dead
+     center, well inside the adaptive safe zone.
+
+     Source geometry: the Material heart in a 24-unit design space, scaled x2.2
+     and translated +27.6/+27.215. scripts/gen_launcher_icons.py regenerates
+     the legacy PNGs from the same 24-unit source, so all icons stay identical. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Full heart — matte black -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M54,74.185 l-3.19,-2.904 C39.48,61.007 32,54.231 32,45.915 C32,39.139 37.324,33.815 44.1,33.815 c3.828,0 7.502,1.782 9.9,4.598 C56.398,35.597 60.072,33.815 63.9,33.815 C70.676,33.815 76,39.139 76,45.915 c0,8.316 -7.48,15.092 -18.81,25.388 L54,74.185z" />
+
+    <!-- Right half — deep red, painted over the black heart -->
+    <path
+        android:fillColor="#C62828"
+        android:pathData="M54,38.413 C56.398,35.597 60.072,33.815 63.9,33.815 C70.676,33.815 76,39.139 76,45.915 c0,8.316 -7.48,15.092 -18.81,25.388 L54,74.185z" />
+</vector>

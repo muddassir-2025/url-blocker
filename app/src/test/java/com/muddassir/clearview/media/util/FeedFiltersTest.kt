@@ -4,8 +4,10 @@ import com.muddassir.clearview.media.model.FeedContentFilter
 import com.muddassir.clearview.media.model.FeedDateFilter
 import com.muddassir.clearview.media.model.FeedFilter
 import com.muddassir.clearview.media.model.FeedSortOrder
+import com.muddassir.clearview.media.model.FeedSourceFilter
 import com.muddassir.clearview.media.model.FeedWatchStatus
 import com.muddassir.clearview.media.model.MediaVideo
+import com.muddassir.clearview.media.model.PlaylistTypeFilter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -37,10 +39,11 @@ class FeedFiltersTest {
     )
 
     @Test
-    fun `default filter returns everything newest first`() {
+    fun `default filter returns the last 3 days newest first`() {
         val result = applyFeedFilter(videos(), FeedFilter(), now)
+        // The default date preset is Last 3 days — older uploads are excluded.
         assertEquals(
-            listOf("today", "yesterday", "three", "eight", "forty"),
+            listOf("today", "yesterday", "three"),
             result.map { it.videoId }
         )
         assertFalse(FeedFilter().isActive)
@@ -107,8 +110,10 @@ class FeedFiltersTest {
             FeedFilter(sort = FeedSortOrder.OLDEST_FIRST),
             now
         )
+        // The default date preset (Last 3 days) still applies — the order
+        // flips within the kept window.
         assertEquals(
-            listOf("forty", "eight", "three", "yesterday", "today"),
+            listOf("three", "yesterday", "today"),
             result.map { it.videoId }
         )
     }
@@ -234,6 +239,22 @@ class FeedFiltersTest {
     }
 
     @Test
+    fun `persisted ALL_TIME date is preserved, not migrated`() {
+        // "All time" is still a first-class option in the filter sheet, so a
+        // persisted ALL_TIME is as likely to be the user's explicit choice as
+        // an old default. Decoding must NOT rewrite it (the old migration
+        // silently discarded the user's "All time" pick on every restart).
+        // Fresh installs get the Last 3 days default via the constructor, not
+        // by mangling stored user choices.
+        val oldJson = "{\"date\":\"ALL_TIME\",\"content\":\"ALL\"," +
+            "\"sort\":\"NEWEST_FIRST\",\"watchStatus\":\"UNWATCHED\"}"
+        val decoded = decodeFeedFilter(oldJson)
+        assertEquals(FeedDateFilter.ALL_TIME, decoded?.date)
+        // And the preserved filter round-trips stably.
+        assertEquals(decoded, decodeFeedFilter(encodeFeedFilter(decoded!!)))
+    }
+
+    @Test
     fun `persisted LIVE content filter is migrated to ALL`() {
         // The Live chip was removed from Filter → Content; a filter saved by an
         // older build could still hold LIVE, which would lock the feed to an
@@ -283,6 +304,99 @@ class FeedFiltersTest {
     }
 
     @Test
+    fun `source by URL keeps only manually added videos`() {
+        val all = listOf(video("manual", now - day), video("auto", now - 2 * day))
+        val result = applyFeedFilter(
+            all,
+            FeedFilter(source = FeedSourceFilter.BY_URL, watchStatus = FeedWatchStatus.ALL),
+            now,
+            isManual = { it == "manual" }
+        )
+        assertEquals(listOf("manual"), result.map { it.videoId })
+    }
+
+    @Test
+    fun `source system keeps only channel-feed videos`() {
+        val all = listOf(video("manual", now - day), video("auto", now - 2 * day))
+        val result = applyFeedFilter(
+            all,
+            FeedFilter(source = FeedSourceFilter.SYSTEM, watchStatus = FeedWatchStatus.ALL),
+            now,
+            isManual = { it == "manual" }
+        )
+        assertEquals(listOf("auto"), result.map { it.videoId })
+    }
+
+    @Test
+    fun `source by rss keeps only channel-feed videos`() {
+        val all = listOf(video("manual", now - day), video("auto", now - 2 * day))
+        val result = applyFeedFilter(
+            all,
+            FeedFilter(source = FeedSourceFilter.BY_RSS, watchStatus = FeedWatchStatus.ALL),
+            now,
+            isManual = { it == "manual" }
+        )
+        assertEquals(listOf("auto"), result.map { it.videoId })
+    }
+
+    @Test
+    fun `source combines with watch status`() {
+        val all = listOf(
+            video("manual-watched", now - day),
+            video("manual-fresh", now - 2 * day)
+        )
+        val result = applyFeedFilter(
+            all,
+            FeedFilter(source = FeedSourceFilter.BY_URL, watchStatus = FeedWatchStatus.WATCHED),
+            now,
+            isManual = { true },
+            progressOf = { if (it == "manual-watched") 1f else null }
+        )
+        assertEquals(listOf("manual-watched"), result.map { it.videoId })
+    }
+
+    @Test
+    fun `source filter round-trips through encode decode`() {
+        val filter = FeedFilter(source = FeedSourceFilter.SYSTEM)
+        assertEquals(filter, decodeFeedFilter(encodeFeedFilter(filter)))
+    }
+
+    @Test
+    fun `persisted PLAYLIST source from an old build decodes to All`() {
+        // The "In playlists" source option was removed; a filter saved by an
+        // older build could still hold PLAYLIST. Decoding must normalize it to
+        // All so the feed never locks to a hidden filter.
+        val oldJson = "{\"date\":\"TODAY\",\"content\":\"ALL\"," +
+            "\"sort\":\"NEWEST_FIRST\",\"watchStatus\":\"ALL\"," +
+            "\"source\":\"PLAYLIST\"}"
+        val decoded = decodeFeedFilter(oldJson)
+        assertEquals(FeedSourceFilter.ALL, decoded?.source)
+    }
+
+    @Test
+    fun `summary includes source label when not all`() {
+        val summary = feedFilterSummary(
+            FeedFilter(source = FeedSourceFilter.BY_URL, watchStatus = FeedWatchStatus.ALL),
+            resultCount = 2
+        )
+        // The default date preset is Last 3 days.
+        assertEquals("Last 3 days · By URL · 2 videos", summary)
+    }
+
+    @Test
+    fun `isActive is true for source filters`() {
+        assertTrue(FeedFilter(source = FeedSourceFilter.SYSTEM).isActive)
+    }
+
+    @Test
+    fun `old filter values without source key decode to the All default`() {
+        val oldJson = "{\"date\":\"TODAY\",\"content\":\"ALL\"," +
+            "\"sort\":\"NEWEST_FIRST\",\"watchStatus\":\"ALL\"}"
+        val decoded = decodeFeedFilter(oldJson)
+        assertEquals(FeedSourceFilter.ALL, decoded?.source)
+    }
+
+    @Test
     fun `persisted library key from an old build is ignored`() {
         // The Bookmark feature was removed (user playlists replaced it). A
         // filter saved by an older build still holds a "library" key — decoding
@@ -293,5 +407,33 @@ class FeedFiltersTest {
         val decoded = decodeFeedFilter(oldJson)
         assertEquals(FeedDateFilter.TODAY, decoded?.date)
         assertEquals(FeedWatchStatus.ALL, decoded?.watchStatus)
+    }
+
+    @Test
+    fun `playlist type filter round-trips through encode decode`() {
+        val filter = FeedFilter(playlistType = PlaylistTypeFilter.AUDIO)
+        assertEquals(filter, decodeFeedFilter(encodeFeedFilter(filter)))
+    }
+
+    @Test
+    fun `old filter values without playlist type key decode to the All default`() {
+        val oldJson = "{\"date\":\"TODAY\",\"content\":\"ALL\"," +
+            "\"sort\":\"NEWEST_FIRST\",\"watchStatus\":\"ALL\"}"
+        val decoded = decodeFeedFilter(oldJson)
+        assertEquals(PlaylistTypeFilter.ALL, decoded?.playlistType)
+    }
+
+    @Test
+    fun `isActive is true for playlist type filters`() {
+        assertTrue(FeedFilter(playlistType = PlaylistTypeFilter.VIDEO).isActive)
+    }
+
+    @Test
+    fun `feed filter round-trip keeps playlist type`() {
+        val filter = FeedFilter(
+            source = FeedSourceFilter.SYSTEM,
+            playlistType = PlaylistTypeFilter.VIDEO
+        )
+        assertEquals(filter, decodeFeedFilter(encodeFeedFilter(filter)))
     }
 }

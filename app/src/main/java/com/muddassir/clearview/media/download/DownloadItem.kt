@@ -13,10 +13,9 @@ import org.json.JSONObject
  * cache dir via [AudioDownloadStore].
  *
  * [source] is [SOURCE_RSS] (from a saved channel's feed) or [SOURCE_URL]
- * (manually added by URL). [expiresAt] is only set for files larger than
- * [StoragePolicy.LARGE_FILE_THRESHOLD_BYTES] (the 15-day rule); 0 means the
- * file is kept indefinitely unless the user deletes it or storage cleanup
- * evicts the oldest downloads.
+ * (manually added by URL). [expiresAt] is always 0 — downloads are never
+ * auto-deleted, so the field exists only for JSON compatibility with metadata
+ * written by older builds that had the (removed) 15-day expiry rule.
  */
 data class DownloadItem(
     val videoId: String,
@@ -29,11 +28,17 @@ data class DownloadItem(
     val lastPlayed: Long = 0L,
     val expiresAt: Long = 0L,
     val thumbnailPath: String = "",
-    val durationSeconds: Long = 0L
+    val durationSeconds: Long = 0L,
+    /** The video's channel id (empty for downloads made before this field
+     *  existed, or when the channel id wasn't known). Drives per-channel
+     *  filtering in the Downloads view. */
+    val channelId: String = ""
 ) {
     companion object {
         const val SOURCE_RSS = "rss"
         const val SOURCE_URL = "url"
+        /** Imported from the device's local storage (not downloaded). */
+        const val SOURCE_DEVICE = "device"
     }
 }
 
@@ -60,6 +65,7 @@ object DownloadItems {
                     .put("expiresAt", item.expiresAt)
                     .put("thumbnailPath", item.thumbnailPath)
                     .put("durationSeconds", item.durationSeconds)
+                    .put("channelId", item.channelId)
             )
         }
         return arr.toString()
@@ -86,7 +92,8 @@ object DownloadItems {
                         lastPlayed = o.optLong("lastPlayed", 0L),
                         expiresAt = o.optLong("expiresAt", 0L),
                         thumbnailPath = o.optString("thumbnailPath", ""),
-                        durationSeconds = o.optLong("durationSeconds", 0L)
+                        durationSeconds = o.optLong("durationSeconds", 0L),
+                        channelId = o.optString("channelId", "")
                     )
                 } catch (e: Exception) {
                     null

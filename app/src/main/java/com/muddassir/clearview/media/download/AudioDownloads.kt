@@ -2,7 +2,6 @@ package com.muddassir.clearview.media.download
 
 import android.content.Context
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -13,16 +12,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.HttpURLConnection
 import java.util.concurrent.ConcurrentHashMap
 
 /** Live state of one in-flight (or failed) download. */
 sealed class DownloadStatus {
-    /** Connecting / waiting for the server (incl. Render cold starts). */
+    /** Resolving the audio stream on-device (NewPipeExtractor) before bytes flow. */
     data object Preparing : DownloadStatus()
 
-    /** Streaming; [progress] is 0..1, or -1 when the total size is unknown. */
-    data class Downloading(val progress: Float) : DownloadStatus()
+    /** Streaming; [progress] is 0..1 (or -1 when the total size is unknown),
+     *  and [etaSeconds] is the estimated time remaining (or -1 while it's too
+     *  early / unknown to estimate). */
+    data class Downloading(val progress: Float, val etaSeconds: Long = -1L) : DownloadStatus()
 
     /** The download failed; [message] is user-facing. Tap again to retry. */
     data class Error(val message: String) : DownloadStatus()
@@ -46,7 +48,7 @@ object AudioDownloads {
     private var store: AudioDownloadStore? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    /** All finished downloads, newest first (drives lists, storage card, filters). */
+    /** All finished downloads, newest first (drives lists and filters). */
     val items = mutableStateOf<List<DownloadItem>>(emptyList())
 
     /** In-flight / failed downloads keyed by video id. */
@@ -55,14 +57,19 @@ object AudioDownloads {
     /** The video metadata behind each in-flight/failed download (for the UI). */
     val pendingVideos = mutableStateMapOf<String, MediaVideo>()
 
-    /** The configured storage limit (bytes) — mirrored for the storage card. */
-    val storageLimit = mutableLongStateOf(StoragePolicy.DEFAULT_LIMIT_BYTES)
+    /** The resolved audio size in bytes per in-flight download, once known
+     *  (set right after stream extraction, BEFORE any bytes are downloaded, so
+     *  the UI can show "≈ X MB" while preparing / downloading). Unknown
+     *  (0) while extraction is still running. */
+    val pendingSizes = mutableStateMapOf<String, Long>()
 
     // Thread-safe: cancelRequested is written on the main thread and read from
-    // IO download threads; connections lets cancel() abort a blocked read
-    // immediately (disconnect) instead of waiting out the read timeout.
+    // IO download threads; connections lets cancel() abort every blocked read
+    // immediately (disconnect) instead of waiting out the read timeout. A SET
+    // per download because the parallel downloader opens several connections
+    // at once (probe + chunks) — cancelling must close ALL of them.
     private val cancelRequested = ConcurrentHashMap<String, Boolean>()
-    private val connections = ConcurrentHashMap<String, HttpURLConnection>()
+    private val connections = ConcurrentHashMap<String, MutableSet<HttpURLConnection>>()
 
     // ── Lifecycle ──────────────────────────────────────────────────
 
@@ -71,10 +78,17 @@ object AudioDownloads {
         if (appContext != null) return
         appContext = context.applicationContext
         store = AudioDownloadStore(context)
-        storageLimit.longValue = store!!.getStorageLimitBytes()
-        refresh()
-        // One maintenance pass on startup (expired / orphans / stale parts).
-        scope.launch { runMaintenance() }
+        scope.launch {
+            // One-time migration: legacy downloads that lived in the cache
+            // (cache/audio) move to the permanent filesDir/downloads home —
+            // BEFORE the first refresh reads the registry, so the list never
+            // briefly shows an empty library. Idempotent; a cheap no-op after
+            // the first successful run.
+            withContext(Dispatchers.IO) { store?.migrateLegacyDownloads() }
+            refresh()
+            // One maintenance pass on startup (orphans / stale parts).
+            scope.launch { runMaintenance() }
+        }
     }
 
     private fun storeOrThrow(): AudioDownloadStore =
@@ -93,6 +107,15 @@ object AudioDownloads {
 
     fun isDownloaded(videoId: String): Boolean =
         items.value.any { it.videoId == videoId }
+
+    /**
+     * Resolves the on-disk file of a finished download (`filesDir/downloads`).
+     * Falls back to a path-only resolution when the manager has not been
+     * initialized yet, so playback code can never crash on an uninitialized
+     * store — a file that does not exist just won't play.
+     */
+    fun audioFile(context: Context, item: DownloadItem): File =
+        store?.audioFile(item) ?: AudioDownloadStore(context).audioFile(item)
 
     fun itemFor(videoId: String): DownloadItem? =
         items.value.firstOrNull { it.videoId == videoId }
@@ -133,16 +156,22 @@ object AudioDownloads {
             active[id] = DownloadStatus.Preparing
             try {
                 val result = withContext(Dispatchers.IO) {
-                    // Make room first: drop anything already expired.
-                    s.deleteExpired(System.currentTimeMillis())
                     AudioDownloader.download(
                         context = appContext!!,
                         videoId = id,
-                        serverUrl = s.getServerUrl(),
-                        token = s.getServerToken(),
-                        onProgress = { p -> active[id] = DownloadStatus.Downloading(p) },
+                        onProgress = { p ->
+                            active[id] = DownloadStatus.Downloading(p.fraction, p.etaSeconds)
+                        },
                         isCancelled = { cancelRequested[id] == true },
-                        onConnection = { conn -> connections[id] = conn }
+                        onConnection = { conn ->
+                            connections.computeIfAbsent(id) {
+                                ConcurrentHashMap.newKeySet()
+                            }.add(conn)
+                        },
+                        // As soon as the server's response headers reveal the
+                        // size (before any audio bytes flow) it is surfaced so
+                        // show "≈ X MB" on the active download.
+                        onSizeKnown = { size -> if (size > 0L) pendingSizes[id] = size }
                     )
                 }
                 withContext(Dispatchers.IO) {
@@ -153,29 +182,31 @@ object AudioDownloads {
                             videoId = id,
                             title = video.title,
                             channelName = video.channelName.ifBlank { video.channelId },
+                            channelId = video.channelId,
                             source = source,
                             fileName = result.file.name,
                             fileSize = result.file.length(),
                             downloadedAt = now,
                             lastPlayed = 0L,
-                            expiresAt = StoragePolicy.expiresAtFor(result.file.length(), now),
+                            // No auto-expiry: downloads are kept until the user
+                            // removes them manually.
+                            expiresAt = 0L,
                             thumbnailPath = thumbnail ?: "",
                             durationSeconds = video.durationSeconds
                         )
                     )
-                    // Smart cleanup: over the limit → expired first, then the
-                    // oldest — never the audio currently playing.
-                    s.evictIfOverLimit(now, protectedIds = currentProtectedIds())
                 }
                 active.remove(id)
                 cancelRequested.remove(id)
                 pendingVideos.remove(id)
+                pendingSizes.remove(id)
                 connections.remove(id)
                 refresh()
             } catch (e: CancellationException) {
                 cancelRequested.remove(id)
                 active.remove(id)
                 pendingVideos.remove(id)
+                pendingSizes.remove(id)
                 connections.remove(id)
                 throw e
             } catch (e: Exception) {
@@ -189,15 +220,18 @@ object AudioDownloads {
                         (e as? DownloadException)?.message ?: "Download failed"
                     )
                 }
+                pendingSizes.remove(id)
                 connections.remove(id)
             }
         }
     }
 
-    /** Cancels the in-flight download for [videoId] (aborts the stream immediately). */
+    /** Cancels the in-flight download for [videoId] (aborts every stream immediately). */
     fun cancel(videoId: String) {
         cancelRequested[videoId] = true
-        connections.remove(videoId)?.disconnect()
+        connections.remove(videoId)?.forEach { conn ->
+            runCatching { conn.disconnect() }
+        }
     }
 
     /** Whether [videoId] is being downloaded right now (Preparing or Downloading). */
@@ -206,8 +240,42 @@ object AudioDownloads {
         return status is DownloadStatus.Preparing || status is DownloadStatus.Downloading
     }
 
-    private fun currentProtectedIds(): Set<String> =
-        OfflineAudioPlayer.playingVideoId.value?.let { setOf(it) } ?: emptySet()
+    // ── Device import ──────────────────────────────────────────────
+
+    /**
+     * Imports audio files the user picked from the device (SAF document Uris)
+     * into the offline library — copied into the permanent downloads folder
+     * (filesDir/downloads) and registered so they appear in the Downloads
+     * list and play like any download.
+     * [channelId]/[channelName] tag the imports with the Downloads view's
+     * current channel scope (so they show up where the user added them).
+     * [onResult] fires with the number actually imported, and [onImported]
+     * with the [DownloadItem]s created (e.g. to also add them to a playlist).
+     */
+    fun importFromDevice(
+        context: Context,
+        uris: List<android.net.Uri>,
+        channelId: String = "",
+        channelName: String = "",
+        onResult: (Int) -> Unit = {},
+        onImported: (List<DownloadItem>) -> Unit = {}
+    ) {
+        val s = storeOrThrow()
+        scope.launch {
+            // Never leave the caller stuck (a stuck "Importing…" button): any
+            // unexpected failure still reports a 0-result so the UI resets.
+            val imported = try {
+                withContext(Dispatchers.IO) {
+                    s.importFromDevice(context, uris, channelId, channelName)
+                }
+            } catch (e: Exception) {
+                emptyList()
+            }
+            refresh()
+            onResult(imported.size)
+            onImported(imported)
+        }
+    }
 
     // ── Deletion (always allowed) ──────────────────────────────────
 
@@ -231,18 +299,6 @@ object AudioDownloads {
         }
     }
 
-    fun clearAll() {
-        OfflineAudioPlayer.stop()
-        // Abort any in-flight download before sweeping the audio dir, so a
-        // running download can't keep writing into a deleted .part file.
-        active.keys.forEach { cancelRequested[it] = true }
-        val s = storeOrThrow()
-        scope.launch {
-            withContext(Dispatchers.IO) { s.clearAll() }
-            refresh()
-        }
-    }
-
     /** Records that [videoId] was listened to (drives "recently played"). */
     fun markPlayed(videoId: String) {
         val s = store ?: return
@@ -256,43 +312,29 @@ object AudioDownloads {
     // ── Background maintenance ─────────────────────────────────────
 
     /**
-     * Daily-cleanup work (also run once at startup): remove expired large
-     * downloads, drop orphaned metadata rows, delete stale .part files, and
-     * refresh the storage state. SUSPEND so callers (the WorkManager worker)
+     * Daily-cleanup work (also run once at startup): drop orphaned metadata
+     * rows, delete stale .part files from interrupted downloads, and refresh
+     * the storage state. Downloads are NEVER deleted here — nothing expires,
+     * and nothing is evicted. SUSPEND so callers (the WorkManager worker)
      * actually wait for the cleanup to finish. Returns the number of things
      * removed.
+     */
+    /**
+     * Maintenance may race the startup migration ([AudioCleanupWorker] calls
+     * it right after [initialize], which launches the migration asynchronously)
+     * — that is SAFE only because the migration moves audio files before
+     * metadata.json: maintenance reads the NEW registry, so it either sees no
+     * registry yet (nothing to orphan) or a complete one whose files are all
+     * already in place. Do not reorder the migration without revisiting this.
      */
     suspend fun runMaintenance(): Int {
         val s = store ?: return 0
         val removed = withContext(Dispatchers.IO) {
-            s.deleteExpired(System.currentTimeMillis()) +
-                s.removeOrphanedMetadata() +
+            s.removeOrphanedMetadata() +
                 s.deleteStalePartFiles(activeIds = active.keys.toSet())
         }
         refresh()
         return removed
-    }
-
-    // ── Settings ───────────────────────────────────────────────────
-
-    fun serverUrl(): String = storeOrThrow().getServerUrl()
-
-    fun saveServer(url: String, token: String?) {
-        val s = storeOrThrow()
-        scope.launch {
-            withContext(Dispatchers.IO) {
-                s.setServerUrl(url)
-                s.setServerToken(token)
-            }
-        }
-    }
-
-    fun setStorageLimit(bytes: Long) {
-        storageLimit.longValue = bytes
-        val s = storeOrThrow()
-        scope.launch {
-            withContext(Dispatchers.IO) { s.setStorageLimitBytes(bytes) }
-        }
     }
 
     /** Downloads + thumbnails bytes currently on disk (for the storage card). */

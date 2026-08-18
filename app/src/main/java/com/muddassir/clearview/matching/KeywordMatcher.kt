@@ -47,23 +47,7 @@ data class FeedVideoCard(
      * blocked (set by the matcher's risk-score evaluation; the overlay draws
      * "🚫 Blocked: <this>"). Null for unblocked cards.
      */
-    val blockedKeyword: String? = null,
-    /**
-     * On-device NSFW thumbnail score 0..1 from the TFLite image analyzer, when
-     * the service ran the image pipeline for this card (Android 11+ with the
-     * model present). Null when image analysis wasn't possible; the matcher
-     * adds the +0.4 thumbnail weight when the score crosses the threshold.
-     */
-    val nsfwScore: Float? = null,
-    /**
-     * Best-effort bounds of the card's THUMBNAIL IMAGE (the 16:9 image above
-     * the title row), in screen coordinates — computed by ContentExtractor
-     * from the card node's shape so the NSFW pipeline crops the actual image
-     * and never the title text (observed on-device: an 800x79 title strip was
-     * analyzed as a "thumbnail"). Null when the computed region failed the
-     * size sanity gate; the service then skips image analysis for this card.
-     */
-    val thumbnailBounds: android.graphics.Rect? = null
+    val blockedKeyword: String? = null
 )
 
 enum class MatchType {
@@ -149,6 +133,298 @@ class KeywordMatcher(
     companion object {
         private const val TAG = "KeywordMatcher"
 
+        // ── Precompiled match data (hot path) ─────────────────────────
+        // checkKeywords used to RE-SORT the whole keyword set on every call
+        // (a ~700-element sort, several times per accessibility event). The
+        // sorted list is cached per keyword set; the per-keyword indexOf scan
+        // itself is fast (~13µs for the full set — verified by benchmark) and
+        // stays as-is. BlockRepository returns STABLE set instances (it caches
+        // them), so keying by set identity is safe — an edited/rebuild set is
+        // a new key that builds a fresh entry. Weak keys so replaced sets can
+        // be collected. Thread-safe: checks run on the main thread and on
+        // Dispatchers.Default (thumbnail re-analysis).
+        private class KeywordCache(
+            // (original, normalized, needsBoundary): original is what a match
+            // reports (logs / block card); normalized is what's compared against
+            // the normalized scan text; needsBoundary is the whole-word verdict
+            // for the NORMALIZED form. All precomputed once per set so the hot
+            // path never normalizes or re-classifies keywords per event/poll.
+            val entries: List<KeywordEntry>
+        ) {
+            class KeywordEntry(
+                val original: String,
+                val normalized: String,
+                val needsBoundary: Boolean
+            )
+        }
+
+        private val keywordCacheLock = Any()
+        private val keywordCache = java.util.WeakHashMap<Set<String>, KeywordCache>()
+
+        private fun cacheFor(keywords: Set<String>): KeywordCache {
+            synchronized(keywordCacheLock) {
+                keywordCache[keywords]?.let { return it }
+            }
+            // Build outside the lock (the sort of ~700 strings is ~tens of µs;
+            // a concurrent duplicate build is benign — the put below keeps one).
+            val cache = KeywordCache(
+                entries = keywords.sortedWith(
+                    compareByDescending<String> { it.length }.thenBy { it }
+                ).map { kw ->
+                    val normalized = normalizeForMatching(kw)
+                    KeywordCache.KeywordEntry(kw, normalized, isPlainWordKeyword(normalized))
+                }
+            )
+            synchronized(keywordCacheLock) {
+                keywordCache.putIfAbsent(keywords, cache)?.let { return it }
+                return cache
+            }
+        }
+
+        // Compiled once, not per event (was constructed inside checkShortsBlock).
+        private val SHORTS_SIGNAL_REGEX = Regex("\\bshorts\\b")
+
+        // ── Whole-word matching (hot path) ──────────────────────────
+        // Plain-word keywords (letters + spaces only, every space-separated
+        // token a real word of >= 2 letters) match ONLY as whole words: the
+        // keyword must never be glued to a neighboring letter/digit. The
+        // boundary test uses Char.isLetterOrDigit(), which is Unicode-aware —
+        // unlike Java regex \b, it treats non-Latin letters as letters, so
+        // "cock" can never hide inside "cocktail"/"peacock", "ass" inside
+        // "class"/"grass", "anal" inside "analysis", "bra" inside
+        // "library", "man"/"men" inside "management"/"German", "hot"
+        // inside "hotel", "sex" inside "Middlesex"/"sextant", "erect"
+        // inside "erector", and the phrase "sex tape" inside "sex tapeworm".
+        //
+        // Obfuscation / leetspeak / misspelling keywords — anything containing
+        // digits, punctuation, underscores or emoji ("p0rn", "s3x", "f*ck",
+        // "p.o.r.n", "f_u_c_k", "18+", "x-rated", "🔞"), and spaced
+        // single-letter forms ("n u d e", "x n x x") — keep plain substring
+        // matching. They are intentionally punctuation-embedded, so their only
+        // realistic occurrences ARE standalone, and inflected variants
+        // ("f*cked", "p0rnhub", "s3xual") must keep matching.
+        internal fun isPlainWordKeyword(keyword: String): Boolean {
+            var sawLetter = false
+            for (ch in keyword) {
+                if (ch == ' ') continue
+                if (!ch.isLetter()) return false
+                sawLetter = true
+            }
+            if (!sawLetter) return false
+            // Spaced single-letter obfuscations ("n u d e", "x n x x") are
+            // NOT plain words — keep substring matching for them.
+            for (token in keyword.split(' ')) {
+                if (token.length < 2) return false
+            }
+            return true
+        }
+
+        /**
+         * True when a Google-app query represents a SUBMITTED search (results
+         * page showing), not live text the user is still typing in the search
+         * box.
+         *
+         * The Google app exposes the search-box text as the query WHILE the
+         * user types (SEARCH_BAR / EDITABLE_FIELD / ACCESSIBILITY_EVENT
+         * sources), so a query check without this gate blocks the moment a
+         * partial word matches (e.g. "ass" as the first letters of
+         * "assignment") — before any search runs. Committed-search signals:
+         *  - querySource == WINDOW_TITLE (the "keyword - Google Search"
+         *    window title only exists on the results page);
+         *  - googleTab != null (the All/Images/Videos tab chips only exist on
+         *    the results page);
+         *  - the window title parses as a Google search title (defense in
+         *    depth when the chip scan misses);
+         *  - a google.com/search URL is exposed (Chrome; the Google app
+         *    rarely exposes it, but when it does the search is committed).
+         *
+         * While typing on the Google home screen none of these are true, so
+         * the typed text is never treated as a search. Chrome is unaffected
+         * by design: its query comes from the URL q= param or the
+         * results-page window title, which only exist after submission.
+         */
+        internal fun isGoogleSearchCommitted(snapshot: ContentSnapshot): Boolean =
+            snapshot.querySource == QuerySource.WINDOW_TITLE ||
+                snapshot.googleTab != null ||
+                GoogleSignalParser.queryFromWindowTitle(snapshot.title ?: "") != null ||
+                snapshot.url?.contains("google.com/search") == true
+
+        /**
+         * Whole-word aware keyword matching. [needsBoundary] is
+         * [isPlainWordKeyword]'s verdict for [keyword] (precomputed per set by
+         * the cache); pass false to get a plain substring search for the
+         * obfuscation/leetspeak forms. The text must already be lowercased.
+         */
+        internal fun containsKeyword(text: String, keyword: String, needsBoundary: Boolean): Boolean {
+            if (!needsBoundary) return text.contains(keyword)
+            var start = text.indexOf(keyword)
+            while (start >= 0) {
+                val end = start + keyword.length
+                val beforeIsWord = start > 0 && text[start - 1].isLetterOrDigit()
+                val afterIsWord = end < text.length && text[end].isLetterOrDigit()
+                if (!beforeIsWord && !afterIsWord) return true
+                start = text.indexOf(keyword, start + 1)
+            }
+            return false
+        }
+
+        // ── Text normalization (pre-keyword matching) ──────────────────
+        // Runs BEFORE every keyword comparison so disguised spellings are
+        // caught generically instead of by hardcoded evasion entries: Unicode
+        // NFKC + homoglyph folding + leetspeak substitution + single-letter
+        // separator collapsing. O(n) over the text length using precomputed
+        // lookup maps only (no regex compiled per call, no live Unicode
+        // confusables database). Applied to BOTH the scanned text and the
+        // keywords (via the cache), so existing literal entries keep matching
+        // their raw forms and redundant evasions simply become harmless. The
+        // result feeds the whole-word boundary check in containsKeyword —
+        // normalization never bypasses it ("p.o.r.n" → "porn", and "porn"
+        // still needs word boundaries, so "pornstar" stays unmatched by it).
+
+        /** Visually-similar non-Latin letters folded to their Latin look-alikes. */
+        private val HOMOGLYPH_MAP: Map<Char, Char> = mapOf(
+            // Cyrillic look-alikes.
+            'а' to 'a', 'е' to 'e', 'о' to 'o', 'р' to 'p', 'с' to 'c', 'у' to 'y',
+            'х' to 'x', 'в' to 'b', 'н' to 'h', 'м' to 'm', 'т' to 't', 'к' to 'k',
+            'і' to 'i', 'ѕ' to 's', 'г' to 'r',
+            // Greek look-alikes (practical subset).
+            'α' to 'a', 'ε' to 'e', 'ο' to 'o', 'ρ' to 'p', 'σ' to 's', 'ς' to 's',
+            'ι' to 'i', 'ν' to 'v', 'χ' to 'x', 'κ' to 'k', 'μ' to 'm', 'τ' to 't'
+        )
+
+        /** Digit/symbol → letter leetspeak stand-ins (word-like tokens only). */
+        private val LEET_MAP: Map<Char, Char> = mapOf(
+            '0' to 'o', '1' to 'i', '3' to 'e', '4' to 'a', '5' to 's',
+            '7' to 't', '@' to 'a', '$' to 's', '!' to 'i'
+        )
+
+        /**
+         * Canonical form used for ALL keyword comparisons. Steps:
+         *  1. lowercase + NFKC (collapses fullwidth/compatibility variants:
+         *     "ＰＯＲＮ" / "ｐｏｒｎ" → "porn");
+         *  2. homoglyph folding (Cyrillic/Greek → Latin look-alikes);
+         *  3. per whitespace token: intra-token separator collapsing
+         *     ("p.o.r.n" → "porn"), then whitespace single-letter-run
+         *     collapsing ("n u d e" → "nude", "p o r n site" → "porn site");
+         *  4. leetspeak substitution on word-like tokens ("p0rn" → "porn",
+         *     "v1brator" → "vibrator"), never on pure-numeric tokens or
+         *     serials like "4x4" (fewer than 2 real letters).
+         * Ordinary text — "the score was 100 to 0", "class of 2025",
+         * "watch porn now" — passes through unchanged.
+         */
+        internal fun normalizeForMatching(text: String): String {
+            // 1. Lowercase, then NFKC.
+            val base = java.text.Normalizer.normalize(
+                text.lowercase(Locale.ROOT),
+                java.text.Normalizer.Form.NFKC
+            )
+            // 2. Homoglyph folding (only when the text contains any).
+            val folded = if (base.any { it in HOMOGLYPH_MAP }) {
+                buildString(base.length) {
+                    for (ch in base) append(HOMOGLYPH_MAP[ch] ?: ch)
+                }
+            } else {
+                base
+            }
+            // 3. Per-token separator collapsing, then single-letter-run
+            //    collapsing across whitespace, then leetspeak.
+            val tokens = folded.split(' ').filter { it.isNotEmpty() }
+            val collapsed = ArrayList<String>(tokens.size)
+            for (token in tokens) collapsed.add(collapseSingleLetterSeparators(token))
+            val runs = collapseSingleLetterRuns(collapsed)
+            val out = ArrayList<String>(runs.size)
+            for (token in runs) out.add(applyLeet(token))
+            return out.joinToString(" ")
+        }
+
+        /** Pure numeric tokens ("100", "0", "3.14", "1,000", "2025") are never leeted. */
+        private fun isPureNumericToken(token: String): Boolean {
+            if (token.isEmpty()) return false
+            for (ch in token) {
+                if (!ch.isDigit() && ch != '.' && ch != ',') return false
+            }
+            return true
+        }
+
+        /**
+         * Leetspeak substitution. Applied only to word-like tokens (at least
+         * two real letters) so serials like "4x4", "2fast" or "1st" are not
+         * mangled, while "p0rn", "s3x", "v1brator" are. Pure-numeric tokens
+         * ("100", "2025", "3.14") are returned untouched.
+         */
+        private fun applyLeet(token: String): String {
+            if (isPureNumericToken(token)) return token
+            var letters = 0
+            for (ch in token) if (ch.isLetter()) letters++
+            if (letters < 2) return token
+            var changed = false
+            for (ch in token) {
+                if (ch in LEET_MAP) { changed = true; break }
+            }
+            if (!changed) return token
+            return buildString(token.length) {
+                for (ch in token) append(LEET_MAP[ch] ?: ch)
+            }
+        }
+
+        /**
+         * Collapse punctuation/underscore separators between SINGLE characters
+         * inside a token: "p.o.r.n" → "porn", "p_o_r_n" → "porn",
+         * "p..o..r..n" → "porn", "p/o/r/n" → "porn", "n_u_d_3" → "nud3"
+         * (leeted to "nude" later). Digits are LEETSPEAK LETTERS, not
+         * separators, so "s3x", "p0rn" and "4x4" are never split. Tokens
+         * with a multi-character run ("x-videos", "18+") or no content
+         * ("🔞") are returned unchanged.
+         */
+        private fun collapseSingleLetterSeparators(token: String): String {
+            if (token.length <= 1) return token
+            var i = 0
+            var anySeparator = false
+            val content = StringBuilder()
+            while (i < token.length) {
+                if (token[i].isLetter() || token[i].isDigit()) {
+                    var j = i
+                    while (j < token.length && (token[j].isLetter() || token[j].isDigit())) j++
+                    if (j - i > 1) return token // multi-char run → not the pattern
+                    content.append(token[i])
+                    i = j
+                } else {
+                    anySeparator = true
+                    i++
+                }
+            }
+            return if (anySeparator && content.isNotEmpty()) content.toString() else token
+        }
+
+        /**
+         * Join consecutive single-character tokens: "n u d e" → "nude",
+         * "p o r n site" → "porn site". Longer tokens break the run, so
+         * normal multi-word text ("watch porn now") is never joined.
+         */
+        private fun collapseSingleLetterRuns(tokens: List<String>): List<String> {
+            if (tokens.size < 2) return tokens
+            val out = ArrayList<String>(tokens.size)
+            var i = 0
+            while (i < tokens.size) {
+                if (tokens[i].length == 1) {
+                    val runStart = i
+                    while (i < tokens.size && tokens[i].length == 1) i++
+                    if (i - runStart >= 2) {
+                        val joined = buildString(i - runStart) {
+                            for (k in runStart until i) append(tokens[k])
+                        }
+                        out.add(joined)
+                    } else {
+                        out.add(tokens[runStart])
+                    }
+                } else {
+                    out.add(tokens[i])
+                    i++
+                }
+            }
+            return out
+        }
+
         // ── Weighted risk-score model for pre-emptive feed blocking ──
         // The user's requested flow scores each feed card's signals and
         // blocks when the weighted sum crosses the threshold (instead of
@@ -191,6 +467,18 @@ class KeywordMatcher(
             return MatchResult.Blocked("Incognito browsing", MatchType.INCOGNITO, MatchSource.NONE)
         }
 
+        // ── BLOCK SHORTS (Block tab toggle) ──────────────────────────
+        // When enabled, YouTube Shorts are blocked in every monitored package
+        // (Chrome, the Google app's in-app browser, the YouTube app, ...): any
+        // YouTube /shorts URL and the Shorts content signal inside the YouTube
+        // app. This replaces the old workaround of adding "shorts" as a user
+        // keyword — which only matched URLs and over-blocked innocent words
+        // (shortsleeves, shortstop, ...). Long-form videos and /watch URLs are
+        // never affected.
+        if (repository.blockShorts) {
+            checkShortsBlock(snapshot, packageName)?.let { return it }
+        }
+
         // ── CHROME PACKAGES: URL ONLY ──────────────────────────────────
         if (isChromePackage(packageName)) {
             return checkChrome(snapshot)
@@ -216,18 +504,86 @@ class KeywordMatcher(
     }
 
     /**
+     * Block decision for the "Block Shorts" toggle. Matches only when the
+     * snapshot is actually a YouTube Short:
+     *  - a YouTube /shorts URL in ANY monitored package (Chrome, the Google
+     *    app's in-app browser, ...) — a /shorts path is always a Short, or
+     *  - the Shorts content signal inside the YOUTUBE APP — the extractor
+     *    normalizes the Shorts indicator / #shorts hashtag to the signal
+     *    "shorts" in [ContentSnapshot.query] (signals are space-joined, so a
+     *    word-boundary match is used: "shorts #fyp" hits, "shortsy" doesn't).
+     *
+     * The signal part is deliberately limited to YouTube packages: Chrome's /
+     * the Google app's search QUERY is the user's own search text, so a search
+     * for the plain word "shorts" (clothing, weather, ...) must never be
+     * blocked by this toggle — only actual /shorts URLs are blocked there.
+     * Returns null when neither applies, so ordinary videos, pages and
+     * searches are never blocked by this toggle.
+     */
+    private fun checkShortsBlock(
+        snapshot: ContentSnapshot,
+        packageName: String
+    ): MatchResult.Blocked? {
+        val url = snapshot.url.orEmpty().lowercase(Locale.ROOT)
+        val isShortsUrl = ContentExtractor.isYouTubeDomain(url) && url.contains("/shorts")
+        val shortsSignal = !isShortsUrl && isYouTubePackage(packageName) &&
+            snapshot.query?.let { q ->
+                SHORTS_SIGNAL_REGEX.containsMatchIn(q.lowercase(Locale.ROOT))
+            } == true
+        if (!isShortsUrl && !shortsSignal) return null
+        val res = MatchResult.Blocked(
+            "YouTube Shorts",
+            MatchType.BUILT_IN_KEYWORD,
+            if (isShortsUrl) MatchSource.URL else MatchSource.QUERY
+        )
+        Log.i(TAG, buildBlockLog("SHORTS", snapshot.url ?: snapshot.query ?: "", res))
+        return res
+    }
+
+    /**
+     * Content-only check for LONG (non-Short) YouTube videos watched inside
+     * Chrome. Matches the extracted video title and description/text against
+     * the SAME active rules the YouTube-app path uses (active built-in +
+     * user keywords, plus the context-combination tier) — the authoritative
+     * check the long-video coordinator runs on the actual watch page after
+     * the user opens the video.
+     *
+     * URL/query are deliberately NOT consulted: the long-video flow decides
+     * on real video content only (a blocked DOMAIN rule is still applied by
+     * the normal Chrome pipeline, unaffected by this method). Returns
+     * Blocked with MatchSource.TITLE / .DESCRIPTION naming the exact keyword,
+     * or Allowed.
+     */
+    fun checkLongVideoContent(title: String?, description: String?): MatchResult {
+        if (!title.isNullOrBlank()) {
+            val titleRes = checkString(title, isUrl = false)
+            if (titleRes is MatchResult.Blocked) {
+                return titleRes.copy(matchSource = MatchSource.TITLE)
+            }
+        }
+        if (!description.isNullOrBlank()) {
+            val descRes = checkString(description, isUrl = false)
+            if (descRes is MatchResult.Blocked) {
+                return descRes.copy(matchSource = MatchSource.DESCRIPTION)
+            }
+        }
+        return MatchResult.Allowed
+    }
+
+    /**
      * Chrome-specific check: URL is the ONLY source of truth.
      * Domain matching is already handled inside checkString(isUrl=true).
      *
-     * Websites never block the tab-restricted gender terms (woman, man, ...) —
-     * those are reserved for Google's Images/Videos tabs. See
-     * [BlockRepository.TAB_RESTRICTED_KEYWORDS].
+     * Gender/people terms (woman, girl, ...) NEVER block standalone — the
+     * audit moved them out of Strict Mode into the combination generic halves
+     * ([BlockRepository.COMBINATION_GENERIC_TERMS]); they only block paired
+     * with a risky half (woman + bikini), in every mode.
      *
      * IMPORTANT: Google search is frequently performed inside Chrome, not only
      * in the Google app. So when the Chrome URL is a Google search on the
      * Images or Videos tab (tbm=isch / tbm=vid, or the newer udm layout codes
-     * such as udm=2 for Images), the full strict keyword set — including the
-     * tab-restricted gender terms — is used, exactly as in the Google app.
+     * such as udm=2 for Images), the full strict keyword set is used, exactly
+     * as in the Google app.
      */
     private fun checkChrome(snapshot: ContentSnapshot): MatchResult {
         // Detect whether this is a Google Images/Videos search inside Chrome.
@@ -291,14 +647,19 @@ class KeywordMatcher(
             }
         }
 
-        // Google Images/Videos search inside Chrome: mobile Chrome's address-bar
-        // URL often OMITS the q= parameter (e.g. Images URL is just
-        // "...&udm=2&fbs=..." with no query text). Recover the query from the
-        // URL's q= param when present, else from the structured Google-search
-        // window title ("... - Google Search") — a Google signal, not arbitrary
-        // page text. This runs ONLY on positively-identified Images/Videos tab
-        // searches, so ordinary websites are unaffected.
-        if (isImageVideoTab) {
+        // Google search inside Chrome: block the USER'S SEARCH QUERY on EVERY
+        // tab (All, Images, Videos, News, Shopping, ...) — the keyword + pattern
+        // (context-combination) blocking must work everywhere, not only on
+        // Images/Videos. Mobile Chrome's address-bar URL often OMITS the q=
+        // parameter (e.g. Images URL is just "...&udm=2&fbs=..." with no query
+        // text), so the query is recovered from the URL's q= param when present,
+        // else from the structured Google-search window title ("... - Google
+        // Search") — a Google signal, not arbitrary page text. Gated on
+        // positively identifying a Google SEARCH page, so ordinary websites are
+        // unaffected.
+        val isGoogleSearchPage = snapshot.url?.contains("google.com/search") == true ||
+            snapshot.title?.let(GoogleSignalParser::queryFromWindowTitle) != null
+        if (isGoogleSearchPage) {
             val chromeQuery = extractGoogleQuery(snapshot)
                 ?: snapshot.title?.let(GoogleSignalParser::queryFromWindowTitle)
             if (!chromeQuery.isNullOrBlank()) {
@@ -416,18 +777,6 @@ class KeywordMatcher(
             }
         }
 
-        // On-device thumbnail image signal (+0.4): the NSFW classifier on the
-        // cropped thumbnail. Runs only when the image pipeline was possible
-        // (Android 11+ + model in assets + overlay permission) — otherwise
-        // nsfwScore is null and this never fires. A confident NSFW thumbnail
-        // alone crosses the threshold — the user's "revealing thumbnail" case.
-        val nsfw = card.nsfwScore
-        if (nsfw != null && nsfw >= com.muddassir.clearview.vision.ThumbnailSafetyAnalyzer.NSFW_THRESHOLD) {
-            score += FEED_THUMBNAIL_WEIGHT
-            if (primary == null) primary = "thumbnail"
-            reasons.add("THUMBNAIL IMAGE: ${(nsfw * 100).toInt()}%")
-        }
-
         if (score >= FEED_BLOCK_THRESHOLD) {
             Log.i(TAG, "YOUTUBE_FEED_SCORE score=$score reasons=$reasons")
             return MatchResult.Blocked(
@@ -525,9 +874,11 @@ class KeywordMatcher(
     /**
      * Google-specific check: URL first, then search query.
      *
-     * Tab-restricted gender terms (woman, man, ...) are blocked ONLY on the
-     * Videos and Images tabs. On the All tab (and News/Shopping) they are
-     * allowed, because those everyday words are common in ordinary searches.
+     * The gender terms the tab system used to gate (woman, girl, ...) were
+     * removed from the keyword sets entirely — they never block standalone
+     * anywhere (they only participate as context-combination halves). The
+     * Images/Videos tab uses the same keyword set as every other surface
+     * ([TAB_RESTRICTED_KEYWORDS] is empty), so the check is uniform.
      */
     private fun checkGoogle(snapshot: ContentSnapshot): MatchResult {
         val googleQuery = extractGoogleQuery(snapshot)
@@ -537,17 +888,8 @@ class KeywordMatcher(
         // URL, so URL parsing alone cannot see the tab there); fall back to URL.
         val tab = snapshot.googleTab ?: ContentExtractor.googleTabFromUrl(snapshot.url)
         val isImageVideoTab = tab == "Images" || tab == "Videos"
-        // The Google app never exposes the active tab (chips carry no selected
-        // state and chip taps produce empty events), so tab-aware gender blocking
-        // cannot work there. When the user enables the Google-app toggle, the
-        // full strict set — including the tab-restricted gender terms — is used
-        // on ALL Google app tabs. Chrome keeps its URL-based tab-aware behavior.
-        val builtInKeywords = if (repository.blockGenderTermsInGoogleApp) {
-            repository.activeBuiltInKeywords
-        } else {
-            tabAwareBuiltInKeywords(tab)
-        }
-        Log.d(TAG, "GOOGLE_TAB=$tab imageVideoTab=$isImageVideoTab googleAllTabs=${repository.blockGenderTermsInGoogleApp}")
+        val builtInKeywords = tabAwareBuiltInKeywords(tab)
+        Log.d(TAG, "GOOGLE_TAB=$tab imageVideoTab=$isImageVideoTab")
 
         // 1. Check URL if available
         if (!snapshot.url.isNullOrBlank()) {
@@ -559,13 +901,27 @@ class KeywordMatcher(
             }
         }
 
-        // 2. Check search query
+        // 2. Check search query — ONLY for committed (submitted) searches.
+        //    The Google app exposes the live search-box text as the query
+        //    while the user types (SEARCH_BAR / EDITABLE_FIELD /
+        //    ACCESSIBILITY_EVENT sources), so without the gate a partial
+        //    typed word (e.g. "ass" while typing "assignment") blocks before
+        //    any search runs — the reported "blocks as soon as I type". The
+        //    gate ([isGoogleSearchCommitted]) requires a results-page signal:
+        //    the query came from the window title, the tab chips are visible,
+        //    the window title parses as "... - Google Search", or a
+        //    google.com/search URL is exposed. Chrome is unaffected (its
+        //    query only exists post-submission).
         if (!googleQuery.isNullOrBlank()) {
-            val queryRes = checkString(googleQuery, isUrl = false, builtInKeywords = builtInKeywords)
-            if (queryRes is MatchResult.Blocked) {
-                val finalRes = queryRes.copy(matchSource = MatchSource.QUERY)
-                Log.i(TAG, buildBlockLog("QUERY", googleQuery, finalRes))
-                return finalRes
+            if (isGoogleSearchCommitted(snapshot)) {
+                val queryRes = checkString(googleQuery, isUrl = false, builtInKeywords = builtInKeywords)
+                if (queryRes is MatchResult.Blocked) {
+                    val finalRes = queryRes.copy(matchSource = MatchSource.QUERY)
+                    Log.i(TAG, buildBlockLog("QUERY", googleQuery, finalRes))
+                    return finalRes
+                }
+            } else {
+                Log.d(TAG, "GOOGLE_QUERY_TYPING_SKIPPED query='$googleQuery' (search not submitted)")
             }
         }
 
@@ -714,8 +1070,8 @@ class KeywordMatcher(
         text: String,
         builtInKeywords: Set<String> = repository.activeBuiltInKeywords
     ) {
-        val lower = text.lowercase(Locale.ROOT)
-        val builtIn = checkKeywords(lower, builtInKeywords, protectShortWords = true)
+        val normalized = normalizeForMatching(text)
+        val builtIn = checkKeywords(normalized, builtInKeywords)
         if (builtIn != null) {
             Log.d(TAG, """
                 PAGE TEXT MATCH FOUND
@@ -724,7 +1080,7 @@ class KeywordMatcher(
                 Reason = Not current URL / query
             """.trimIndent())
         } else {
-            val userKeyword = checkKeywords(lower, repository.getUserKeywords())
+            val userKeyword = checkKeywords(normalized, repository.getUserKeywords())
             if (userKeyword != null) {
                 Log.d(TAG, """
                     PAGE TEXT MATCH FOUND
@@ -755,7 +1111,8 @@ class KeywordMatcher(
      * block inside Google's Images/Videos tabs.
      */
     private fun websiteBuiltInKeywords(): Set<String> =
-        repository.activeBuiltInKeywords - BlockRepository.TAB_RESTRICTED_KEYWORDS
+        // Cached in the repository — no per-call set subtraction.
+        repository.activeWebsiteKeywords
 
     /**
      * Tab-aware keyword selection: the full strict set (including the
@@ -777,27 +1134,81 @@ class KeywordMatcher(
         isUrl: Boolean,
         builtInKeywords: Set<String> = repository.activeBuiltInKeywords
     ): MatchResult {
-        val lower = text.lowercase(Locale.ROOT)
+        // Text normalization runs BEFORE all matching (NFKC + homoglyphs +
+        // leetspeak + separator collapsing — see normalizeForMatching); the
+        // whole-word boundary check in containsKeyword then applies to the
+        // normalized text and the cache's normalized keyword forms.
+        val normalized = normalizeForMatching(text)
 
         // Domain matching for URLs
         if (isUrl) {
-            val matchedDomain = checkDomains(lower)
+            val matchedDomain = checkDomains(normalized)
             if (matchedDomain != null) {
                 return MatchResult.Blocked(matchedDomain, MatchType.DOMAIN, MatchSource.DOMAIN)
             }
         }
 
-        val matchedBuiltIn = checkKeywords(lower, builtInKeywords, protectShortWords = true)
+        val matchedBuiltIn = checkKeywords(normalized, builtInKeywords)
         if (matchedBuiltIn != null) {
             return MatchResult.Blocked(matchedBuiltIn, MatchType.BUILT_IN_KEYWORD, MatchSource.NONE)
         }
 
-        val matchedUser = checkKeywords(lower, repository.getUserKeywords())
+        val matchedUser = checkKeywords(normalized, repository.getUserKeywords())
         if (matchedUser != null) {
             return MatchResult.Blocked(matchedUser, MatchType.USER_KEYWORD, MatchSource.NONE)
         }
 
+        // TIER 3 — context-combination (normal-mode discovery catch):
+        // "woman + bikini", "girl + pics". Only for query/title/description
+        // text — raw URLs are exempt so a legitimate page path like
+        // /photos/beach.html can never trip it.
+        if (!isUrl) {
+            val matchedCombo = checkCombinationTerms(normalized)
+            if (matchedCombo != null) {
+                return MatchResult.Blocked(matchedCombo, MatchType.BUILT_IN_KEYWORD, MatchSource.NONE)
+            }
+        }
+
         return MatchResult.Allowed
+    }
+
+    /**
+     * TIER 3 — context-combination matching. Blocks when the text contains BOTH
+     * a generic discovery half (woman, girl, beach, pool, ...) AND a risky half
+     * (bikini, lingerie, pics, ...): "woman bikini", "girl pics". This catches
+     * searches clearly heading toward sexualized content in NORMAL mode without
+     * blocking the halves individually; in Strict Mode the individual terms
+     * already block. Reuses the same whole-word rule as checkKeywords, so
+     * "hottest" never counts as "hot", "brass" never counts as "bra", and
+     * "button" never counts as "butt".
+     */
+    private fun checkCombinationTerms(lowercaseText: String): String? {
+        val generic = BlockRepository.COMBINATION_GENERIC_TERMS
+        val risky = BlockRepository.COMBINATION_RISKY_TERMS
+        if (generic.isEmpty() || risky.isEmpty()) return null
+        var genericHit: String? = null
+        for (term in generic) {
+            if (containsKeyword(lowercaseText, term, isPlainWordKeyword(term))) {
+                genericHit = term
+                // Some terms are BOTH a generic and a risky half ("beach"): a
+                // term must never self-combine, so a bare "beach" stays
+                // innocent — it only blocks together with a DIFFERENT generic
+                // ("women beach") or risky ("beach bikini") half. Prefer a
+                // generic half that is NOT also risky ("women" over "beach"
+                // in "women beach"), so the risky copy stays available to
+                // combine with it.
+                if (term !in risky) break
+            }
+        }
+        if (genericHit == null) return null
+        for (term in risky) {
+            // Self-combination guard: a bare "beach" must never block.
+            if (term == genericHit) continue
+            if (containsKeyword(lowercaseText, term, isPlainWordKeyword(term))) {
+                return "$genericHit + $term"
+            }
+        }
+        return null
     }
 
     private fun checkDomains(urlText: String): String? {
@@ -815,30 +1226,19 @@ class KeywordMatcher(
     }
 
     private fun checkKeywords(
-        lowercaseText: String,
-        keywords: Set<String>,
-        protectShortWords: Boolean = false
+        normalizedText: String,
+        keywords: Set<String>
     ): String? {
         if (keywords.isEmpty()) return null
-        for (keyword in keywords.sortedWith(compareByDescending<String> { it.length }.thenBy { it })) {
-            if (containsKeyword(lowercaseText, keyword, protectShortWords)) {
-                return keyword
+        // The per-keyword scan runs in the original longest-first order; each
+        // entry carries its precomputed normalized form + boundary flag, so
+        // there is no per-call normalization, sort, or classification.
+        for (entry in cacheFor(keywords).entries) {
+            if (containsKeyword(normalizedText, entry.normalized, entry.needsBoundary)) {
+                return entry.original
             }
         }
         return null
-    }
-
-    private fun containsKeyword(text: String, keyword: String, protectShortWords: Boolean): Boolean {
-        var start = text.indexOf(keyword)
-        while (start >= 0) {
-            val end = start + keyword.length
-            val requiresBoundary = protectShortWords && keyword.length <= 3
-            val beforeIsWord = start > 0 && text[start - 1].isLetterOrDigit()
-            val afterIsWord = end < text.length && text[end].isLetterOrDigit()
-            if (!requiresBoundary || (!beforeIsWord && !afterIsWord)) return true
-            start = text.indexOf(keyword, start + 1)
-        }
-        return false
     }
 
     /**

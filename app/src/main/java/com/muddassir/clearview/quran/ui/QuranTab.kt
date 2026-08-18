@@ -17,14 +17,22 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -34,7 +42,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muddassir.clearview.R
+import com.muddassir.clearview.quran.data.IslamicDateFormatter
 import com.muddassir.clearview.quran.model.QuranVerse
+import java.time.LocalDate
+import kotlinx.coroutines.delay
 
 /**
  * Quran tab (the app's home page): the complete current verse — surah name,
@@ -45,6 +56,10 @@ import com.muddassir.clearview.quran.model.QuranVerse
  * The refresh-frequency picker, the Media/Quran notification toggles and the
  * updates feed live in the top-bar Settings / Notifications sheets instead,
  * so the home page stays a clean verse reader.
+ *
+ * Below the verse actions sits the Umm al-Qura Islamic date (Saudi Arabia
+ * default calendar) with a small edit icon that opens the ±1 day adjustment
+ * sheet — see IslamicDateAdjustmentSheet.
  *
  * LAYOUT NOTE: every child is a plain element of the vertically scrollable
  * Column — no Box overlays, no stacked content. The Previous/Next row is part
@@ -61,6 +76,10 @@ fun QuranTab(
     canGoNext: Boolean,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
+    // Umm al-Qura Islamic date (below the verse): the ±1 day adjustment and
+    // the tap target that opens the adjustment sheet.
+    islamicDateAdjustment: Int = 0,
+    onAdjustDate: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -87,7 +106,10 @@ fun QuranTab(
                 Text("🕋", fontSize = 56.sp)
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    text = "Verses are being downloaded.\nOpen the app once to download the full translation.",
+                    // Shown only when the first-run download couldn't complete
+                    // (e.g. offline). Normally the download runs in-process and
+                    // the verse appears automatically — see ContentHubState.start.
+                    text = "Quran verses are downloading.\nPlease close and reopen ClearView once the download is complete.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -110,6 +132,49 @@ fun QuranTab(
                 )
             }
         }
+
+        // ── Islamic date (Umm al-Qura / Saudi Arabia) ────────────────
+        // Today's date in the Saudi calendar, adjusted by the user's ±1 day
+        // setting (0 = the default calculated date). The minute ticker keeps
+        // it fresh when the tab stays open across midnight, so the date
+        // auto-advances every new day without losing the manual adjustment.
+        Spacer(Modifier.height(28.dp))
+        HorizontalDivider(Modifier.fillMaxWidth())
+        Spacer(Modifier.height(16.dp))
+        var dayTick by remember { mutableStateOf(LocalDate.now()) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(60_000)
+                dayTick = LocalDate.now()
+            }
+        }
+        val islamicDate = remember(dayTick, islamicDateAdjustment) {
+            IslamicDateFormatter.format(dayTick, islamicDateAdjustment)
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = islamicDate,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            // Small edit target beside the date — opens the adjustment sheet.
+            IconButton(
+                onClick = onAdjustDate,
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Edit,
+                    contentDescription = stringResource(R.string.quran_islamic_date_adjust),
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
     }
 }
 

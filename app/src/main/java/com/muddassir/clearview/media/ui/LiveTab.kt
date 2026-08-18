@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,11 +32,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.muddassir.clearview.R
+import com.muddassir.clearview.media.data.LiveStreamCacheStore
 import com.muddassir.clearview.media.data.LiveStreamConfig
 import com.muddassir.clearview.media.data.LiveStreamResolver
 import kotlinx.coroutines.delay
@@ -43,19 +46,34 @@ import kotlinx.coroutines.delay
 /**
  * Live tab: Makkah and Madinah live broadcasts played INSIDE the app.
  *
- * Each channel's CURRENT live broadcast video id is resolved at runtime from
- * the official YouTube channel (`LiveStreamResolver`), then played with the
- * same in-app IFrame player as regular videos — no HLS/CDN, no YouTube app,
- * no browser. Only ONE stream is loaded at a time.
+ * Each official channel's CURRENT live broadcast video id is discovered at
+ * runtime (`LiveStreamResolver`), validated, and played with the same in-app
+ * IFrame player as regular videos — no HLS/CDN, no YouTube app, no browser.
+ * Only ONE stream is loaded at a time.
+ *
+ * STATES: the tab drives an explicit state machine — RESOLVING (spinner,
+ * "Connecting…"), RETRYING (auto-retry with exponential backoff after a
+ * transient failure, "temporarily unavailable. Retrying…"), PLAYING, and
+ * TEMPORARILY_UNAVAILABLE (manual Retry). When the resolver detects the
+ * Restricted-Mode signature a network DNS filter (e.g. CleanBrowsing Family
+ * Filter) produces, the tab explains the cause instead of a generic error —
+ * retrying cannot help while the filter keeps mapping www.youtube.com to
+ * Restricted Mode.
  *
  * LAYOUT (no-overlap guarantee): the `🕋 Makkah Live` / `🕌 Madinah Live`
  * selector is its OWN horizontally scrollable row ABOVE the player — it never
- * overlays the video, so it can never collide with the player's own
- * mute/speaker, CC, or settings icons (a real problem on small screens when
- * the chips floated over the video). The selector row collapses to zero
- * height in landscape (immersive fullscreen) but STAYS in composition so the
- * player keeps its slot and rotation never restarts the stream. The caption
- * sits BELOW the player in portrait.
+ * overlays the video, so it can never collide with YouTube's native player
+ * icons (a real problem on small screens when the chips floated over the
+ * video). The selector row collapses to zero height in landscape (immersive
+ * fullscreen) but STAYS in composition so the player keeps its slot and
+ * rotation never restarts the stream. In portrait the player is a PROPER 16:9
+ * card (never stretched to fill the leftover height); in landscape it fills
+ * the whole screen. The caption sits BELOW the player in portrait, with any
+ * remaining space underneath. The player itself is a NORMAL, un-cropped
+ * YouTube embed (no CSS zoom/crop, native controls on tap).
+ *
+ * QUALITY: the stream is pinned to the best available playback quality
+ * (maxQuality) — see the JS quality watchdog in youtube_player.html.
  *
  * CONNECTING BACKDROP: while a stream is connecting — or when it ends / is
  * unavailable — a smooth gradient backdrop ([LiveBackdrop]) fills the player
@@ -67,50 +85,76 @@ fun LiveTab(
     isLandscape: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val streams = LiveStreamConfig.streams
 
     var selectedId by rememberSaveable { mutableStateOf(streams.first().id) }
     var videoId by remember { mutableStateOf<String?>(null) }
-    var busy by remember { mutableStateOf(true) }
-    var unavailable by remember { mutableStateOf(false) }
+    var state by remember { mutableStateOf<LiveState>(LiveState.Resolving) }
     var playerState by remember { mutableStateOf(YtState.UNSTARTED) }
     var retryToken by remember { mutableStateOf(0) }
+    // Bumped on every auto-retry so YoutubePlayer re-applies the source even
+    // when the resolver returns the SAME id (applySource is deduped on
+    // appliedVideoId — without this, a retry would never re-attempt playback).
+    var playerRetryToken by remember { mutableStateOf(0) }
+    val cacheStore = remember { LiveStreamCacheStore(context.applicationContext) }
     val stream = streams.find { it.id == selectedId } ?: streams.first()
 
+    // Resolution loop: discover → validate → play. Transient failures retry
+    // automatically with exponential backoff (5 s → 10 s → 20 s → 40 s),
+    // BOUNDED, so YouTube is never hammered. A DNS-filter block (Restricted
+    // Mode) stops retrying and explains itself — retrying cannot help while
+    // the filter maps www.youtube.com to Restricted Mode.
     LaunchedEffect(selectedId, retryToken) {
+        playerRetryToken = 0
         playerState = YtState.UNSTARTED
         videoId = null
-        busy = true
-        unavailable = false
-        val id = LiveStreamResolver.resolveLiveVideoId(
-            stream.channelId,
-            forceRefresh = retryToken > 0
-        )
-        if (id != null) {
-            videoId = id
-            // Wait for the embed to actually start playing; surface the
-            // unavailable card instead of an eternal spinner if it never does.
-            val deadline = System.currentTimeMillis() + LOAD_TIMEOUT_MS
-            while (System.currentTimeMillis() < deadline) {
-                delay(500)
-                if (playerState == YtState.PLAYING ||
-                    playerState == YtState.PAUSED ||
-                    unavailable
-                ) {
+        var attempt = 0
+        while (true) {
+            state = if (attempt == 0) LiveState.Resolving else LiveState.Retrying
+            if (attempt > 0) playerRetryToken++ // force re-apply, same id or not
+            val result = LiveStreamResolver.resolveLiveVideoId(
+                source = stream,
+                cacheStore = cacheStore,
+                forceRefresh = attempt > 0
+            )
+            if (result.videoId != null) {
+                videoId = result.videoId
+                // Wait for the embed to actually start playing; surface the
+                // unavailable card instead of an eternal spinner if it never
+                // does — and if it never starts, fall through to a retry with
+                // a fresh resolution (a new broadcast may have started).
+                val deadline = System.currentTimeMillis() + LOAD_TIMEOUT_MS
+                while (System.currentTimeMillis() < deadline) {
+                    delay(500)
+                    if (playerState == YtState.PLAYING ||
+                        playerState == YtState.PAUSED ||
+                        state is LiveState.Unavailable
+                    ) {
+                        break
+                    }
+                }
+                if (playerState == YtState.PLAYING || playerState == YtState.PAUSED) {
+                    state = LiveState.Playing
                     break
                 }
+                videoId = null // never started — retry with a fresh resolution
+            } else if (result.blockedByFilter) {
+                state = LiveState.Unavailable(blockedByFilter = true)
+                break // DNS filter: retrying won't help until YouTube is exempted
             }
-            if (playerState != YtState.PLAYING && playerState != YtState.PAUSED && !unavailable) {
-                unavailable = true
+            attempt++
+            if (attempt > MAX_AUTO_ATTEMPTS) {
+                state = LiveState.Unavailable(blockedByFilter = false)
+                break
             }
-        } else {
-            unavailable = true
+            delay(RETRY_BASE_MS * (1L shl attempt.coerceAtMost(MAX_BACKOFF_SHIFT)))
         }
-        busy = false
     }
 
-    val isConnecting = busy && !unavailable
-    val isLive = !unavailable && playerState == YtState.PLAYING
+    val connecting = state is LiveState.Resolving || state is LiveState.Retrying
+    val isLive = state is LiveState.Playing
+    val unavailable = state as? LiveState.Unavailable
 
     Column(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
 
@@ -150,37 +194,42 @@ fun LiveTab(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
+                .then(
+                    if (isLandscape) Modifier.weight(1f)
+                    else Modifier.aspectRatio(16f / 9f)
+                )
         ) {
+            // Normal YouTube embed: no CSS crop, no click shield, the native
+            // controls (tap the video for play/pause + mute) stay available.
             YoutubePlayer(
                 videoId = videoId,
                 modifier = Modifier.fillMaxSize(),
+                maxQuality = true,
+                retryToken = playerRetryToken,
                 onPlayerState = { s ->
                     playerState = s
-                    if (s == YtState.PLAYING) busy = false
+                    if (s == YtState.PLAYING) state = LiveState.Playing
                     // The live broadcast ended — surface the unavailable card
                     // instead of a frozen "Live · playing" caption.
                     if (s == YtState.ENDED) {
                         Log.w(TAG, "LIVE_STREAM_ENDED channelId=${stream.channelId}")
-                        busy = false
-                        unavailable = true
+                        state = LiveState.Unavailable(blockedByFilter = false)
                     }
                 },
                 onPlayerError = { code ->
                     Log.w(TAG, "LIVE_EMBED_ERROR code=$code channelId=${stream.channelId}")
-                    busy = false
-                    unavailable = true
+                    state = LiveState.Unavailable(blockedByFilter = false)
                 }
             )
 
             // Smooth gradient backdrop while connecting (or when the stream is
             // unavailable/ended): hides the idle player slot behind a soft
             // single-layer gradient instead of a plain black screen.
-            if (isConnecting || unavailable) {
+            if (connecting || unavailable != null) {
                 LiveBackdrop(modifier = Modifier.fillMaxSize())
             }
 
-            if (isConnecting) {
+            if (connecting) {
                 Column(
                     modifier = Modifier.align(Alignment.Center),
                     horizontalAlignment = Alignment.CenterHorizontally
@@ -188,14 +237,17 @@ fun LiveTab(
                     CircularProgressIndicator()
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        text = stringResource(R.string.live_tab_connecting),
+                        text = stringResource(
+                            if (state is LiveState.Retrying) R.string.live_tab_retrying
+                            else R.string.live_tab_connecting
+                        ),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
 
-            if (unavailable) {
+            if (unavailable != null) {
                 Column(
                     modifier = Modifier.align(Alignment.Center).padding(24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
@@ -205,7 +257,10 @@ fun LiveTab(
                         color = MaterialTheme.colorScheme.surfaceVariant
                     ) {
                         Text(
-                            text = stringResource(R.string.live_tab_error),
+                            text = stringResource(
+                                if (unavailable.blockedByFilter) R.string.live_tab_filtered
+                                else R.string.live_tab_error
+                            ),
                             modifier = Modifier.padding(20.dp),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -218,9 +273,12 @@ fun LiveTab(
                     }
                 }
             }
+
         }
 
         // ── Caption (portrait only): BELOW the player — can never cover it.
+        // The 16:9 player leaves leftover height; a weight spacer pins the
+        // caption right under the video and lets the empty space sit below.
         if (!isLandscape) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -242,8 +300,23 @@ fun LiveTab(
                     )
                 }
             }
+            Spacer(Modifier.weight(1f))
         }
     }
+}
+
+/**
+ * Live tab state machine: RESOLVING (first attempt), RETRYING (auto-retry
+ * after a transient failure, with backoff), PLAYING, and TEMPORARILY_
+ * UNAVAILABLE. [Unavailable.blockedByFilter] distinguishes a network DNS
+ * filter (Restricted Mode) block — which retrying cannot fix — from a plain
+ * "no broadcast / can't reach" state.
+ */
+private sealed interface LiveState {
+    object Resolving : LiveState
+    object Retrying : LiveState
+    object Playing : LiveState
+    data class Unavailable(val blockedByFilter: Boolean) : LiveState
 }
 
 /**
@@ -298,5 +371,12 @@ private fun LiveBackdrop(modifier: Modifier = Modifier) {
 
 private const val TAG = "LiveTab"
 
-/** If the resolved stream never starts within this window, show the unavailable card. */
+/** If a resolved stream never starts within this window, retry / surface the card. */
 private const val LOAD_TIMEOUT_MS = 25_000L
+
+/** Automatic resolution retries (after the first attempt), then manual Retry. */
+private const val MAX_AUTO_ATTEMPTS = 4
+
+/** Exponential backoff base (5 s → 10 s → 20 s → 40 s, capped by [MAX_BACKOFF_SHIFT]). */
+private const val RETRY_BASE_MS = 5_000L
+private const val MAX_BACKOFF_SHIFT = 3

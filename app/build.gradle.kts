@@ -28,17 +28,10 @@ android {
         applicationId = "com.muddassir.clearview"
         minSdk = 24
         targetSdk = 37
-        versionCode = 4
-        versionName = "1.4"
+        versionCode = 22
+        versionName = "10.12"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        // TFLite ships native libs for every ABI (~8MB when all four are
-        // bundled). Restrict to the ABIs this app targets; add x86_64 back if
-        // you run the app on an x86_64 emulator.
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-        }
     }
 
     signingConfigs {
@@ -53,6 +46,15 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Install side-by-side with the Play Store release. The debug APK is
+            // signed with the debug keystore, so Android refuses to install it
+            // over the release app (same applicationId, different signature). A
+            // ".debug" suffix gives the debug build its own applicationId
+            // (com.muddassir.clearview.debug) — a separate app that coexists
+            // with the Play Store one, each with its own data.
+            applicationIdSuffix = ".debug"
+        }
         release {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
@@ -64,18 +66,20 @@ android {
     }
 
     compileOptions {
+        // java.time.chrono.HijrahDate (Umm al-Qura Islamic calendar) needs core
+        // library desugaring — java.time only arrived natively in API 26 and
+        // minSdk is 24.
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
 
     buildFeatures {
         compose = true
-    }
-
-    // Keep the .tflite model uncompressed in the APK so Interpreter can
-    // memory-map it directly from assets (mmap fails on compressed entries).
-    androidResources {
-        noCompress += "tflite"
+        // BuildConfig.APPLICATION_ID — needed by the instrumentation test to
+        // assert the variant's real applicationId (the debug build carries a
+        // ".debug" suffix).
+        buildConfig = true
     }
 
 }
@@ -93,30 +97,21 @@ dependencies {
    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.kotlinx.coroutines.android)
-    // On-device NSFW thumbnail classification (feed image blocking). The model
-    // (app/src/main/assets/nsfw_detector.tflite) is the Yahoo open_nsfw model
-    // (~5.7MB, Apache-2.0; mirrored from devzwy/TensorflowLite-NSFW-Android).
-    // Verified shapes: input [1,224,224,3] FLOAT32, output [1,2] = [safe,nsfw]
-    // softmax. The analyzer's float path preprocesses it OpenNSFW-style (BGR +
-    // mean subtraction) — see ThumbnailSafetyAnalyzer. Replacing the asset with
-    // a different model family (nsfwjs RGB[0,1], quantized uint8, 5-class...)
-    // requires matching preprocessing; the MODEL_LOADED logcat line shows the
-    // detected shapes. NOTE: assets/*.tflite is NOT gitignored, so the model
-    // ships in the APK.
-    //
-    // LiteRT (com.google.ai.edge.litert) is Google's successor to TFLite:
-    // 16 KB page-size aligned native libs (tensorflow-lite <= 2.15 fails to
-    // load on Android 15+ / 16 KB-page devices — the 2.6.0 build hit exactly
-    // that), and a modern runtime that loads models exported by recent TF.
-    // It keeps the org.tensorflow.lite.* Java packages, so the analyzer's
-    // imports stay unchanged. litert + litert-api both declare namespace
-    // "com.google.ai.edge.litert", hence android.uniquePackageNames=false
-    // in gradle.properties.
-    implementation(libs.litert)
+    // On-device YouTube audio extraction (NewPipeExtractor, GPL-3.0-or-later):
+    // resolves the direct audio-stream URL from the phone's own IP so downloads
+    // never depend on a server. Audio-only streams only — no FFmpeg needed.
+    implementation(libs.newpipe.extractor)
+    // MediaSessionCompat + MediaStyle notification for the offline-audio
+    // foreground service: background playback with lock-screen / notification
+    // media controls.
+    implementation(libs.androidx.media)
 
     testImplementation(libs.junit)
     // org.json is stubbed in the Android SDK; provide the real JVM impl for unit tests
     testImplementation(libs.org.json)
+
+    // Core library desugaring (compile-time backport of java.time for API 24/25).
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
 
     // The Compose BOM must ALSO be on the androidTest + debug classpaths. The
     // versionless ui-test-junit4 / ui-test-manifest artifacts are only resolved

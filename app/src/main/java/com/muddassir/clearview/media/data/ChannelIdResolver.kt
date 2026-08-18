@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 /**
  * Resolves a user-provided channel reference to a YouTube channel id (UC…):
@@ -20,7 +21,11 @@ object ChannelIdResolver {
 
     private val BARE_ID = Regex("^UC[0-9A-Za-z_-]{22}$")
     private val CHANNEL_PATH = Regex("(?:youtube\\.com|youtu\\.be)/(?:channel|c)/(UC[0-9A-Za-z_-]{22})")
-    private val HANDLE = Regex("@([0-9A-Za-z._-]+)")
+    // Unicode-friendly: YouTube handles may contain Arabic and other non-ASCII
+    // characters (e.g. @الفلاح-هدف). Only whitespace and the URL delimiters
+    // / ? # terminate a handle — never an ASCII-only character class (the old
+    // `[0-9A-Za-z._-]` rejected every non-Latin handle as "invalid").
+    private val HANDLE = Regex("@([^/?#\\s]+)")
 
     /**
      * Pure extraction step. Returns:
@@ -41,6 +46,18 @@ object ChannelIdResolver {
     }
 
     /**
+     * Percent-encodes a @handle for the YouTube path segment ([resolveHandle]).
+     * Raw non-ASCII bytes in an HTTP request line are invalid, so Arabic (and
+     * other Unicode) handle characters must be UTF-8 percent-encoded. Java's
+     * URLEncoder uses '+' for spaces — wrong for a path — so it is swapped to
+     * %20. A handle already percent-encoded (pasted from an encoded URL) is
+     * passed through untouched. Pure, unit-tested.
+     */
+    fun encodeHandlePath(handle: String): String =
+        if ('%' in handle) handle
+        else "@" + URLEncoder.encode(handle.removePrefix("@"), "UTF-8").replace("+", "%20")
+
+    /**
      * Full resolution: returns a UC… id, or null when the input is invalid or
      * the handle page can't be fetched/parsed.
      */
@@ -54,7 +71,7 @@ object ChannelIdResolver {
     }
 
     private suspend fun resolveHandle(handle: String): String? = withContext(Dispatchers.IO) {
-        val url = "https://www.youtube.com/$handle"
+        val url = "https://www.youtube.com/${encodeHandlePath(handle)}"
         var connection: HttpURLConnection? = null
         try {
             connection = (URL(url).openConnection() as HttpURLConnection).apply {

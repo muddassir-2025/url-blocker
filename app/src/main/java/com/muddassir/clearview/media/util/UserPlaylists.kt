@@ -68,8 +68,11 @@ object UserPlaylists {
         playlists.filterNot { it.id == id }
 
     /**
-     * Appends [videos] to the playlist with [id], deduped by video id (a video
-     * already in the playlist is skipped — no duplicates can ever occur).
+     * Appends [videos] to the playlist with [id], deduped by (video id,
+     * audio flag) — a video already in the playlist is skipped, but the SAME
+     * video's offline audio is a DIFFERENT entry (a playlist can hold both
+     * "video X" and "audio of X" side by side, per MediaVideo.isOfflineAudio),
+     * so no duplicates of either kind can ever occur.
      */
     fun withVideosAdded(
         playlists: List<UserPlaylist>,
@@ -80,22 +83,31 @@ object UserPlaylists {
         return playlists.map { p ->
             if (p.id != id) p
             else {
-                val existing = p.videos.map { it.videoId }.toSet()
-                val fresh = videos.filter { it.videoId !in existing }
+                val existing = p.videos.map { it.videoId to it.isOfflineAudio }.toSet()
+                val fresh = videos.filter { (it.videoId to it.isOfflineAudio) !in existing }
                 if (fresh.isEmpty()) p else p.copy(videos = p.videos + fresh)
             }
         }
     }
 
-    /** Removes one video (by id) from the playlist with [id]. */
+    /**
+     * Removes one entry from the playlist with [id]: the video OR its offline
+     * audio, distinguished by [isOfflineAudio] (a playlist can hold both, so
+     * removing the video must never also remove its audio and vice versa).
+     */
     fun withVideoRemoved(
         playlists: List<UserPlaylist>,
         id: String,
-        videoId: String
+        videoId: String,
+        isOfflineAudio: Boolean = false
     ): List<UserPlaylist> =
         playlists.map { p ->
             if (p.id != id) p
-            else p.copy(videos = p.videos.filterNot { it.videoId == videoId })
+            else p.copy(
+                videos = p.videos.filterNot {
+                    it.videoId == videoId && it.isOfflineAudio == isOfflineAudio
+                }
+            )
         }
 
     /**

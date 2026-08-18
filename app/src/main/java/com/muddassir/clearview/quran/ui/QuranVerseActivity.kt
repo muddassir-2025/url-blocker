@@ -1,9 +1,9 @@
 package com.muddassir.clearview.quran.ui
 
-import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,7 +17,7 @@ import com.muddassir.clearview.media.worker.AudioWorkScheduler
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
 import com.muddassir.clearview.ui.ContentHubTabContent
 import com.muddassir.clearview.ui.ContentHubTopBar
-import com.muddassir.clearview.ui.applyImmersiveIfNeeded
+import com.muddassir.clearview.ui.ApplyImmersiveIfNeeded
 import com.muddassir.clearview.ui.isLandscape
 import com.muddassir.clearview.ui.rememberContentHubState
 import com.muddassir.clearview.ui.theme.UrlblockerTheme
@@ -60,6 +60,7 @@ class QuranVerseActivity : ComponentActivity() {
 @Composable
 private fun HubScreen() {
     val context = LocalContext.current
+    val activity = LocalActivity.current
     val landscape = isLandscape()
     val hub = rememberContentHubState()
 
@@ -83,7 +84,7 @@ private fun HubScreen() {
     val isFullscreen =
         (landscape && hub.playingVideo != null) ||
             (hub.playerFullscreen && hub.playingVideo != null)
-    applyImmersiveIfNeeded(isFullscreen)
+    ApplyImmersiveIfNeeded(isFullscreen)
 
     // Widget surface = Quran only: no bottom navigation bar. ContentHubTabContent
     // renders the persisted verse (the same one the widget shows); the selected
@@ -93,7 +94,7 @@ private fun HubScreen() {
             if (!isFullscreen) {
                 ContentHubTopBar(
                     state = hub,
-                    onBack = { (context as? Activity)?.finish() }
+                    onBack = { activity?.finish() }
                 )
             }
         }

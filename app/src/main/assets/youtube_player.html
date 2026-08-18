@@ -94,8 +94,9 @@
   // ── Rendering diagnostics (user directive) ─────────────────────
   // Logs the sizes of the #player element and the generated iframe on every
   // key event. HEALTHY output is player=<w>x<h> with h > 0 (e.g. 432x243 for
-  // the 16:9 player, 432x732 for fullscreen Live). A 0 height = "page shows,
-  // video doesn't": the embed never gets a surface to draw into.
+  // the 16:9 player, or the full-screen dimensions in landscape). A 0 height
+  // = "page shows, video doesn't": the embed never gets a surface to draw
+  // into.
   function logSizes(label) {
     try {
       var p = document.getElementById('player');
@@ -130,23 +131,36 @@
   // right after rotation). Once set, applySize() honors the pushed size.
   var pushedW = 0;
   var pushedH = 0;
+  function applyPlayerSize(w, h) {
+    // Forces EXPLICIT pixels on the #player element and the generated iframe
+    // (percentage sizing never survives in this WebView — see applySize),
+    // and calls player.setSize() (the IFrame API's official resize) so
+    // YouTube re-lays its internal player into the real size. The video is a
+    // NORMAL, un-cropped embed — no zooming or cropping.
+    var el = document.getElementById('player');
+    if (el) {
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      el.style.left = '0px';
+      el.style.top = '0px';
+    }
+    var f = player ? player.getIframe() : null;
+    if (f) {
+      f.style.width = w + 'px';
+      f.style.height = h + 'px';
+      f.setAttribute('width', w);
+      f.setAttribute('height', h);
+      if (typeof player.setSize === 'function') {
+        try { player.setSize(w, h); } catch (e) {}
+      }
+    }
+  }
   function applySize() {
     try {
       var w = pushedW > 0 ? pushedW : (window.innerWidth || document.documentElement.clientWidth || 0);
       var h = pushedH > 0 ? pushedH : (window.innerHeight || document.documentElement.clientHeight || 0);
       if (w <= 0 || h <= 0) return;
-      var el = document.getElementById('player');
-      if (el) { el.style.width = w + 'px'; el.style.height = h + 'px'; }
-      var f = player ? player.getIframe() : null;
-      if (f) {
-        f.style.width = w + 'px';
-        f.style.height = h + 'px';
-        f.setAttribute('width', w);
-        f.setAttribute('height', h);
-        if (typeof player.setSize === 'function') {
-          try { player.setSize(w, h); } catch (e) {}
-        }
-      }
+      applyPlayerSize(w, h);
     } catch (e) { console.log('SIZES[applySize] error=' + e.message); }
   }
   // Rotation / fullscreen (called from Android via evaluateJavascript when the
@@ -163,17 +177,9 @@
       if (!w || !h || w <= 0 || h <= 0) return;
       pushedW = w;
       pushedH = h;
-      var el = document.getElementById('player');
-      if (el) { el.style.width = w + 'px'; el.style.height = h + 'px'; }
+      applyPlayerSize(w, h);
       var f = player ? player.getIframe() : null;
       if (f) {
-        f.style.width = w + 'px';
-        f.style.height = h + 'px';
-        f.setAttribute('width', w);
-        f.setAttribute('height', h);
-        if (typeof player.setSize === 'function') {
-          try { player.setSize(w, h); } catch (e) {}
-        }
         // Resume if the video was actively playing when the rotation paused
         // it (state 2 fired right around the surface teardown). A pause that
         // happened well before the rotation is a USER pause — leave it.
@@ -337,6 +343,10 @@
       'widget_referrer': origin
     };
 
+    // Max-quality pin: hint the best tier in the embed config itself (vq is
+    // honored at creation; setPlaybackQuality keeps it pinned afterwards).
+    if (forceMaxQuality) vars['vq'] = 'highres';
+
     // Trace the exact config handed to YT.Player (surfaced via the WebView's
     // onConsoleMessage → CONSOLE[log] logcat line).
     console.log('PLAYER_VARS ' + JSON.stringify(vars));
@@ -366,6 +376,8 @@
           } catch (ex) {}
           // Resume from a saved position if this player was created for one.
           applyResume(pendingResume);
+          // Pin the best quality as soon as the player exists.
+          applyMaxQuality();
           // Apply the attributes from YouTube's official embed snippet to the
           // generated iframe (title, referrerpolicy, allow + web-share).
           try {
@@ -397,6 +409,9 @@
             // a stale PLAYING from the previous short must not expose the
             // next short's grey play-button poster while it buffers.
             if (isCoverForCurrentVideo()) setCover(false);
+            // Live streams can drop to a low auto tier right as playback
+            // begins — re-pin the max quality now that it's playing.
+            applyMaxQuality();
           }
           if (e.data === 2) {
             lastPauseAt = Date.now();
@@ -419,6 +434,12 @@
           console.log('YT_ON_ERROR_RAW value=' + e.data + ' typeof=' + (typeof e.data));
           setCover(false); // let the app's error card show over real content
           notify('onError', e.data);
+        },
+        onPlaybackQualityChange: function (e) {
+          // YouTube switched quality on its own (usually a downshift) —
+          // re-issue the max-quality request when the pin is armed.
+          console.log('QUALITY[change] now=' + e.data + ' pinned=' + forceMaxQuality);
+          if (forceMaxQuality) applyMaxQuality();
         },
         onAutoplayBlocked: function () {
           // The video is ready but autoplay was blocked — show it (poster +
@@ -518,14 +539,50 @@
     } catch (e) {}
   }
 
+  // ── Max quality pin (Makkah / Madinah Live tab) ─────────────────
+  // Requests the BEST available playback quality and keeps re-requesting it:
+  // live embeds start on "auto" (which can pick a low tier) and YouTube can
+  // downshift quality on its own, so the request is re-issued when playback
+  // starts, on every reported quality change, and on ready. Throttled to one
+  // request per 3 s so a player that can't comply isn't hammered.
+  var forceMaxQuality = false;
+  var lastQualityRequest = 0;
+  // Quality tiers we consider "already max": live embeds report the concrete
+  // tier ('hd1080', 'hd2160', …) instead of 'highres', so every >=1080p tier
+  // counts as satisfied — the pin then stops re-requesting instead of fighting
+  // YouTube's own adaptive quality selection forever.
+  var MAX_QUALITY_TIERS = ['highres', 'hd2160', 'hd1440', 'hd1080'];
+  function applyMaxQuality() {
+    try {
+      if (!forceMaxQuality || !player || typeof player.setPlaybackQuality !== 'function') return;
+      var cur = (typeof player.getPlaybackQuality === 'function')
+        ? (player.getPlaybackQuality() || '') : '';
+      if (MAX_QUALITY_TIERS.indexOf(cur) !== -1) return;
+      var now = Date.now();
+      if (now - lastQualityRequest > 3000) {
+        lastQualityRequest = now;
+        player.setPlaybackQuality('highres');
+        console.log('QUALITY[request] target=highres current=' + cur);
+      }
+    } catch (e) { console.error('QUALITY[applyMaxQuality] error=' + e.message); }
+  }
+  // Armed from Android (setMaxQuality rides along with every loadVideo).
+  function setMaxQuality(enabled) {
+    forceMaxQuality = !!enabled;
+    lastQualityRequest = 0;
+    applyMaxQuality();
+  }
+
   // Called from Android via evaluateJavascript.
   // loadVideo(id) → plain playback; loadVideo(id, seconds) → resume from
   // seconds; loadVideo(id, seconds, muted) also pins the desired mute state
-  // (persists across videos until the user toggles it again).
-  function loadVideo(id, seconds, muted) {
+  // (persists across videos until the user toggles it again); loadVideo(id,
+  // seconds, muted, maxQuality) also pins the best playback quality.
+  function loadVideo(id, seconds, muted, maxQuality) {
     pending = id;
     pendingResume = (typeof seconds === 'number' && seconds > 0) ? seconds : 0;
     if (typeof muted === 'boolean') preferredMuted = muted;
+    if (typeof maxQuality === 'boolean') setMaxQuality(maxQuality);
     var token = ++loadToken;
     setCover(true); // cover the grey play-button poster for the new load
     // Safety net: if this load NEVER reaches PLAYING / PAUSED / ENDED / error

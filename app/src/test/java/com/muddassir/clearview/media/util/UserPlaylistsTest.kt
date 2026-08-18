@@ -124,4 +124,64 @@ class UserPlaylistsTest {
         assertEquals(2, ids.size)
         assertFalse(ids.filter { it == "a" }.size > 1)
     }
+
+    // ── Offline-audio entries (isOfflineAudio): a playlist can hold BOTH a
+    // video and its downloaded audio side by side — dedup and removal are
+    // keyed on (videoId, audio flag), never on the id alone.
+
+    private fun audio(id: String) = video(id).copy(isOfflineAudio = true)
+
+    @Test
+    fun `adding the same video and its audio keeps both entries`() {
+        val list = listOf(playlist("p1", "A", "a"))
+        val updated = UserPlaylists.withVideosAdded(list, "p1", listOf(audio("a"), audio("b")))
+        // "a" (video) + "a" (audio) both present; "b" (audio) appended.
+        assertEquals(
+            listOf("a" to false, "a" to true, "b" to true),
+            updated[0].videos.map { it.videoId to it.isOfflineAudio }
+        )
+    }
+
+    @Test
+    fun `re-adding an audio entry already present is deduped`() {
+        val list = listOf(playlist("p1", "A", "a"))
+        val withAudio = UserPlaylists.withVideosAdded(list, "p1", listOf(audio("a")))
+        val again = UserPlaylists.withVideosAdded(withAudio, "p1", listOf(audio("a"), audio("b")))
+        assertEquals(3, again[0].videos.size)
+    }
+
+    @Test
+    fun `removing the video leaves its audio entry behind`() {
+        val list = listOf(playlist("p1", "A", "a"))
+        val withAudio = UserPlaylists.withVideosAdded(list, "p1", listOf(audio("a")))
+        val withoutVideo = UserPlaylists.withVideoRemoved(withAudio, "p1", "a", isOfflineAudio = false)
+        assertEquals(listOf("a" to true), withoutVideo[0].videos.map { it.videoId to it.isOfflineAudio })
+    }
+
+    @Test
+    fun `removing the audio leaves its video entry behind`() {
+        val list = listOf(playlist("p1", "A", "a"))
+        val withAudio = UserPlaylists.withVideosAdded(list, "p1", listOf(audio("a")))
+        val withoutAudio = UserPlaylists.withVideoRemoved(withAudio, "p1", "a", isOfflineAudio = true)
+        assertEquals(listOf("a" to false), withoutAudio[0].videos.map { it.videoId to it.isOfflineAudio })
+    }
+
+    @Test
+    fun `plain remove still removes a video entry (backward compatible)`() {
+        val list = listOf(playlist("p1", "A", "a", "b"))
+        val updated = UserPlaylists.withVideoRemoved(list, "p1", "a")
+        assertEquals(listOf("b"), updated[0].videos.map { it.videoId })
+    }
+
+    @Test
+    fun `audio entries survive encode-decode round trip`() {
+        val list = listOf(playlist("p1", "Mix", "a"))
+        val withAudio = UserPlaylists.withVideosAdded(list, "p1", listOf(audio("a")))
+        val decoded = UserPlaylists.decode(UserPlaylists.encode(withAudio))
+        assertEquals(withAudio, decoded)
+        assertEquals(
+            listOf("a" to false, "a" to true),
+            decoded[0].videos.map { it.videoId to it.isOfflineAudio }
+        )
+    }
 }

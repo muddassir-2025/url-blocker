@@ -1,6 +1,5 @@
 package com.muddassir.clearview.media.ui
 
-import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -9,9 +8,9 @@ import android.net.Uri
 import android.text.format.DateUtils
 import android.util.Log
 import android.widget.Toast
+import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -33,7 +32,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Replay10
@@ -101,6 +99,9 @@ import com.muddassir.clearview.media.data.WatchProgressStore
 import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.download.DownloadStatus
 import com.muddassir.clearview.media.model.MediaVideo
+import com.muddassir.clearview.media.model.UserPlaylist
+import com.muddassir.clearview.media.util.formatBytes
+import com.muddassir.clearview.media.util.formatEtaRemaining
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -145,7 +146,7 @@ fun VideoPlayerScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val activity = context as? Activity
+    val activity = LocalActivity.current
 
     // All player state is keyed on the current videoId so it resets
     // SYNCHRONOUSLY the moment the source changes (opening a video, swiping
@@ -238,6 +239,12 @@ fun VideoPlayerScreen(
     LaunchedEffect(Unit) { AudioDownloads.initialize(context.applicationContext) }
     val downloadStatus = AudioDownloads.statusFor(video.videoId)
     val isOffline = AudioDownloads.isDownloaded(video.videoId)
+    // A manually added video can be removed from the library right here — the
+    // feed cards offer it too, so the player's ⋮ menu should match. Cached per
+    // video: the player recomposes rapidly during playback (progress ticks),
+    // and the lookup decodes the library prefs each time.
+    val isManual = remember(video.videoId) { libraryStore.isManuallyAdded(video.videoId) }
+    var confirmRemoveManual by remember(video.videoId) { mutableStateOf(false) }
     var lastProgressSavedAt by remember { mutableStateOf(0L) }
     // Runtime live signal: the IFrame API reports a NON-finite duration
     // (Infinity) for a live broadcast, and the JS bridge only forwards
@@ -337,12 +344,48 @@ fun VideoPlayerScreen(
     // composition. Playlists replaced the old Bookmark feature.
     val userPlaylistStore = remember { UserPlaylistStore(context.applicationContext) }
     var showPlaylistPicker by remember { mutableStateOf(false) }
+    // Same picker in AUDIO mode: the ⋮ menu's "Add audio to playlist…" seeds
+    // an audio entry (MediaVideo.isOfflineAudio) instead of the video entry,
+    // so the playlist gains "audio of this video" — tapping it plays the
+    // downloaded file rather than opening the player.
+    var showAudioPlaylistPicker by remember { mutableStateOf(false) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
-    val playerPlaylists = remember(showPlaylistPicker) {
-        if (showPlaylistPicker) userPlaylistStore.getPlaylists() else emptyList()
+    // True while the create dialog was opened from the AUDIO picker, so its
+    // seed is the audio entry, not the video entry.
+    var creatingAudioPlaylist by remember { mutableStateOf(false) }
+    // Re-read whenever EITHER picker opens (the audio picker never flips
+    // showPlaylistPicker, so keying on it alone would hand the audio sheet an
+    // empty list unless the video picker had been opened first).
+    val playerPlaylists = remember(showPlaylistPicker, showAudioPlaylistPicker) {
+        if (showPlaylistPicker || showAudioPlaylistPicker) {
+            userPlaylistStore.getPlaylists()
+        } else {
+            emptyList()
+        }
     }
+    // A user playlist containing the current video — when one exists, the ⋮
+    // menu offers removing the video from it (mirroring the Media tab's
+    // playlist-feed cards). Bumped after any playlist edit made here so the
+    // lookup stays fresh (a video added to a playlist from this screen gets
+    // its Remove entry immediately).
+    var playlistRevision by remember { mutableIntStateOf(0) }
+    val containingPlaylist = remember(userPlaylistStore, video.videoId, playlistRevision) {
+        userPlaylistStore.getPlaylists().firstOrNull { p ->
+            // The VIDEO entry only — a playlist may hold this video's
+            // downloaded AUDIO (isOfflineAudio) as a separate entry, and this
+            // ⋮ entry removes the VIDEO. The audio entry is removed from the
+            // playlist itself (or via the Delete download flow).
+            p.videos.any { !it.isOfflineAudio && it.videoId == video.videoId }
+        }
+    }
+    // A playlist awaiting "remove from playlist" confirmation — captured at
+    // menu-tap time (like MediaTab's pendingVideoRemove) so the dialog never
+    // depends on later state.
+    var pendingRemovePlaylist by remember(video.videoId) { mutableStateOf<UserPlaylist?>(null) }
     var showSpeedMenu by remember { mutableStateOf(false) }
     var showHideConfirm by remember { mutableStateOf(false) }
+    // The ⋮ menu's "Delete download" asks first (never deletes by accident).
+    var confirmDeleteDownload by remember { mutableStateOf(false) }
 
     // Player commands for the Shorts viewer (play/pause/mute). Each command is
     // a token + label pair: bumping the token re-sends the command to the page.
@@ -654,22 +697,6 @@ fun VideoPlayerScreen(
                 )
             }
 
-            // ── Download progress overlay: a blurred card pinned to the
-            // bottom of the video while the audio downloads (Preparing →
-            // animated sweep, Downloading → real %), with a cancel button.
-            when (downloadStatus) {
-                is DownloadStatus.Preparing, is DownloadStatus.Downloading ->
-                    VideoDownloadOverlay(
-                        video = video,
-                        status = downloadStatus,
-                        onCancel = { AudioDownloads.cancel(video.videoId) },
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = if (fullscreenVertical) 96.dp else 12.dp)
-                    )
-                else -> Unit
-            }
-
             // ── Loading placeholder: a blurred thumbnail of the actual video
             // (or a plain dark box) that fades away when playback first starts.
             // No icon, no spinner, no text — the video area stays clean.
@@ -835,14 +862,13 @@ fun VideoPlayerScreen(
                 showSpeedMenu = showSpeedMenu,
                 downloadStatus = downloadStatus,
                 isOffline = isOffline,
+                isManual = isManual,
                 onDownloadAudio = {
                     AudioDownloads.download(video, AudioDownloads.sourceFor(video))
                 },
                 onPlayOffline = onPlayOffline,
-                onDeleteDownload = {
-                    AudioDownloads.delete(video.videoId)
-                    Toast.makeText(context, "Download deleted", Toast.LENGTH_SHORT).show()
-                },
+                onDeleteDownload = { confirmDeleteDownload = true },
+                onRemoveManual = { confirmRemoveManual = true },
                 onDownloadMenuAction = {
                     if (downloadStatus is DownloadStatus.Preparing ||
                         downloadStatus is DownloadStatus.Downloading
@@ -853,6 +879,9 @@ fun VideoPlayerScreen(
                     }
                 },
                 onAddToPlaylist = { showPlaylistPicker = true },
+                onAddAudioToPlaylist = { showAudioPlaylistPicker = true },
+                onRemoveFromPlaylist = { pendingRemovePlaylist = containingPlaylist },
+                containingPlaylistName = containingPlaylist?.name,
                 onSpeedMenuToggle = { showSpeedMenu = !showSpeedMenu },
                 onSpeedSelect = { setPlaybackRate(it); showSpeedMenu = false },
                 onContinue = { requestSeek(resumeFromSeconds) },
@@ -888,6 +917,71 @@ fun VideoPlayerScreen(
         )
     }
 
+    // ── Remove manually added video confirmation (⋮ menu → Remove) ──
+    if (confirmRemoveManual) {
+        AlertDialog(
+            onDismissRequest = { confirmRemoveManual = false },
+            title = { Text("Remove this video?") },
+            text = { Text("\"${video.title}\" was added manually. Removing it deletes it from your library.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    libraryStore.removeManuallyAdded(video.videoId)
+                    confirmRemoveManual = false
+                    Toast.makeText(context, "Video removed", Toast.LENGTH_SHORT).show()
+                    onExit()
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemoveManual = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // ── Remove from playlist confirmation (⋮ menu → Remove from …) ──
+    // Removing a video from a playlist never touches the video itself, so the
+    // player stays open — the menu entry simply disappears afterwards.
+    pendingRemovePlaylist?.let { playlist ->
+        AlertDialog(
+            onDismissRequest = { pendingRemovePlaylist = null },
+            title = { Text("Remove video?") },
+            text = { Text("Remove \"${video.title}\" from \"${playlist.name}\"?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    userPlaylistStore.removeVideo(playlist.id, video.videoId)
+                    playlistRevision++
+                    pendingRemovePlaylist = null
+                    Toast.makeText(
+                        context,
+                        "Removed from ${playlist.name}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemovePlaylist = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // ── Delete offline audio confirmation (⋮ menu → Delete download) ──
+    if (confirmDeleteDownload) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteDownload = false },
+            title = { Text("Delete download?") },
+            text = { Text("Delete the offline audio of \"${video.title}\"?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    AudioDownloads.delete(video.videoId)
+                    confirmDeleteDownload = false
+                    Toast.makeText(context, "Download deleted", Toast.LENGTH_SHORT).show()
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteDownload = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     // ── Add to playlist (Playlist button / ⋮ menu) ──────────────────
     // Reuses the Media tab's picker + name dialog (same package). Adding a
     // video here is instantly visible in the Media tab's playlist feed.
@@ -897,6 +991,7 @@ fun VideoPlayerScreen(
             playlists = playerPlaylists,
             onAdd = { playlist ->
                 userPlaylistStore.addVideos(playlist.id, listOf(video))
+                playlistRevision++
                 showPlaylistPicker = false
                 Toast.makeText(context, "Added to ${playlist.name}", Toast.LENGTH_SHORT).show()
             },
@@ -907,21 +1002,63 @@ fun VideoPlayerScreen(
             onDismiss = { showPlaylistPicker = false }
         )
     }
+    if (showAudioPlaylistPicker) {
+        // Audio mode of the same picker: seeds an AUDIO entry so the playlist
+        // holds "audio of this video" (plays the downloaded file). Only
+        // reachable while the audio is downloaded (⋮ menu gates on isOffline).
+        AddToPlaylistSheet(
+            video = video.copy(isOfflineAudio = true),
+            title = "Add audio to playlist",
+            newLabel = "New playlist with this audio",
+            playlists = playerPlaylists,
+            onAdd = { playlist ->
+                userPlaylistStore.addVideos(
+                    playlist.id,
+                    listOf(video.copy(isOfflineAudio = true))
+                )
+                playlistRevision++
+                showAudioPlaylistPicker = false
+                Toast.makeText(
+                    context,
+                    "Added audio to ${playlist.name}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            },
+            onCreateNew = {
+                showAudioPlaylistPicker = false
+                creatingAudioPlaylist = true
+                showCreatePlaylistDialog = true
+            },
+            onDismiss = { showAudioPlaylistPicker = false }
+        )
+    }
     if (showCreatePlaylistDialog) {
         PlaylistNameDialog(
             initial = "",
             title = "New playlist",
             confirmLabel = "Create",
             onSubmit = { name ->
-                userPlaylistStore.createPlaylist(name, listOf(video))
+                val seed =
+                    if (creatingAudioPlaylist) listOf(video.copy(isOfflineAudio = true))
+                    else listOf(video)
+                creatingAudioPlaylist = false
+                userPlaylistStore.createPlaylist(name, seed)
+                playlistRevision++
                 showCreatePlaylistDialog = false
                 Toast.makeText(
                     context,
-                    "Created \"$name\" with this video",
+                    if (seed.first().isOfflineAudio) {
+                        "Created \"$name\" with this audio"
+                    } else {
+                        "Created \"$name\" with this video"
+                    },
                     Toast.LENGTH_SHORT
                 ).show()
             },
-            onDismiss = { showCreatePlaylistDialog = false }
+            onDismiss = {
+                creatingAudioPlaylist = false
+                showCreatePlaylistDialog = false
+            }
         )
     }
 }
@@ -944,18 +1081,28 @@ private fun PlayerControlPanel(
     showSpeedMenu: Boolean,
     downloadStatus: DownloadStatus?,
     isOffline: Boolean,
+    /** Whether this video was manually added by URL (its ⋮ menu offers Remove). */
+    isManual: Boolean,
     onDownloadAudio: () -> Unit,
     onPlayOffline: () -> Unit,
     onDeleteDownload: () -> Unit,
     /** ⋮ menu download entry: cancel while active, else start/retry. */
     onDownloadMenuAction: () -> Unit,
     onAddToPlaylist: () -> Unit,
+    /** ⋮ menu → Add audio to playlist (only while the audio is downloaded). */
+    onAddAudioToPlaylist: () -> Unit,
+    /** ⋮ menu → Remove from playlist (only when [containingPlaylistName] is set). */
+    onRemoveFromPlaylist: () -> Unit,
+    /** Name of the user playlist holding this video, or null (no entry shown). */
+    containingPlaylistName: String?,
     onSpeedMenuToggle: () -> Unit,
     onSpeedSelect: (Double) -> Unit,
     onContinue: () -> Unit,
     onWatchAgain: () -> Unit,
     onShare: () -> Unit,
     onHide: () -> Unit,
+    /** ⋮ menu → Remove (manually added). */
+    onRemoveManual: () -> Unit,
     onMarkWatched: () -> Unit
 ) {
     var showMoreMenu by remember { mutableStateOf(false) }
@@ -1060,6 +1207,27 @@ private fun PlayerControlPanel(
                             onAddToPlaylist()
                         }
                     )
+                    // The downloaded audio can ALSO be added to a playlist — as
+                    // its own AUDIO entry (plays the offline file) next to the
+                    // video entry above. Only while the audio exists.
+                    if (isOffline) {
+                        DropdownMenuItem(
+                            text = { Text("Add audio to playlist…") },
+                            onClick = {
+                                showMoreMenu = false
+                                onAddAudioToPlaylist()
+                            }
+                        )
+                    }
+                    if (containingPlaylistName != null) {
+                        DropdownMenuItem(
+                            text = { Text("Remove from \"$containingPlaylistName\"") },
+                            onClick = {
+                                showMoreMenu = false
+                                onRemoveFromPlaylist()
+                            }
+                        )
+                    }
                     if (isOffline) {
                         DropdownMenuItem(
                             text = { Text("Delete download") },
@@ -1079,6 +1247,15 @@ private fun PlayerControlPanel(
                             onClick = {
                                 showMoreMenu = false
                                 onDownloadMenuAction()
+                            }
+                        )
+                    }
+                    if (isManual) {
+                        DropdownMenuItem(
+                            text = { Text("Remove (manually added)") },
+                            onClick = {
+                                showMoreMenu = false
+                                onRemoveManual()
                             }
                         )
                     }
@@ -1142,7 +1319,12 @@ private fun PlayerControlPanel(
         // ── Offline audio: the Download Audio button with its full state flow
         // (Download → Preparing… → Downloading NN% → Downloaded → Play offline).
         // Live broadcasts can't be downloaded, so the button is hidden for them.
+        // The resolved audio size (≈ X MB) appears as soon as the stream is
+        // resolved — before any bytes are downloaded.
         if (!isLive) {
+            val audioSize = AudioDownloads.pendingSizes[video.videoId]
+            val sizeSuffix = if (audioSize != null && audioSize > 0L)
+                " · ≈ ${formatBytes(audioSize)}" else ""
             Spacer(Modifier.height(10.dp))
             when {
                 isOffline -> FilledTonalButton(
@@ -1168,7 +1350,7 @@ private fun PlayerControlPanel(
                         color = MaterialTheme.colorScheme.onPrimary
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text("Preparing…")
+                    Text("Preparing…$sizeSuffix")
                 }
                 downloadStatus is DownloadStatus.Downloading -> Column(
                     modifier = Modifier.fillMaxWidth()
@@ -1180,12 +1362,25 @@ private fun PlayerControlPanel(
                     ) {
                         Text(
                             if (downloadStatus.progress >= 0f)
-                                "Downloading ${(downloadStatus.progress.coerceIn(0f, 1f) * 100).toInt()}%"
+                                "Downloading ${(downloadStatus.progress.coerceIn(0f, 1f) * 100).toInt()}%$sizeSuffix"
                             else
-                                "Downloading…"
+                                "Downloading…$sizeSuffix"
                         )
                     }
                     Spacer(Modifier.height(4.dp))
+                    // Estimated time remaining, once the downloader has enough
+                    // history to compute it ("~2m 30s left").
+                    val etaText = formatEtaRemaining(downloadStatus.etaSeconds)
+                    if (etaText.isNotEmpty()) {
+                        Text(
+                            text = etaText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(4.dp))
+                    }
                     if (downloadStatus.progress >= 0f) {
                         LinearProgressIndicator(
                             progress = { downloadStatus.progress.coerceIn(0f, 1f) },
@@ -1232,115 +1427,6 @@ private fun PlayerControlPanel(
                     Spacer(Modifier.width(6.dp))
                     Text("Download Audio")
                 }
-            }
-        }
-    }
-}
-
-/**
- * The animated download card shown over the video while audio downloads: a
- * blurred-thumbnail backdrop with a live progress bar (sweep while preparing,
- * a real % once bytes flow) and a cancel button.
- */
-@Composable
-private fun VideoDownloadOverlay(
-    video: MediaVideo,
-    status: DownloadStatus,
-    onCancel: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val isDownloading = status is DownloadStatus.Downloading
-    val progress = if (status is DownloadStatus.Downloading) status.progress else -1f
-    val known = isDownloading && progress >= 0f
-
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp)
-            .height(72.dp)
-            .clip(RoundedCornerShape(16.dp))
-    ) {
-        // Blurred thumbnail backdrop (same look as the loading placeholder).
-        if (video.thumbnailUrl.isNotBlank()) {
-            RemoteImage(
-                url = video.thumbnailUrl,
-                showLoadingSpinner = false,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .scale(1.15f)
-                    .blur(14.dp)
-            )
-        } else {
-            Box(Modifier.fillMaxSize().background(Color.Black))
-        }
-        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)))
-
-        Row(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (known) {
-                CircularProgressIndicator(
-                    progress = { progress.coerceIn(0f, 1f) },
-                    modifier = Modifier.size(30.dp),
-                    strokeWidth = 3.dp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            } else {
-                // Preparing / unknown total — animate rather than look stuck.
-                CircularProgressIndicator(
-                    modifier = Modifier.size(30.dp),
-                    strokeWidth = 3.dp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = if (known)
-                        "Downloading ${(progress.coerceIn(0f, 1f) * 100).toInt()}%"
-                    else
-                        "Preparing audio…",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(4.dp))
-                if (known) {
-                    val animated by animateFloatAsState(
-                        targetValue = progress.coerceIn(0f, 1f),
-                        animationSpec = tween(400),
-                        label = "download-overlay-progress"
-                    )
-                    LinearProgressIndicator(
-                        progress = { animated },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(4.dp)
-                            .clip(RoundedCornerShape(2.dp)),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = Color.White.copy(alpha = 0.3f)
-                    )
-                } else {
-                    LinearProgressIndicator(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(4.dp)
-                            .clip(RoundedCornerShape(2.dp)),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = Color.White.copy(alpha = 0.3f)
-                    )
-                }
-            }
-            Spacer(Modifier.width(4.dp))
-            IconButton(onClick = onCancel) {
-                Icon(
-                    Icons.Filled.Close,
-                    contentDescription = "Cancel download",
-                    tint = Color.White
-                )
             }
         }
     }
@@ -1572,11 +1658,11 @@ private fun formatPosition(seconds: Long): String {
 }
 
 /** "1.0x", "1.25x", … (whole values rendered without a trailing .0). */
-private fun formatRate(rate: Double): String =
+internal fun formatRate(rate: Double): String =
     (if (rate == rate.toLong().toDouble()) rate.toLong().toString() else rate.toString()) + "x"
 
-/** The playback-speed options offered by the embedded player. */
-private val SPEED_OPTIONS = listOf(0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
+/** The playback-speed options offered by the players. */
+internal val SPEED_OPTIONS = listOf(0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
 
 /** SharedPreferences holding the user's persisted playback rate. */
 private const val PREFS_NAME = "media_player_prefs"

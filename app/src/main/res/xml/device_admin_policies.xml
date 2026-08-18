@@ -2,7 +2,11 @@
 <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Used by Device Admin to add uninstall friction (must deactivate before uninstall) -->
     <!-- Used by Device Owner (via ADB setup) to truly block uninstall via setUninstallBlocked() -->
+    <!-- force-lock: lets the Phone Limit lock the screen when its countdown
+         reaches zero (DevicePolicyManager.lockNow). Without this policy the
+         lock silently fails with "No active admin ... for policy #3". -->
     <uses-policies>
         <disable-uninstall />
+        <force-lock />
     </uses-policies>
 </device-admin>

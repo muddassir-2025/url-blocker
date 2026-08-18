@@ -15,14 +15,19 @@ import com.muddassir.clearview.media.model.MediaChannelUpdate
 
 /**
  * Posts the media (channel-update) notifications: one "… has an update"
- * notification per channel that uploaded something new, grouped into a single
- * summary so a burst of uploads never spams the shade. Tapping one opens the
- * app (the home page shows the Latest Updates feed with the same channels).
+ * notification per channel that uploaded something new. There is deliberately
+ * NO group summary ("N channels have updates") — each update stands on its own
+ * in the shade, so a burst of uploads shows one notification per channel, not
+ * an extra generic one. Tapping one opens the app (the home page shows the
+ * Latest Updates feed with the same channels).
  */
 object MediaNotifier {
 
     const val CHANNEL_ID = "media_updates"
-    private const val GROUP_KEY = "media_updates_group"
+    // Id of the group-summary notification OLD builds posted ("N channels have
+    // updates"). No new summary is ever posted, but this id is still cancelled
+    // on app-close of the update feed so a leftover from a previous version
+    // doesn't linger in the shade.
     private const val SUMMARY_ID = 0
     // Cap the per-run notifications so a channel that uploaded a backlog of
     // videos can't flood the user; the summary still counts everything.
@@ -49,9 +54,9 @@ object MediaNotifier {
     }
 
     /**
-     * Posts one notification per channel in [updates] plus a group summary.
-     * Returns the number of channels notified (0 when notifications are
-     * disabled by the system — e.g. the user denied the permission).
+     * Posts one standalone notification per channel in [updates] — no group
+     * summary. Returns the number of channels notified (0 when notifications
+     * are disabled by the system — e.g. the user denied the permission).
      *
      * The notify() calls below are guarded at runtime by areNotificationsEnabled()
      * (false on Android 13+ whenever POST_NOTIFICATIONS is not granted), so the
@@ -68,37 +73,17 @@ object MediaNotifier {
 
         updates.take(MAX_SHOWN).forEach { update ->
             val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_widget_copy)
+                .setSmallIcon(R.drawable.ic_stat_clearview)
                 .setContentTitle(
                     context.getString(R.string.media_has_update, update.channelName)
                 )
                 .setContentText(update.latestVideoTitle)
                 .setContentIntent(openAppIntent(context, update.channelId))
                 .setAutoCancel(true)
-                .setGroup(GROUP_KEY)
                 .build()
             // Deterministic per-channel id: dismissing an update in the app can
             // cancel exactly the notification that was posted for it.
             manager.notify(channelNotificationId(update.channelId), notification)
-        }
-
-        // Group summary ("3 channels have updates") so the notifications collapse.
-        if (updates.size > 1) {
-            val summary = NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_widget_copy)
-                .setContentTitle(
-                    context.resources.getQuantityString(
-                        R.plurals.media_channels_updated,
-                        updates.size,
-                        updates.size
-                    )
-                )
-                .setContentIntent(openAppIntent(context, updates.first().channelId))
-                .setAutoCancel(true)
-                .setGroup(GROUP_KEY)
-                .setGroupSummary(true)
-                .build()
-            manager.notify(SUMMARY_ID, summary)
         }
         return updates.size
     }
@@ -128,7 +113,12 @@ object MediaNotifier {
         manager.cancel(channelNotificationId(channelId))
     }
 
-    /** Cancels the "N channels have updates" group summary notification. */
+    /**
+     * Cancels any leftover "N channels have updates" summary notification that
+     * an OLD build posted (new builds never post one). Called when the in-app
+     * update feed is emptied, so a stale shade entry from a previous version
+     * doesn't linger.
+     */
     fun cancelSummary(context: Context) {
         val manager = NotificationManagerCompat.from(context)
         manager.cancel(SUMMARY_ID)

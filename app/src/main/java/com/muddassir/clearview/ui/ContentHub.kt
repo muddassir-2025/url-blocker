@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.widget.Toast
+import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.Icons
@@ -13,10 +14,10 @@ import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.LiveTv
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.Badge
@@ -54,11 +55,17 @@ import com.muddassir.clearview.media.ui.AudioPlayerScreen
 import com.muddassir.clearview.media.ui.LiveTab
 import com.muddassir.clearview.media.ui.MediaTab
 import com.muddassir.clearview.media.ui.VideoPlayerScreen
+import com.muddassir.clearview.phonelimit.ui.PhoneLimitSheet
 import com.muddassir.clearview.media.worker.MediaNotifier
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
+import com.muddassir.clearview.quran.data.IslamicDateStore
 import com.muddassir.clearview.quran.data.QuranRepository
 import com.muddassir.clearview.quran.model.QuranVerse
+import com.muddassir.clearview.quran.ui.DhikrCounterScreen
 import com.muddassir.clearview.quran.ui.QuranTab
+import com.muddassir.clearview.todo.data.TodoScheduler
+import com.muddassir.clearview.todo.data.TodoStore
+import com.muddassir.clearview.todo.ui.TodoScreen
 import com.muddassir.clearview.quran.util.copyVerseToClipboard
 import com.muddassir.clearview.quran.util.formatVerseForSharing
 import com.muddassir.clearview.quran.widget.QuranReminderWidgetProvider
@@ -115,16 +122,33 @@ class ContentHubState(appContext: Context) {
     // ── Quran notifications (new verse) ────────────────────────────
     var quranNotificationsEnabled by mutableStateOf(true)
 
+    // ── Todo reminders (alarm notifications) ───────────────────────
+    var todoNotificationsEnabled by mutableStateOf(true)
+
     // ── Top-bar sheets on the Quran tab (search / settings / notifications) ──
     var showSearchSheet by mutableStateOf(false)
     var showSettingsSheet by mutableStateOf(false)
     var showNotificationsSheet by mutableStateOf(false)
     // Bookmarks manager opened from the settings sheet.
     var showBookmarksSheet by mutableStateOf(false)
+    // Dhikr Counter screen opened from the settings sheet's Dhikr card.
+    var showDhikrCounter by mutableStateOf(false)
+    // Todo screen opened from the settings sheet's Todo card.
+    var showTodoScreen by mutableStateOf(false)
+    // Phone Limit sheet opened from the settings sheet's "Set Phone Limit" card.
+    var showPhoneLimitSheet by mutableStateOf(false)
+
+    // ── Islamic date (Umm al-Qura) on the Quran tab ────────────────
+    // The user's ±1 day adjustment (0 = the default calculated date),
+    // persisted via IslamicDateStore so it survives restarts.
+    var islamicDateAdjustment by mutableStateOf(0)
+    var showIslamicDateSheet by mutableStateOf(false)
 
     private val appContext: Context = appContext
     private val quranRepository = QuranRepository(appContext)
     private val mediaRepository = MediaRepository(appContext)
+    private val islamicDateStore = IslamicDateStore(appContext)
+    private val todoStore = TodoStore(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     init {
@@ -142,6 +166,8 @@ class ContentHubState(appContext: Context) {
         }
         mediaNotificationsEnabled = mediaRepository.isMediaNotificationsEnabled()
         quranNotificationsEnabled = quranRepository.getQuranNotificationsEnabled()
+        todoNotificationsEnabled = todoStore.getTodoNotificationsEnabled()
+        islamicDateAdjustment = islamicDateStore.adjustmentDays()
         verseLoading = true
     }
 
@@ -156,8 +182,25 @@ class ContentHubState(appContext: Context) {
     fun start() {
         scope.launch {
             if (verse == null) {
-                val loaded = withContext(Dispatchers.IO) {
+                verseLoading = true
+                var loaded = withContext(Dispatchers.IO) {
                     quranRepository.getCurrentVerse() ?: quranRepository.pickRandomVerse()
+                }
+                if (loaded == null) {
+                    // Very first launch: nothing is cached yet, so the persisted
+                    // verse doesn't exist and pickRandomVerse() has no data. The
+                    // background worker downloads the translation separately, but
+                    // this in-process download makes the result observable by
+                    // the UI — when it completes, the verse is set and the tab
+                    // recomposes immediately, with NO app restart required.
+                    val downloaded = withContext(Dispatchers.IO) {
+                        quranRepository.ensureEnglishAndArabic()
+                    }
+                    if (downloaded) {
+                        loaded = withContext(Dispatchers.IO) {
+                            quranRepository.pickRandomVerse()
+                        }
+                    }
                 }
                 verse = loaded
                 verseLoading = false
@@ -233,6 +276,23 @@ class ContentHubState(appContext: Context) {
     }
 
     /**
+     * Persists the global Todo-reminders toggle. Turning it ON re-registers
+     * every pending todo alarm so existing todos get their reminders again
+     * (turning it OFF leaves alarms unset — [TodoScheduler] skips them too).
+     */
+    fun setTodoNotifications(enabled: Boolean) {
+        todoNotificationsEnabled = enabled
+        todoStore.setTodoNotificationsEnabled(enabled)
+        TodoScheduler.rescheduleAll(appContext)
+    }
+
+    /** Persists the ±1 day Islamic-date adjustment (0 = the default Umm al-Qura date). */
+    fun changeIslamicDateAdjustment(days: Int) {
+        islamicDateAdjustment = days.coerceIn(-1, 1)
+        islamicDateStore.setAdjustmentDays(islamicDateAdjustment)
+    }
+
+    /**
      * Opens the notifications panel; viewing it marks every listed update as
      * seen (clears the bell / tab / launcher badges), like opening the Media
      * tab does.
@@ -291,9 +351,11 @@ class ContentHubState(appContext: Context) {
         playingAudio = item
     }
 
-    /** Closes the audio player (stops playback too). */
+    /** Closes the audio player screen. Playback deliberately CONTINUES in the
+     *  background (foreground service + media notification) — like any music
+     *  app, leaving the player must not stop the audio.
+     */
     fun exitAudio() {
-        OfflineAudioPlayer.stop()
         playingAudio = null
     }
 
@@ -550,7 +612,9 @@ fun ContentHubTabContent(
                 canGoPrevious = state.canGoPrevious,
                 canGoNext = state.canGoNext,
                 onPrevious = { state.goToAdjacentVerse(-1) },
-                onNext = { state.goToAdjacentVerse(+1) }
+                onNext = { state.goToAdjacentVerse(+1) },
+                islamicDateAdjustment = state.islamicDateAdjustment,
+                onAdjustDate = { state.showIslamicDateSheet = true }
             )
 
             state.selectedTab == ContentTab.MEDIA -> MediaTab(
@@ -601,11 +665,12 @@ fun ContentHubTopBar(
             }
         )
 
-        // Offline audio: back arrow closes the podcast-style player (stops it).
+        // Offline audio: back arrow closes the podcast-style player; the bar
+        // shows "Now Playing" (the player body itself shows the track title).
         state.playingAudio != null -> TopAppBar(
             title = {
                 Text(
-                    text = state.playingAudio!!.title,
+                    text = "Now Playing",
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -637,14 +702,16 @@ fun ContentHubTopBar(
                         contentDescription = stringResource(R.string.quran_search)
                     )
                 }
-                // Settings: verse refresh interval + notification toggles.
+                // More options: verse refresh interval + notification toggles and
+                // the feature hub (Dhikr counter, Todo, bookmarks) — no longer
+                // just settings, so it uses the overflow icon.
                 IconButton(
                     onClick = { state.showSettingsSheet = true },
                     enabled = state.verse != null && !state.verseLoading
                 ) {
                     Icon(
-                        Icons.Filled.Settings,
-                        contentDescription = stringResource(R.string.quran_settings)
+                        Icons.Filled.MoreVert,
+                        contentDescription = stringResource(R.string.quran_more_options)
                     )
                 }
                 IconButton(
@@ -726,6 +793,24 @@ fun ContentHubTopBar(
     if (state.showBookmarksSheet) {
         BookmarksSheet(state = state, onDismiss = { state.showBookmarksSheet = false })
     }
+    if (state.showDhikrCounter) {
+        DhikrCounterScreen(onDismiss = { state.showDhikrCounter = false })
+    }
+    if (state.showTodoScreen) {
+        TodoScreen(onDismiss = { state.showTodoScreen = false })
+    }
+    if (state.showIslamicDateSheet) {
+        IslamicDateAdjustmentSheet(
+            adjustment = state.islamicDateAdjustment,
+            onSelect = { state.changeIslamicDateAdjustment(it) },
+            onDismiss = { state.showIslamicDateSheet = false }
+        )
+    }
+    // Phone Limit: countdown that locks the phone when it expires. Opened from
+    // the settings sheet's "Set Phone Limit" card (Quran tab ⋮ menu).
+    if (state.showPhoneLimitSheet) {
+        PhoneLimitSheet(onDismiss = { state.showPhoneLimitSheet = false })
+    }
 }
 
 // ── Constants shared with QuranTab's interval picker ──────────────
@@ -767,9 +852,8 @@ fun contentHubNavItems(): List<ContentHubNavItem> = listOf(
  * the current context isn't an [Activity].
  */
 @Composable
-fun applyImmersiveIfNeeded(isFullscreen: Boolean) {
-    val context = LocalContext.current
-    val activity = context as? Activity
+fun ApplyImmersiveIfNeeded(isFullscreen: Boolean) {
+    val activity = LocalActivity.current
     LaunchedEffect(isFullscreen) {
         if (activity != null) {
             val window = activity.window

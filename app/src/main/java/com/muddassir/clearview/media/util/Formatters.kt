@@ -63,3 +63,19 @@ internal fun formatDownloadDate(epochMillis: Long): String {
     if (epochMillis <= 0L) return "—"
     return SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(epochMillis))
 }
+
+/**
+ * "~2m 30s left" for a download ETA (seconds), or "" while the estimate is
+ * unavailable (too early in the download, the size is unknown, or the finish
+ * line is right there — "~0s left" is noise). Shared by the feed thumbnails,
+ * the video player and the Downloads list. Pure JVM so it is unit-testable.
+ */
+internal fun formatEtaRemaining(seconds: Long): String {
+    if (seconds < 2L) return ""
+    val s = seconds.coerceAtLeast(0L)
+    return when {
+        s < 60 -> "~${s}s left"
+        s < 3600 -> "~${s / 60}m ${s % 60}s left"
+        else -> "~${s / 3600}h ${(s % 3600) / 60}m left"
+    }
+}

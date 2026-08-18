@@ -1,27 +1,25 @@
 package com.muddassir.clearview.service
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
-import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
-import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.muddassir.clearview.extractor.ContentExtractor
 import java.util.Locale
 import com.muddassir.clearview.matching.ContentSnapshot
-import com.muddassir.clearview.matching.FeedVideoCard
 import com.muddassir.clearview.matching.KeywordMatcher
 import com.muddassir.clearview.matching.MatchResult
 import com.muddassir.clearview.matching.MatchType
 import com.muddassir.clearview.matching.MatchSource
 import com.muddassir.clearview.repository.BlockRepository
-import com.muddassir.clearview.vision.ThumbnailSafetyAnalyzer
+import com.muddassir.clearview.youtubetest.LongVideoBlockCoordinator
+import com.muddassir.clearview.youtubetest.YouTubeChromeTestCoordinator
+import com.muddassir.clearview.youtubetest.YoutubeTestKeywordRepository
 import kotlinx.coroutines.*
 
 enum class BlockingState {
@@ -40,6 +38,26 @@ class UrlBlockerService : AccessibilityService() {
 
     companion object {
         private const val TAG = "UrlBlockerService"
+
+        /**
+         * Live reference to the running service, set in [onCreate] and cleared
+         * in [onDestroy]. Lets the block overlay — a plain activity, not an
+         * accessibility service — ask the service to press the REAL Home key
+         * via [pressHome] instead of launching a Home intent of its own.
+         */
+        @Volatile private var instance: UrlBlockerService? = null
+
+        /**
+         * Presses the HOME key through the accessibility service
+         * ([AccessibilityService.GLOBAL_ACTION_HOME]) — exactly the same
+         * transition as the user tapping the navigation-bar Home button: the
+         * existing launcher task is simply brought to the front, never
+         * recreated, so the launcher does not re-render its icon grid.
+         * Returns false when no service instance is running, so callers can
+         * fall back to a Home intent.
+         */
+        fun pressHome(): Boolean =
+            instance?.performGlobalAction(GLOBAL_ACTION_HOME) ?: false
         private const val POLLING_INTERVAL_MS = 500L
         private const val GOOGLE_POLLING_INTERVAL_MS = 500L
         // Embedded browsers (in-app WebViews in non-target apps) are monitored at
@@ -64,61 +82,44 @@ class UrlBlockerService : AccessibilityService() {
         // event fires, so a one-shot delayed re-scan is scheduled this long after
         // the event to catch the rendered state.
         private const val CHROME_DELAYED_SCAN_MS = 400L
+        // Safe-tab redirect for NORMAL Chrome blocks: the CURRENT tab is
+        // navigated to this URL so reopening Chrome never shows the blocked
+        // page. Delay between the omnibox SET_TEXT and pressing the IME enter
+        // key (the soft keyboard needs a moment to appear).
+        private const val SAFE_REDIRECT_URL = "https://www.google.com"
+        private const val SAFE_REDIRECT_SCAN_DELAY_MS = 400L
         // Throttle Chrome diagnostic tree dumps so they don't spam logcat.
         private const val CHROME_DIAG_INTERVAL_MS = 2000L
-        // Feed-thumbnail image analysis is expensive (a full-display screenshot
-        // + TFLite inference per card) and takeScreenshot is system rate
-        // limited — throttle it to at most once every 5s while a feed is on
-        // screen (time-based, not per-window).
-        private const val THUMBNAIL_ANALYSIS_INTERVAL_MS = 5000L
-        // The SYSTEM rate-limits accessibility screenshots (observed
-        // SCREENSHOT_FAILED code=3 when the analysis path and the blur-fetch
-        // path captured back-to-back). A global minimum interval shared by ALL
-        // screenshot takers (analysis + blur fetch) guarantees we never exceed
-        // ~1 capture/sec regardless of how many paths want one.
-        private const val SCREENSHOT_MIN_INTERVAL_MS = 1000L
-        // When a blur fetch is rate-limited (returns empty), wait this long
-        // (past the throttle window above) and retry once so the scrim still
-        // upgrades to the real blurred thumbnail.
-        private const val BLUR_RETRY_DELAY_MS = 1600L
-        // Watch-page NSFW safety net (the user's "innocent title, explicit
-        // content" gap): when a YouTube watch/shorts page's TITLE passes the
-        // text check, a CONTINUOUS monitor captures the player region on a
-        // cadence WHILE THE SAME VIDEO IS ON SCREEN and blocks the instant ANY
-        // single frame scores >= threshold — a short explicit scene can't hide
-        // behind frame averaging. The system rate-limits accessibility
-        // screenshots (~1/s, enforced by SCREENSHOT_MIN_INTERVAL_MS), so the
-        // cadence respects that gate: 1s between the first few captures
-        // (covers the intro, where the thumbnail/first frame is explicit),
-        // then every 3s INDEFINITELY — the monitor only stops when the user
-        // leaves the video/page, the app changes, or a block fires. The 3s
-        // steady cadence is battery-friendly (each capture is a single ~50ms
-        // inference) and keeps explicit content that appears LATER in a video
-        // in scope, which is the point of continuous playback monitoring.
-        private const val WATCH_MONITOR_INTERVAL_MS = 1000L
-        private const val WATCH_MONITOR_STEADY_INTERVAL_MS = 3000L
-        private const val WATCH_MONITOR_PRIME_CAPTURES = 8
-        // The mobile YouTube watch page puts the video player in the TOP half
-        // of the screen. Crop there so the title/comments below never influence
-        // the NSFW score (and the Chrome URL bar above is neutral). When the
-        // page exposes the <video> element's bounds, watchPlayerRegion narrows
-        // the crop to exactly that rect instead.
-        private const val WATCH_PLAYER_FRACTION = 0.5f
-        // Depth cap for the tree scan that looks for the <video> element's
-        // bounds (Chrome nests WebView content deeply).
-        private const val WATCH_PLAYER_SCAN_MAX_DEPTH = 40
-        // Chrome WebViews storm TYPE_WINDOW_CONTENT_CHANGED (image loads, scroll
-        // ticks, video position updates); a full-tree scan per event janks the
-        // main thread (observed "Skipped 41 frames"). Cap event-driven scans to
-        // one per 250ms — the 500ms poll loop covers the rest.
+        // Event-driven full-tree scans are expensive (a full accessibility-tree
+        // walk + keyword matching on the main thread). Chrome WebViews storm
+        // TYPE_WINDOW_CONTENT_CHANGED and typing storms TYPE_VIEW_TEXT_CHANGED;
+        // a scan per event janks the main thread (observed "Skipped 41 frames").
+        // Cap ALL event-driven scans to one per 250ms — the 500ms poll loop and
+        // the immediate window-event path cover the rest.
         private const val EVENT_SCAN_MIN_INTERVAL_MS = 250L
-        private const val OUR_PACKAGE = "com.muddassir.clearview"
         private const val GOOGLE_PACKAGE = "com.google.android.googlequicksearchbox"
     }
 
     private lateinit var repository: BlockRepository
     private lateinit var keywordMatcher: KeywordMatcher
     private val contentExtractor = ContentExtractor()
+
+    /**
+     * STAGE 1 FEASIBILITY TEST coordinator (YouTube Shorts in Chrome), gated
+     * by the "YouTube Chrome Test" toggle. Fully independent of the blocking
+     * pipeline below — it never touches blockingState, the dedup cache, or
+     * the overlay. See [YouTubeChromeTestCoordinator].
+     */
+    private var youtubeChromeTest: YouTubeChromeTestCoordinator? = null
+
+    /**
+     * Long-video (watch-page) blocker — fully isolated from the Shorts
+     * coordinator above. Owns Chrome YouTube /watch pages while the
+     * experiment toggle is on: pauses blocked videos once, raises the dark
+     * full-screen overlay with "Go to YouTube Home", and never touches
+     * Shorts logic. See [LongVideoBlockCoordinator].
+     */
+    private var longVideoBlock: LongVideoBlockCoordinator? = null
 
     // Per-event/per-poll debug logging is EXPENSIVE (string formatting + logcat
     // I/O on the accessibility/main thread). Release builds keep the detection
@@ -139,47 +140,6 @@ class UrlBlockerService : AccessibilityService() {
     private var safeStateTimeoutJob: Job? = null
 
     /**
-     * On-device NSFW thumbnail analyzer — the "image later" step of the feed
-     * flow. Loaded from assets (user-dropped nsfw_detector.tflite); when the
-     * model is missing or the device is below Android 11, isAvailable() is
-     * false and only the text signals drive feed blocking.
-     */
-    private var thumbnailAnalyzer: ThumbnailSafetyAnalyzer? = null
-
-    /** Last time the feed-thumbnail screenshot analysis ran (throttle). */
-    private var lastThumbnailAnalysisAt = 0L
-
-    /**
-     * Timestamp of the last display capture across ALL screenshot paths
-     * (analysis + blur fetch). Atomic because captures are requested from
-     * Dispatchers.Default coroutines that can overlap. Enforces
-     * [SCREENSHOT_MIN_INTERVAL_MS] so the system rate limit never fires.
-     */
-    private val lastScreenshotAt = java.util.concurrent.atomic.AtomicLong(0)
-
-    /**
-     * Per-session NSFW score cache keyed by feed-card title. The model is
-     * deterministic, so re-scrolling to the same cards must NOT re-take a
-     * system-rate-limited screenshot and re-run inference. Cleared when the
-     * foreground app changes; capped so a long session can't grow unbounded.
-     */
-    private val nsfwScoreCache = java.util.concurrent.ConcurrentHashMap<String, Float>()
-
-    /**
-     * Continuous watch-page NSFW monitor state. watchMonitorVideoId is the
-     * dedup key (video id, or URL when no id is extractable — set
-     * synchronously on the main thread at start time so the 500ms poll can't
-     * start a second monitor for the same video); watchMonitorJob is the
-     * running capture loop (indefinite — it only stops when the user leaves
-     * the video/page, the app changes, or a block fires). Reset on package
-     * change / new video / block. Volatile for cross-thread visibility (the
-     * Default-thread loop's stop path).
-     */
-    @Volatile
-    private var watchMonitorVideoId: String? = null
-    private var watchMonitorJob: Job? = null
-
-    /**
      * Last known YouTube URL (for Chrome SPA navigation detection). YouTube's
      * SPA changes the URL without triggering a WINDOW_STATE_CHANGED event and
      * often without updating the window title. When the URL changes but the
@@ -197,6 +157,18 @@ class UrlBlockerService : AccessibilityService() {
      * another one. See [INCOGNITO_BLOCK_COOLDOWN_MS].
      */
     private var incognitoBlockCooldownUntil = 0L
+
+    /**
+     * True only while OUR OWN incognito-close sequence is still running (or
+     * Chrome is still settling right after it). INCOGNITO re-blocks are
+     * suppressed ONLY during this window. Once the close sequence completes and
+     * we land on Home, a fresh incognito detection is a NEW session the user
+     * opened — it must be blocked again even if the timestamp cooldown hasn't
+     * expired yet. This closes the reported bypass: fast re-opening of incognito
+     * within the old 4s cooldown slipped in and was never re-checked afterwards
+     * (once past the NTP, incognito pages expose no detection signal).
+     */
+    private var incognitoCloseInProgress = false
 
     /** Whether a one-shot delayed Chrome re-scan is already scheduled. */
     private var chromeDelayedScanScheduled = false
@@ -247,40 +219,21 @@ class UrlBlockerService : AccessibilityService() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         repository = BlockRepository(applicationContext)
         keywordMatcher = KeywordMatcher(repository)
-        thumbnailAnalyzer = ThumbnailSafetyAnalyzer(applicationContext)
+        // Separate test-only keyword list for the YouTube-in-Chrome Shorts
+        // experiment — never touches the normal blocked keywords. The
+        // coordinator matches ONLY against this list with its own simple
+        // matcher (the normal KeywordMatcher is deliberately not used).
+        val testKeywordRepository = YoutubeTestKeywordRepository(applicationContext)
+        youtubeChromeTest = YouTubeChromeTestCoordinator(this, repository, testKeywordRepository)
+        longVideoBlock = LongVideoBlockCoordinator(this, repository, keywordMatcher)
         Log.i(TAG, "UrlBlockerService created")
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        // Android 11+: declare the screenshot capability so the feed-thumbnail
-        // NSFW pipeline can capture the display (needs android:canTakeScreenshot
-        // in the config AND this runtime capability request).
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // AccessibilityServiceInfo.setCapabilities(int) is @hide in the
-            // public SDK, so Kotlin exposes `capabilities` as read-only. The
-            // standard workaround is reflection — this requests the screenshot
-            // capability so takeScreenshot() works (the system then asks the
-            // user to allow screenshots once).
-            val info = serviceInfo
-            if (info != null) {
-                try {
-                    val setter = AccessibilityServiceInfo::class.java.getMethod(
-                        "setCapabilities", Int::class.javaPrimitiveType
-                    )
-                    setter.invoke(
-                        info,
-                        info.capabilities or AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT
-                    )
-                    serviceInfo = info
-                    Log.i(TAG, "SCREENSHOT_CAPABILITY_REQUESTED")
-                } catch (t: Throwable) {
-                    Log.w(TAG, "SCREENSHOT_CAPABILITY_FAILED: ${t.message}")
-                }
-            }
-        }
         Log.i(TAG, "UrlBlockerService connected and running")
         Log.i(com.muddassir.clearview.extractor.GoogleAppUrlExtractor.TAG, "Accessibility Service connected")
     }
@@ -289,14 +242,16 @@ class UrlBlockerService : AccessibilityService() {
         Log.w(TAG, "UrlBlockerService interrupted")
         stopPolling()
         stopGooglePolling()
+        youtubeChromeTest?.stop()
+        longVideoBlock?.stop()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        stopWatchMonitor()
-        thumbnailAnalyzer?.close()
-        thumbnailAnalyzer = null
         serviceScope.cancel()
+        youtubeChromeTest?.stop()
+        longVideoBlock?.stop()
+        instance = null
         Log.i(TAG, "UrlBlockerService destroyed")
     }
 
@@ -304,6 +259,15 @@ class UrlBlockerService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         val packageName = event.packageName?.toString() ?: return
+
+        // Stage 1 experiment hook: the coordinator decides for itself whether
+        // the toggle is on and whether the package/event matters. Cheap call.
+        // The full event is passed so the coordinator can detect player clicks
+        // (VIEW_CLICKED) for immediate re-enforcement of a blocked Short.
+        youtubeChromeTest?.onAccessibilityEvent(event)
+
+        // Long-video blocker hook (isolated from Shorts). Also cheap.
+        longVideoBlock?.onAccessibilityEvent(event)
 
         // Debug: log every event for target packages so detection issues (why an
         // incognito window was / wasn't caught) can be diagnosed from logcat.
@@ -342,8 +306,11 @@ class UrlBlockerService : AccessibilityService() {
             handlePackageChange(packageName)
         }
 
-        // 2. Ignore our own app (overlay)
-        if (currentForegroundPackage == OUR_PACKAGE) {
+        // 2. Ignore our own app (overlay). The service's own package is used
+        //    (not a hardcoded constant) so the app keeps working under any
+        //    applicationId — including the ".debug"-suffixed dev build that
+        //    installs side-by-side with the Play Store release.
+        if (currentForegroundPackage == packageName) {
             return
         }
 
@@ -352,14 +319,18 @@ class UrlBlockerService : AccessibilityService() {
         //    The dedicated Google polling (500ms) serves as a safety net for cases
         //    where no new events fire (e.g., reopening Google with blocked content).
         //
-        //    Chrome WebViews storm TYPE_WINDOW_CONTENT_CHANGED; a full-tree scan
-        //    per event janks the main thread ("Skipped 41 frames"). Throttle
-        //    those — the 500ms poll loop still covers content changes.
+        //    Full-tree scans per event jank the main thread ("Skipped 41 frames").
+        //    Throttle ALL event-driven scans to one per EVENT_SCAN_MIN_INTERVAL_MS:
+        //    Chrome WebViews storm TYPE_WINDOW_CONTENT_CHANGED, and typing into
+        //    Chrome's address bar / Google's search box storms TYPE_VIEW_TEXT_CHANGED
+        //    (one event per keystroke, each previously triggering a full-tree
+        //    extraction + match on the main thread). The 500ms poll loop and the
+        //    immediate window-event path above still guarantee detection with the
+        //    same cadence as before — this only bounds CPU between polls, it never
+        //    skips a state the poll would catch.
         if (contentExtractor.isTargetPackage(packageName)) {
             val now = System.currentTimeMillis()
-            if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
-                now - lastEventScanAt >= EVENT_SCAN_MIN_INTERVAL_MS
-            ) {
+            if (now - lastEventScanAt >= EVENT_SCAN_MIN_INTERVAL_MS) {
                 lastEventScanAt = now
                 evaluateCurrentState(packageName, event)
             }
@@ -439,14 +410,14 @@ class UrlBlockerService : AccessibilityService() {
         if (currentForegroundPackage != newPackage) {
             Log.d(TAG, "Foreground package changed: $currentForegroundPackage -> $newPackage")
 
-            // The NSFW score cache is session-scoped: a new foreground session
-            // re-analyzes fresh feed cards.
-            // Stop the watch-page NSFW monitor — its captures belong to the
-            // previous app's screen.
-            stopWatchMonitor()
-            nsfwScoreCache.clear()
+            // Stage 1 experiment hook: track the foreground package so the
+            // coordinator only runs while Chrome is the active app.
+            youtubeChromeTest?.onForegroundPackageChanged(newPackage)
 
-            if (newPackage == OUR_PACKAGE) {
+            // Long-video blocker hook (isolated from Shorts).
+            longVideoBlock?.onForegroundPackageChanged(newPackage)
+
+            if (newPackage == packageName) {
                 // We reached the block overlay
                 blockingState = BlockingState.OVERLAY_ACTIVE
                 stopPolling()
@@ -455,7 +426,7 @@ class UrlBlockerService : AccessibilityService() {
                 return
             }
 
-            if (currentForegroundPackage == OUR_PACKAGE) {
+            if (currentForegroundPackage == packageName) {
                 blockingState = BlockingState.NORMAL
                 lastCheckedSnapshotId = null
                 lastBlockedResult = null
@@ -854,7 +825,7 @@ class UrlBlockerService : AccessibilityService() {
         pollingJob = serviceScope.launch {
             while (isActive) {
                 val pkg = currentForegroundPackage ?: packageName
-                if (pkg != OUR_PACKAGE && (blockingState == BlockingState.NORMAL ||
+                if (pkg != packageName && (blockingState == BlockingState.NORMAL ||
                             blockingState == BlockingState.WAITING_FOR_SAFE_STATE)) {
                     evaluateCurrentState(pkg, null)
                 }
@@ -962,15 +933,6 @@ class UrlBlockerService : AccessibilityService() {
             if (shouldEvaluate) {
                 when (blockingState) {
                     BlockingState.NORMAL -> {
-                        // ── FEED-THUMBNAIL IMAGE ANALYSIS (throttled) ──
-                        // The user's "revealing thumbnail, safe title" case needs
-                        // the on-device NSFW model, not just text. Runs off the
-                        // text path so it also catches cards whose only signal is
-                        // the image. Skipped when badges are already showing (a
-                        // screenshot would capture our own overlays) and by the
-                        // interval throttle (screenshots are rate limited).
-                        maybeAnalyzeFeedThumbnails(snapshot, packageName)
-
                         // incognito snapshots may carry no URL/query/title (e.g. the
                         // incognito new-tab page), so evaluate them too.
                         if (snapshot.url != null || snapshot.query != null ||
@@ -986,9 +948,10 @@ class UrlBlockerService : AccessibilityService() {
                                 // normal tab). Normal URL/keyword blocks are NOT
                                 // affected by this guard.
                                 if (result.matchType == MatchType.INCOGNITO &&
+                                    incognitoCloseInProgress &&
                                     System.currentTimeMillis() < incognitoBlockCooldownUntil
                                 ) {
-                                    Log.d(TAG, "INCOGNITO_BLOCK_SUPPRESSED (cooldown until $incognitoBlockCooldownUntil) — still settling after previous block")
+                                    Log.d(TAG, "INCOGNITO_BLOCK_SUPPRESSED (close sequence in progress until $incognitoBlockCooldownUntil) — still settling after previous block")
                                     // Clear the dedup cache so that once the cooldown
                                     // expires the very next poll re-evaluates and
                                     // re-blocks if the user is still in incognito
@@ -998,29 +961,41 @@ class UrlBlockerService : AccessibilityService() {
                                     return
                                 }
 
-                                // ── ALL BLOCKS ARE FULL BLOCKS ──
-                                // Every match — whether from a URL, search query,
-                                // video title, or feed card — triggers the full
-                                // block overlay (BlockOverlayActivity). Feed cards
-                                // used to get a floating badge marker, but that
-                                // behavior has been removed: every blocked keyword
-                                // triggers a full block screen.
-                                Log.w(TAG, "BLOCK DETECTED in $packageName! Matched: ${result.matchedItem} (${result.matchType}) source=${result.matchSource}")
-                                lastBlockedResult = result
-                                initiateBlockingSequence(rootNode, packageName)
-                            } else {
-                                // Clean evaluation — the TEXT signals all passed.
-                                // Watch-page NSFW safety net: the user's gap — an
-                                // innocent-titled video whose actual content is
-                                // explicit plays freely because the feed image
-                                // pipeline only runs on feed pages. On a YouTube
-                                // watch/shorts page whose title passed, start a
-                                // CONTINUOUS monitor: it captures the player
-                                // region on a cadence and blocks the instant any
-                                // single frame scores >= threshold (independent
-                                // of the title/description). Cheap no-op on
-                                // every other page.
-                                startWatchMonitor(snapshot, packageName)
+                                // ── LONG-VIDEO EXPERIMENT: DELEGATE WATCH-PAGE TITLE BLOCKS ──
+                                // While the YouTube-in-Chrome experiment is on, the
+                                // coordinator owns LONG-video blocking:
+                                //  - a TITLE match on a /watch page is delegated to
+                                //    LongVideoBlockCoordinator (pause + dark overlay +
+                                //    "Go to YouTube Home") — the legacy full-block overlay
+                                //    must not fire for the same video or the two flows
+                                //    would fight over it;
+                                //  - a FEED pre-check (matchSource FEED) is Phase 2 and
+                                //    deliberately deferred — it must not pop the legacy
+                                //    full-block overlay on the feed (e.g. right after
+                                //    "Go to YouTube Home" lands on the home feed).
+                                // Domain rules, incognito and search-query blocks are
+                                // untouched.
+                                val onYouTubeInChrome = ContentExtractor.isYouTubeDomain(snapshot.url)
+                                val delegateLongVideoBlock = longVideoBlock != null &&
+                                    repository.youTubeChromeTest &&
+                                    onYouTubeInChrome &&
+                                    ((result.matchSource == MatchSource.TITLE &&
+                                        snapshot.url?.contains("/watch") == true) ||
+                                        result.matchSource == MatchSource.FEED)
+                                if (delegateLongVideoBlock) {
+                                    Log.i(TAG, "LONG_VIDEO_LEGACY_BLOCK_SUPPRESSED url=${snapshot.url} source=${result.matchSource} keyword=${result.matchedItem} — coordinator owns long-video blocking; feed pre-checks deferred")
+                                } else {
+                                    // ── ALL BLOCKS ARE FULL BLOCKS ──
+                                    // Every match — whether from a URL, search query,
+                                    // video title, or feed card — triggers the full
+                                    // block overlay (BlockOverlayActivity). Feed cards
+                                    // used to get a floating badge marker, but that
+                                    // behavior has been removed: every blocked keyword
+                                    // triggers a full block screen.
+                                    Log.w(TAG, "BLOCK DETECTED in $packageName! Matched: ${result.matchedItem} (${result.matchType}) source=${result.matchSource}")
+                                    lastBlockedResult = result
+                                    initiateBlockingSequence(rootNode, packageName)
+                                }
                             }
                         }
                     }
@@ -1053,567 +1028,6 @@ class UrlBlockerService : AccessibilityService() {
         windows?.firstOrNull { it.isActive }?.title?.toString()
     } catch (e: Exception) {
         null
-    }
-
-    // ── Feed-Thumbnail Image Analysis (NSFW model) ──────────────────
-
-    /**
-     * Throttled entry point for the on-device NSFW thumbnail pipeline. Takes a
-     * screenshot of the display, crops each feed card's thumbnail region, runs
-     * the TFLite classifier, and — when an image signal crosses the threshold —
-     * re-evaluates with the enriched cards so the full block fires.
-     *
-     * No-ops (cheaply) when: below Android 11, no model loaded, no feed cards,
-     * or within the throttle window.
-     */
-    private fun maybeAnalyzeFeedThumbnails(snapshot: ContentSnapshot, packageName: String) {
-        if (snapshot.feedCards.isEmpty()) return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-        val analyzer = thumbnailAnalyzer ?: return
-        if (!analyzer.isAvailable()) return
-        val now = System.currentTimeMillis()
-        if (now - lastThumbnailAnalysisAt < THUMBNAIL_ANALYSIS_INTERVAL_MS) return
-        // NOTE: the 5s slot is consumed even when the global 1s screenshot
-        // gate later denies the capture (the throttle lives inside the launched
-        // coroutine). Intentional: a throttled analysis simply skips this cycle
-        // and un-cached cards wait up to 5s for re-analysis — the blur-fetch
-        // retry (1.6s) already covers text-blocked cards, so no visual gap.
-        lastThumbnailAnalysisAt = now
-        if (nsfwScoreCache.size > 500) nsfwScoreCache.clear()
-
-        // Dedup: skip cards whose NSFW score is already known for this session —
-        // only analyze ones never seen before (screenshots are system rate
-        // limited and the model is deterministic, so re-analysis is pure waste
-        // and re-blocking the same cards on every content change is the exact
-        // churn the user complained about).
-        val missing = snapshot.feedCards.filter { !nsfwScoreCache.containsKey(it.title) }
-        if (missing.isEmpty()) return
-        Log.d(TAG, "THUMBNAIL_ANALYSIS_START cards=${snapshot.feedCards.size} new=${missing.size} cached=${snapshot.feedCards.size - missing.size}")
-        serviceScope.launch(Dispatchers.Default) {
-            val bitmap = captureScreenshot() ?: return@launch
-            // Diagnostic: confirms the display capture succeeded and at what
-            // resolution before any card is cropped (a missing/black screenshot
-            // explains score=null rows in THUMBNAIL_INFERENCE).
-            Log.d(TAG, "THUMBNAIL_SCREENSHOT_CAPTURED shot=${bitmap.width}x${bitmap.height}")
-            try {
-                val enriched = snapshot.feedCards.mapNotNull { card ->
-                    val cached = nsfwScoreCache[card.title]
-                    if (cached != null) {
-                        card.copy(nsfwScore = cached)
-                    } else {
-                        // Crop the THUMBNAIL IMAGE (the tree-derived 16:9 band),
-                        // never the title row — a too-small region (text strip)
-                        // is skipped here with a THUMBNAIL_REGION_REJECTED log.
-                        val region = thumbnailRegion(card, bitmap) ?: return@mapNotNull null
-                        val cropped = try {
-                            Bitmap.createBitmap(
-                                bitmap, region.left, region.top,
-                                region.width(), region.height()
-                            )
-                        } catch (e: Exception) {
-                            null
-                        } ?: return@mapNotNull null
-                        val score = try {
-                            analyzer.analyze(cropped)
-                        } finally {
-                            try { cropped.recycle() } catch (e: Exception) {}
-                        }
-                        if (score != null) nsfwScoreCache[card.title] = score
-                        // The crop region is logged so the user can verify the
-                        // model is fed the ACTUAL thumbnail image — a text-sized
-                        // region or a full-card crop means the geometry is off.
-                        val cardB = card.bounds
-                        Log.d(TAG, "THUMBNAIL_INFERENCE title=${card.title.take(40)} score=${score?.let { String.format(java.util.Locale.ROOT, "%.2f", it) } ?: "null"} region=[${region.left},${region.top},${region.right},${region.bottom}] thumb=[${card.thumbnailBounds?.left},${card.thumbnailBounds?.top},${card.thumbnailBounds?.right},${card.thumbnailBounds?.bottom}] cardSize=${cardB?.width()}x${cardB?.height()}")
-                        card.copy(nsfwScore = score)
-                    }
-                }
-                if (enriched.isEmpty()) return@launch
-                val enrichedSnapshot = snapshot.copy(feedCards = enriched)
-                val result = keywordMatcher.check(enrichedSnapshot, packageName)
-                if (result is MatchResult.Blocked && result.matchSource == MatchSource.FEED) {
-                    val blockedCards = result.feedCards
-                    // Per-card verdict log: shows exactly which cards the model
-                    // + matcher decided to block, their raw NSFW scores, and
-                    // whether usable bounds existed — so a missed thumbnail is
-                    // diagnosable (card picked up? score cleared the bar?
-                    // bounds valid?).
-                    blockedCards.forEach { c ->
-                        // Image-driven vs text-driven, so the logs never claim an
-                        // image block for a card the TEXT check blocked (observed:
-                        // nsfwScore=0.00 with ACTION=BLUR was a TITLE block).
-                        val byImage = c.nsfwScore != null &&
-                            c.nsfwScore >= ThumbnailSafetyAnalyzer.NSFW_THRESHOLD
-                        Log.d(TAG, "THUMBNAIL_ACTION=${if (byImage) "BLUR_BY_IMAGE" else "BLOCK_BY_TEXT"} title=${c.title.take(40)} nsfwScore=${c.nsfwScore?.let { String.format(java.util.Locale.ROOT, "%.2f", it) } ?: "null"} keyword=${c.blockedKeyword} thumbBounds=${c.thumbnailBounds != null}")
-                    }
-                    // Feed badge overlay removed — every block is a FULL block
-                    // now, including image-driven feed blocks (a "revealing
-                    // thumbnail, safe title" card must not slip through silently).
-                    Log.w(TAG, "FEED IMAGE BLOCK DETECTED in $packageName! Matched: ${result.matchedItem} video='${blockedCards.firstOrNull()?.title ?: "?"}' cards=${blockedCards.size}")
-                    withContext(Dispatchers.Main) {
-                        // Re-validate: the analysis ran off-thread; the user may
-                        // have navigated away / a block may already be active.
-                        if (blockingState != BlockingState.NORMAL ||
-                            currentForegroundPackage != packageName
-                        ) {
-                            return@withContext
-                        }
-                        // Also require the same URL still on screen (SPA
-                        // navigation within YouTube can change the page while
-                        // the package stays Chrome and state stays NORMAL).
-                        val root = try { rootInActiveWindow } catch (e: Exception) { null }
-                        try {
-                            if (root == null) return@withContext
-                            val fresh = contentExtractor.extract(
-                                packageName, root, null, activeWindowTitle()
-                            )
-                            val sameUrl = (snapshot.url == null) ||
-                                (fresh.url != null && fresh.url == snapshot.url)
-                            if (!sameUrl) {
-                                Log.d(TAG, "THUMBNAIL_BLOCK_SKIPPED url changed (SPA navigation)")
-                                return@withContext
-                            }
-                            lastBlockedResult = result
-                            initiateBlockingSequence(root, packageName)
-                        } finally {
-                            try { root?.recycle() } catch (e: Exception) {}
-                        }
-                    }
-                } else {
-                    Log.d(TAG, "THUMBNAIL_ANALYSIS_DONE no image block (cards=${enriched.size})")
-                }
-            } finally {
-                try { bitmap.recycle() } catch (e: Exception) {}
-            }
-        }
-    }
-
-    /**
-     * Continuous watch-page NSFW safety net — the user's "innocent title,
-     * explicit content" gap. When a YouTube watch/shorts page in Chrome has a
-     * title that passed the text check, this starts a monitor that captures
-     * the PLAYER REGION on a cadence, runs the on-device NSFW model on every
-     * frame, and blocks (the standard full block: close tabs + overlay + Home)
-     * the instant ANY single frame crosses the threshold — a short explicit
-     * scene cannot hide behind frame averaging. The image verdict is
-     * completely independent of the title/description (which already passed).
-     *
-     * Safety-first design:
-     *  - Cheap no-op unless the URL is a YouTube watch/shorts page in Chrome
-     *    (feed pages, ordinary websites, and the YouTube app — whose URL is
-     *    never exposed — all skip instantly).
-     *  - Dedup by video id: the 500ms poll can't start a second monitor for
-     *    the same video; the key is cleared on package change / new video /
-     *    block.
-     *  - Every capture is RE-VALIDATED before the next one: still NORMAL state
-     *    (a user-initiated block may have started), still the same foreground
-     *    package, and still the SAME video on screen — so a stale monitor can
-     *    never block the wrong page.
-     *  - Reuses captureScreenshot(), which enforces the global 1/s system
-     *    rate-limit gate, HARDWARE->software conversion, and off-main copy.
-     */
-    private fun startWatchMonitor(snapshot: ContentSnapshot, packageName: String) {
-        val url = snapshot.url ?: return
-        if (packageName !in ContentExtractor.CHROME_PACKAGES) return
-        if (!ContentExtractor.isYouTubeDomain(url)) return
-        val isWatch = url.contains("/watch") || url.contains("/shorts/")
-        if (!isWatch) return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-        val analyzer = thumbnailAnalyzer ?: return
-        if (!analyzer.isAvailable()) return
-        val videoId = watchVideoId(url)
-        // Dedup on the same key used for storage: when the video id can't be
-        // extracted (m.youtube.com during transitions often exposes no [?&]v=),
-        // fall back to the URL — otherwise the read-side check would never fire
-        // and every 500ms poll would start a fresh monitor.
-        val dedupKey = videoId ?: url
-        if (dedupKey == watchMonitorVideoId && watchMonitorJob?.isActive == true) {
-            // Already monitoring this exact video — the 500ms poll re-invokes
-            // this every cycle; nothing to do.
-            return
-        }
-        // New video — cancel the previous monitor now (its re-validation would
-        // stop it anyway; cancel avoids an overlapping capture window).
-        stopWatchMonitor()
-        watchMonitorVideoId = dedupKey
-        Log.i(TAG, "WATCH_MONITOR_START url=$url videoId=${videoId ?: "?"}")
-        watchMonitorJob = serviceScope.launch(Dispatchers.Default) {
-            var captures = 0
-            // Indefinite: the loop only exits via the re-validation (the user
-            // left the video/page, or a block/overlay started) or cancellation
-            // (package change, onDestroy, block fired). The 3s steady cadence
-            // keeps battery impact bounded.
-            while (isActive) {
-                val prime = captures < WATCH_MONITOR_PRIME_CAPTURES
-                delay(if (prime) WATCH_MONITOR_INTERVAL_MS else WATCH_MONITOR_STEADY_INTERVAL_MS)
-                captures++
-                // ── Re-validate before this capture (main thread) ──
-                // -1 = stale (a block/overlay started during the delay) —
-                // abandon silently. 0 = the user left this video/page — stop
-                // with a log line. 1 = continue.
-                val decision: Int = withContext(Dispatchers.Main) {
-                    when {
-                        blockingState != BlockingState.NORMAL ||
-                            currentForegroundPackage != packageName -> -1
-                        !verifyStillOnWatchVideo(packageName, videoId, url) -> 0
-                        else -> 1
-                    }
-                }
-                if (decision <= 0) {
-                    if (decision == 0) {
-                        Log.d(TAG, "WATCH_MONITOR_STOP videoChangedOrLeft videoId=$videoId captures=$captures")
-                    }
-                    return@launch
-                }
-                // ── Capture + analyze (Default thread) ──
-                var shot = captureScreenshot()
-                if (shot == null) {
-                    // Throttled by the global 1s gate (or the system) — skip
-                    // this cycle and try again on the next cadence tick.
-                    Log.d(TAG, "WATCH_MONITOR_CAPTURE_SKIPPED (throttled) videoId=$videoId captures=$captures")
-                    continue
-                }
-                try {
-                    // Player bounds come from a fresh main-thread root (the
-                    // fixed-fraction fallback runs when the tree exposes none).
-                    val root = withContext(Dispatchers.Main) {
-                        try { rootInActiveWindow } catch (e: Exception) { null }
-                    }
-                    val region = try {
-                        watchPlayerRegion(shot, root)
-                    } finally {
-                        try { root?.recycle() } catch (e: Exception) {}
-                    }
-                    val cropped = try {
-                        Bitmap.createBitmap(
-                            shot, region.left, region.top,
-                            region.width(), region.height()
-                        )
-                    } catch (e: Exception) {
-                        null
-                    } ?: continue
-                    val score = try {
-                        analyzer.analyze(cropped)
-                    } finally {
-                        try { cropped.recycle() } catch (e: Exception) {}
-                    }
-                    Log.d(
-                        TAG,
-                        "WATCH_NSFW_INFERENCE url=$url score=${score?.let { String.format(Locale.ROOT, "%.2f", it) } ?: "null"} " +
-                            "region=[${region.left},${region.top},${region.right},${region.bottom}] shot=${shot.width}x${shot.height} capture=$captures"
-                    )
-                    if (score != null && score >= ThumbnailSafetyAnalyzer.NSFW_THRESHOLD) {
-                        withContext(Dispatchers.Main) {
-                            // Re-validate once more right before blocking: the
-                            // capture + inference took ~200ms during which the
-                            // user may have navigated away.
-                            if (blockingState != BlockingState.NORMAL ||
-                                currentForegroundPackage != packageName ||
-                                !verifyStillOnWatchVideo(packageName, videoId, url)
-                            ) {
-                                Log.d(TAG, "WATCH_NSFW_SKIPPED stale (state/video changed during inference)")
-                                return@withContext
-                            }
-                            Log.w(TAG, "WATCH_PAGE_NSFW_BLOCK score=${String.format(Locale.ROOT, "%.2f", score)} url=$url videoId=${videoId ?: "?"} capture=$captures")
-                            lastBlockedResult = MatchResult.Blocked(
-                                "Explicit content detected",
-                                MatchType.BUILT_IN_KEYWORD,
-                                MatchSource.TITLE
-                            )
-                            stopWatchMonitor()
-                            // grab + recycle a fresh root (the snapshot's root
-                            // was already recycled by evaluateCurrentState's
-                            // finally)
-                            val root = try { rootInActiveWindow } catch (e: Exception) { null }
-                            try {
-                                if (root != null) initiateBlockingSequence(root, packageName)
-                            } finally {
-                                try { root?.recycle() } catch (e: Exception) {}
-                            }
-                        }
-                        return@launch
-                    }
-                    Log.d(TAG, "WATCH_MONITOR_FRAME_ALLOW url=$url score=${score?.let { String.format(Locale.ROOT, "%.2f", it) } ?: "null"} capture=$captures")
-                } finally {
-                    try { shot.recycle() } catch (e: Exception) {}
-                }
-            }
-            // Loop exited without a block (user left / state changed) — the
-            // next poll with a different video (or after the state resets)
-            // restarts monitoring fresh.
-            Log.d(TAG, "WATCH_MONITOR_END videoId=$videoId captures=$captures")
-        }
-    }
-
-    /** Cancels the running watch monitor and resets its state (any thread). */
-    private fun stopWatchMonitor() {
-        watchMonitorJob?.cancel()
-        watchMonitorJob = null
-        watchMonitorVideoId = null
-    }
-
-    /** Extract the YouTube video id from a watch/shorts URL, or null. */
-    private fun watchVideoId(url: String): String? {
-        val v = Regex("[?&]v=([A-Za-z0-9_-]{6,})").find(url)
-        if (v != null) return v.groupValues[1]
-        val shorts = Regex("/shorts/([A-Za-z0-9_-]{6,})").find(url)
-        if (shorts != null) return shorts.groupValues[1]
-        return null
-    }
-
-    /**
-     * Confirm the CURRENT screen is still the same watch video before the
-     * monitor's next capture (and before the delayed block fires). Re-extracts
-     * from a fresh root — the cheapest reliable check that the user hasn't
-     * navigated away since the last cycle.
-     *
-     * Accepts the video when EITHER the fresh URL resolves to the same video
-     * (video-id or exact match) OR the URL is not exposed (m.youtube.com often
-     * drops it) but the window title still reads as a YouTube video page — so
-     * a missing URL can never silently skip the check (the exact silent no-op
-     * this feature exists to prevent).
-     */
-    private fun verifyStillOnWatchVideo(
-        packageName: String,
-        videoId: String?,
-        originalUrl: String
-    ): Boolean {
-        val root = try { rootInActiveWindow } catch (e: Exception) { null } ?: return false
-        return try {
-            val fresh = contentExtractor.extract(packageName, root, null, activeWindowTitle())
-            val freshUrl = fresh.url
-            if (freshUrl != null) {
-                if (videoId != null) {
-                    // Prefer the video id (robust to URL formatting differences).
-                    videoId == watchVideoId(freshUrl)
-                } else {
-                    // No id extractable — fall back to exact URL match.
-                    freshUrl == originalUrl
-                }
-            } else {
-                // URL not exposed on this device/page — still accept when the
-                // window title indicates we're on a YouTube video page (the
-                // title parser only returns non-null for a "<title> - YouTube"
-                // window title and rejects YouTube UI screens like Home/Shorts).
-                ContentExtractor.youtubeTitleFromChromeWindowTitle(fresh.title) != null
-            }
-        } finally {
-            try { root.recycle() } catch (e: Exception) {}
-        }
-    }
-
-    /**
-     * Player-area crop for the watch page. Two strategies:
-     *  1. Tree-based: when the page exposes the <video> element's bounds (a
-     *     large node high on the page with a ~16:9 aspect), crop exactly that
-     *     rect — the player's position varies with Chrome's URL bar and the
-     *     mobile header, so a fixed fraction can drift off it.
-     *  2. Fallback: the top [WATCH_PLAYER_FRACTION] of the display, full
-     *     width — the mobile watch page renders the player there.
-     * The chosen region is logged (WATCH_NSFW_INFERENCE) so the user can see
-     * which strategy ran and verify the crop covers the actual player.
-     */
-    private fun watchPlayerRegion(screenshot: Bitmap, root: AccessibilityNodeInfo?): android.graphics.Rect {
-        val fromTree = root?.let { findVideoPlayerBounds(it, screenshot.width, screenshot.height) }
-        if (fromTree != null) {
-            return fromTree
-        }
-        val bottom = (screenshot.height * WATCH_PLAYER_FRACTION).toInt()
-            .coerceIn(1, screenshot.height)
-        return android.graphics.Rect(0, 0, screenshot.width, bottom)
-    }
-
-    /**
-     * Best-effort detection of the <video> element's on-screen bounds from the
-     * page tree. Strict plausibility gate so a suggestion rail or comment card
-     * can never be mistaken for the player: the node must be visible, span at
-     * least 60% of the screen width and 20% of the height, sit in the top half
-     * of the screen, and have an aspect ratio in the 16:9-ish range (1.3..2.4).
-     * Returns the largest plausible rect, or null (the caller then falls back
-     * to the fixed-fraction crop). Every node access is guarded — this runs
-     * inside the monitor loop on possibly-recycled nodes.
-     */
-    private fun findVideoPlayerBounds(root: AccessibilityNodeInfo, screenW: Int, screenH: Int): android.graphics.Rect? {
-        var best: android.graphics.Rect? = null
-        var bestArea = 0
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(root)
-        var depth = 0
-        while (queue.isNotEmpty() && depth < WATCH_PLAYER_SCAN_MAX_DEPTH) {
-            val node = queue.removeFirst()
-            val rect = android.graphics.Rect()
-            val hasBounds = try {
-                node.getBoundsInScreen(rect)
-                !rect.isEmpty
-            } catch (e: Exception) {
-                false
-            }
-            val visible = try { node.isVisibleToUser } catch (e: Exception) { false }
-            if (hasBounds && visible) {
-                val w = rect.width()
-                val h = rect.height()
-                val aspect = if (h > 0) w.toFloat() / h else 0f
-                if (w >= screenW * 0.6f && h >= screenH * 0.2f &&
-                    rect.top <= screenH * 0.5f && aspect in 1.3f..2.4f
-                ) {
-                    val area = w * h
-                    if (area > bestArea) {
-                        bestArea = area
-                        best = android.graphics.Rect(rect)
-                    }
-                }
-            }
-            val childCount = try { node.childCount } catch (e: Exception) { 0 }
-            for (i in 0 until childCount) {
-                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
-                queue.add(child)
-            }
-            depth++
-        }
-        return best
-    }
-
-    /**
-     * Cheap heavy blur: downscale to ~1/8 then bilinear-upscale back to the
-     * original size. Fast enough to run per blocked card; visually reads as a
-     * properly blurred thumbnail. The returned bitmap is owned by the caller.
-     */
-    private fun blurBitmap(src: Bitmap, width: Int, height: Int): Bitmap {
-        val smallW = maxOf(1, width / 8)
-        val smallH = maxOf(1, height / 8)
-        val small = Bitmap.createScaledBitmap(src, smallW, smallH, true)
-        val blurred = Bitmap.createScaledBitmap(small, width, height, true)
-        try { small.recycle() } catch (e: Exception) {}
-        return blurred
-    }
-
-    /**
-     * Crop + blur the thumbnail of each [cards] entry from [bitmap] (shared by
-     * the image path, which already holds the screenshot, and the text path,
-     * which takes a fresh one via [blurredThumbnailsFor]). Cards without usable
-     * bounds are skipped. The caller owns the returned bitmaps.
-     */
-    /**
-     * Crop region for the THUMBNAIL IMAGE of a YouTube feed card. Prefers the
-     * tree-derived [FeedVideoCard.thumbnailBounds] (the 16:9 image above the
-     * title row); falls back to a geometric 16:9 band from the card's own
-     * bounds when the extractor couldn't compute one. Returns null — skipping
-     * the card — when the region fails the size sanity gate: anything smaller
-     * is a title/text strip or a channel avatar, and feeding it to the NSFW
-     * model would score text, not the image (observed on-device: an 800x79
-     * title row was "analyzed" as a thumbnail).
-     */
-    private fun thumbnailRegion(card: FeedVideoCard, screenshot: Bitmap): android.graphics.Rect? {
-        // NO fallback to card.bounds here: the extractor computes
-        // thumbnailBounds from the very same bounds, and it is null EXACTLY
-        // when there is no valid image region (title row too near the screen
-        // top to have a thumbnail above it, or the band failed the size
-        // gate). Falling back to card.bounds would feed the TITLE TEXT row to
-        // the model again — the exact bug this crop rework exists to fix.
-        val raw = card.thumbnailBounds ?: run {
-            Log.d(TAG, "THUMBNAIL_REGION_MISSING title=${card.title.take(40)} (no valid thumbnail region — skipping image analysis)")
-            return null
-        }
-        val left = raw.left.coerceIn(0, (screenshot.width - 1).coerceAtLeast(0))
-        val top = raw.top.coerceIn(0, (screenshot.height - 1).coerceAtLeast(0))
-        val right = raw.right.coerceIn(left + 1, screenshot.width.coerceAtLeast(1))
-        val bottom = raw.bottom.coerceIn(top + 1, screenshot.height.coerceAtLeast(1))
-        if (right - left < ContentExtractor.MIN_THUMBNAIL_WIDTH ||
-            bottom - top < ContentExtractor.MIN_THUMBNAIL_HEIGHT
-        ) {
-            Log.d(TAG, "THUMBNAIL_REGION_REJECTED title=${card.title.take(40)} region=[$left,$top,$right,$bottom] size=${right - left}x${bottom - top} (too small to be a thumbnail — text strip or avatar, skipping image analysis)")
-            return null
-        }
-        return android.graphics.Rect(left, top, right, bottom)
-    }
-
-    /**
-     * Capture the current display via the accessibility screenshot API
-     * (Android 11+). Returns null on failure (rate limit, secure window, ...)
-     * so the image pipeline degrades silently to text-only blocking.
-     */
-    private suspend fun captureScreenshot(): Bitmap? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        // Global screenshot throttle shared by the analysis path and the blur
-        // path: the system rate-limits accessibility screenshots (code=3), so
-        // both must cooperate on one minimum interval. CAS both reads and
-        // claims the slot atomically — two overlapping coroutines can't both
-        // pass the gate.
-        val now = System.currentTimeMillis()
-        val prev = lastScreenshotAt.get()
-        // Clamp a negative elapsed (device clock jumped backward) to 0 so a
-        // clock change can't throttle screenshots for the duration of the jump.
-        val elapsed = if (now >= prev) now - prev else 0L
-        if (elapsed < SCREENSHOT_MIN_INTERVAL_MS ||
-            !lastScreenshotAt.compareAndSet(prev, now)
-        ) {
-            Log.d(TAG, "SCREENSHOT_THROTTLED (min interval ${SCREENSHOT_MIN_INTERVAL_MS}ms)")
-            return null
-        }
-        // The HardwareBuffer is kept alive across the suspension (the wrapped
-        // bitmap may reference it) and closed only after the software copy
-        // below finishes — never inside the mainExecutor callback.
-        var bufferToClose: android.hardware.HardwareBuffer? = null
-        val wrapped = suspendCancellableCoroutine<Bitmap?> { cont ->
-            try {
-                takeScreenshot(
-                    Display.DEFAULT_DISPLAY,
-                    mainExecutor,
-                    object : AccessibilityService.TakeScreenshotCallback {
-                        override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
-                            val bitmap = try {
-                                Bitmap.wrapHardwareBuffer(
-                                    screenshot.hardwareBuffer,
-                                    screenshot.colorSpace
-                                )
-                            } catch (e: Exception) {
-                                Log.e(TAG, "SCREENSHOT_WRAP_FAILED: ${e.message}")
-                                null
-                            }
-                            // Keep the buffer (and its pixels) alive until the
-                            // caller copies them out; closed right after.
-                            bufferToClose = screenshot.hardwareBuffer
-                            if (cont.isActive) cont.resume(bitmap, onCancellation = null)
-                        }
-
-                        override fun onFailure(errorCode: Int) {
-                            Log.w(TAG, "SCREENSHOT_FAILED code=$errorCode (rate limit or secure window)")
-                            if (cont.isActive) cont.resume(null, onCancellation = null)
-                        }
-                    }
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "SCREENSHOT_ERROR: ${e.message}")
-                if (cont.isActive) cont.resume(null, onCancellation = null)
-            }
-        }
-        val buffer = bufferToClose
-        try {
-            if (wrapped == null) return null
-            // HARDWARE-config pixels can't be CPU-read (createBitmap/getPixels
-            // throw "Config#HARDWARE is not supported" — the INFERENCE_FAILED the
-            // image pipeline hit). Convert to software ARGB_8888 — but NOT on the
-            // mainExecutor callback thread: cont.resume() runs inside onSuccess,
-            // so without this withContext the copy would execute on the main
-            // thread right after the suspension point and jank the UI ("Skipped
-            // 41 frames"). The HardwareBuffer stays open (closed in the finally)
-            // until the copy on the Default thread has finished.
-            return withContext(Dispatchers.Default) {
-                if (wrapped.config == Bitmap.Config.HARDWARE) {
-                    try {
-                        wrapped.copy(Bitmap.Config.ARGB_8888, false)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "SCREENSHOT_CONVERT_FAILED: ${e.message}")
-                        null
-                    } finally {
-                        try { wrapped.recycle() } catch (e: Exception) {}
-                    }
-                } else {
-                    wrapped
-                }
-            }
-        } finally {
-            try { buffer?.close() } catch (e: Exception) {}
-        }
     }
 
     /** Human-readable name for an [AccessibilityEvent] type (for logcat). */
@@ -1812,6 +1226,10 @@ class UrlBlockerService : AccessibilityService() {
             // settles) would re-initiate the block in a loop.
             incognitoBlockCooldownUntil = System.currentTimeMillis() + INCOGNITO_BLOCK_COOLDOWN_MS
             Log.i(TAG, "INCOGNITO_BLOCK_ARMED cooldownUntil=$incognitoBlockCooldownUntil")
+            // Mark our close sequence as in progress: re-blocks are suppressed
+            // only while this flag is set (see the suppression check in
+            // evaluateCurrentState). Cleared when the sequence completes.
+            incognitoCloseInProgress = true
 
             // Incognito must be killed, not just navigated away from: the
             // adaptive Back sequence closes ALL incognito tabs, then the overlay
@@ -1830,16 +1248,13 @@ class UrlBlockerService : AccessibilityService() {
             blockingState = BlockingState.WAITING_FOR_SAFE_STATE
             armSafeStateTimeout(packageName)
         } else if (contentExtractor.isChromePackage(packageName)) {
-            // Normal (non-incognito) Chrome block: close ALL of Chrome's tabs so
-            // reopening Chrome doesn't restore the blocked tab (the user's
-            // report: after the block, reopening Chrome brought back the same
-            // tab). NOTE: no clearTargetApp() here — its BACK press can exit
-            // Chrome entirely on a single-tab session (no history to walk
-            // back), and Chrome then restores the tab on the next launch.
-            // Closing the tabs first leaves Chrome on its empty "No tabs"
-            // state, and the block overlay inside closeAllChromeTabsAndBlock()
-            // lands Home.
-            closeAllChromeTabsAndBlock(packageName)
+            // Normal (non-incognito) Chrome block: redirect the CURRENT tab to
+            // a safe page (Google) instead of closing tabs — closing Chrome's
+            // tabs is unreliable on many devices (the tab is restored on the
+            // next launch anyway). Redirecting the tab itself leaves Chrome
+            // with a clean, safe tab: when the overlay is dismissed and Chrome
+            // is reopened, the tab is still there but its content is Google.
+            redirectChromeTabAndBlock(packageName)
         } else {
             clearTargetApp(rootNode, packageName)
             blockingState = BlockingState.WAITING_FOR_SAFE_STATE
@@ -2066,7 +1481,10 @@ class UrlBlockerService : AccessibilityService() {
             } else {
                 Log.i(TAG, "INCOGNITO_CLOSE: close-all button not reachable — using adaptive Back sequence")
                 for (i in 1..INCOGNITO_CLOSE_MAX_BACK_PRESSES) {
-                    if (!isActive) return@launch
+                    if (!isActive) {
+                        incognitoCloseInProgress = false
+                        return@launch
+                    }
                     // Chrome left the foreground (the last Back closed the final
                     // tab and exited Chrome): the incognito session is gone.
                     if (currentForegroundPackage != packageName) {
@@ -2082,7 +1500,10 @@ class UrlBlockerService : AccessibilityService() {
                     delay(INCOGNITO_CLOSE_SCAN_DELAY_MS)
                 }
             }
-            if (!isActive) return@launch
+            if (!isActive) {
+                incognitoCloseInProgress = false
+                return@launch
+            }
 
             // Re-arm the cooldown AFTER the closing sequence, not only at block
             // INITIATION: a settle scan right after the presses can still see
@@ -2102,9 +1523,15 @@ class UrlBlockerService : AccessibilityService() {
             // Simple, clean: incognito tab closed → land on HOME. The service
             // stays alive (accessibility remains enabled), so opening Chrome
             // again re-enables monitoring. lastBlockedResult is cleared too:
-            // the old overlay round-trip used to clear it via OUR_PACKAGE
-            // handlePackageChange, which no longer runs for incognito — leaving
+            // the old overlay round-trip used to clear it via the service's own
+            // package (packageName) handlePackageChange, which no longer runs
+            // for incognito — leaving
             // a stale INCOGNITO result behind.
+            // The close sequence is done: the incognito session is gone and the
+            // user is being sent Home. Clear the flag so the NEXT incognito
+            // detection (a fresh session the user opens) blocks immediately —
+            // the timestamp cooldown alone must never let a fast re-open in.
+            incognitoCloseInProgress = false
             blockingState = BlockingState.NORMAL
             lastCheckedSnapshotId = null
             lastBlockedResult = null
@@ -2269,8 +1696,12 @@ class UrlBlockerService : AccessibilityService() {
     }
 
     /**
-     * Normal-Chrome block path: close ALL of Chrome's tabs, then land Home via
-     * the block overlay. This fixes the user's report that after a block,
+     * SUPERSEDED by [redirectChromeTabAndBlock] — kept only as reference; no
+     * longer called from the block sequence (closing all tabs is unreliable
+     * and the blocked tab is restored on the next launch anyway).
+     *
+     * Old behavior: close ALL of Chrome's tabs, then land Home via
+     * the block overlay. This fixed the user's report that after a block,
      * reopening Chrome restored the same blocked tab — with every tab closed,
      * Chrome starts fresh next time.
      *
@@ -2728,6 +2159,212 @@ class UrlBlockerService : AccessibilityService() {
         }
     }
 
+    /**
+     * Normal-Chrome block path: redirect the CURRENT tab to the safe Google
+     * home page, then land Home via the block overlay. Closing all of
+     * Chrome's tabs proved unreliable (Chrome often restores the blocked tab
+     * on the next launch), so instead the tab itself is navigated to a safe
+     * URL: when the user dismisses the overlay and reopens Chrome, the tab is
+     * still there (tabs can't always be closed) but its content is Google.
+     *
+     * Runs off the main thread so the UI actions can be spaced out. If the
+     * same-tab redirect can't be driven (omnibox or IME not reachable), a
+     * safe intent opens Google in Chrome as a fallback so the blocked page is
+     * never the visible tab.
+     */
+    private fun redirectChromeTabAndBlock(packageName: String) {
+        blockingState = BlockingState.CLEARING_TARGET
+        safeStateTimeoutJob?.cancel()
+        serviceScope.launch {
+            val redirected = redirectChromeTabToSafeUrl(packageName)
+            Log.i(TAG, "SAFE_REDIRECT: redirected=$redirected")
+            if (!isActive) return@launch
+            if (!redirected) {
+                Log.w(TAG, "SAFE_REDIRECT: omnibox redirect unavailable — safe-intent fallback")
+                navigateToSafeIntent(packageName)
+                delay(SAFE_REDIRECT_SCAN_DELAY_MS)
+            }
+            transitionToHome(packageName)
+        }
+    }
+
+    /**
+     * Redirect the CURRENT Chrome tab to [SAFE_REDIRECT_URL] by typing it
+     * into the omnibox and submitting with the soft keyboard's enter key.
+     * Chrome's omnibox (address bar) is always present in the tree, so this
+     * is the reliable same-tab redirect. Returns true when the navigation was
+     * initiated.
+     */
+    private suspend fun redirectChromeTabToSafeUrl(packageName: String): Boolean {
+        val rootNode = try { rootInActiveWindow } catch (e: Exception) { null } ?: return false
+        val urlBar = try { findChromeOmnibox(rootNode) } finally {
+            try { rootNode.recycle() } catch (e: Exception) {}
+        }
+        if (urlBar == null) {
+            Log.w(TAG, "SAFE_REDIRECT: omnibox not found in tree")
+            return false
+        }
+        val typed = try {
+            urlBar.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            val args = Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    SAFE_REDIRECT_URL
+                )
+            }
+            urlBar.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        } catch (e: Exception) {
+            Log.e(TAG, "SAFE_REDIRECT: SET_TEXT failed: ${e.message}")
+            false
+        } finally {
+            try { urlBar.recycle() } catch (e: Exception) {}
+        }
+        if (!typed) return false
+        Log.i(TAG, "SAFE_REDIRECT: omnibox SET_TEXT -> $SAFE_REDIRECT_URL")
+        // Give the IME + omnibox suggestions a moment to appear, then submit
+        // the navigation IN THE SAME TAB:
+        //   1. press the soft keyboard's enter key, else
+        //   2. click Chrome's first omnibox suggestion (the typed URL is always
+        //      the top suggestion, and clicking it navigates the current tab).
+        delay(SAFE_REDIRECT_SCAN_DELAY_MS)
+        var submitted = pressImeEnterKey()
+        if (!submitted) {
+            Log.i(TAG, "SAFE_REDIRECT: IME enter not found — clicking first omnibox suggestion")
+            submitted = clickOmniboxSuggestion()
+        }
+        Log.i(TAG, "SAFE_REDIRECT: submitted=$submitted")
+        return submitted
+    }
+
+    /**
+     * Find Chrome's address bar (omnibox): an editable node whose class or
+     * view id marks it as the URL/location bar.
+     */
+    private fun findChromeOmnibox(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+        var depth = 0
+        var visited = 0
+        while (queue.isNotEmpty() && depth < 60 && visited < 2000) {
+            visited++
+            val node = queue.removeFirst()
+            val isRoot = node === rootNode
+            val cls: String = try { node.className?.toString() ?: "" } catch (e: Exception) { "" }
+            val viewId: String = try { node.viewIdResourceName?.toString() ?: "" } catch (e: Exception) { "" }
+            val editable = try { node.isEditable } catch (e: Exception) { false }
+            // The omnibox is any EditText (always editable) OR an editable node
+            // whose view id marks it as the URL/location bar.
+            val isOmnibox = cls.contains("EditText") || cls.contains("AutoCompleteTextView") ||
+                (editable && (viewId.contains("url_bar") || viewId.contains("omnibox") ||
+                    viewId.contains("url-bar") || viewId.contains("location_bar")))
+            if (isOmnibox) return node
+            val count = try { node.childCount } catch (e: Exception) { 0 }
+            for (i in 0 until count) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            if (!isRoot) try { node.recycle() } catch (e: Exception) {}
+            depth++
+        }
+        return null
+    }
+
+    /**
+     * Press the soft keyboard's enter/search key via the IME window's
+     * accessibility tree (Gboard exposes its key nodes). Returns true when a
+     * key was clicked.
+     */
+    private fun pressImeEnterKey(): Boolean {
+        val windows = try { windows } catch (e: Exception) { return false }
+        if (windows == null) return false
+        for (w in windows) {
+            if (w.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            val root = try { w.root } catch (e: Exception) { null } ?: continue
+            try {
+                if (clickImeEnterKey(root)) return true
+            } finally {
+                try { root.recycle() } catch (e: Exception) {}
+            }
+        }
+        return false
+    }
+
+    private fun clickImeEnterKey(root: AccessibilityNodeInfo): Boolean {
+        val enterLabels = setOf("go", "enter", "search", "done", "arrow", "next", "return", "→", "↵", "✓")
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var depth = 0
+        var visited = 0
+        while (queue.isNotEmpty() && depth < 30 && visited < 1000) {
+            visited++
+            val node = queue.removeFirst()
+            val isRoot = node === root
+            val text = try { node.text?.toString()?.trim() } catch (e: Exception) { null }
+            val desc = try { node.contentDescription?.toString()?.trim() } catch (e: Exception) { null }
+            val label = (text ?: "").lowercase(Locale.ROOT)
+            val descLabel = (desc ?: "").lowercase(Locale.ROOT)
+            // Match the enter/search key by its label; click the key itself or
+            // walk up to its clickable ancestor (some keyboards expose the
+            // label on a leaf node).
+            if (label in enterLabels || descLabel in enterLabels) {
+                val ok = clickNodeOrClickableAncestor(node)
+                Log.i(TAG, "SAFE_REDIRECT: IME enter key click=$ok text=$text desc=$desc")
+                if (!isRoot) try { node.recycle() } catch (e: Exception) {}
+                return ok
+            }
+            val count = try { node.childCount } catch (e: Exception) { 0 }
+            for (i in 0 until count) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                queue.add(child)
+            }
+            if (!isRoot) try { node.recycle() } catch (e: Exception) {}
+            depth++
+        }
+        return false
+    }
+
+    /**
+     * Click Chrome's omnibox suggestion for the typed safe URL — the top
+     * suggestion is always the URL itself ("Go to https://www.google.com"),
+     * and clicking it navigates the CURRENT tab (same-tab redirect). Returns
+     * true when a suggestion row was clicked.
+     */
+    private fun clickOmniboxSuggestion(): Boolean {
+        val rootNode = try { rootInActiveWindow } catch (e: Exception) { null } ?: return false
+        return try {
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(rootNode)
+            var depth = 0
+            var visited = 0
+            while (queue.isNotEmpty() && depth < 60 && visited < 2000) {
+                visited++
+                val node = queue.removeFirst()
+                val isRoot = node === rootNode
+                val text = try { node.text?.toString() } catch (e: Exception) { null }
+                val desc = try { node.contentDescription?.toString() } catch (e: Exception) { null }
+                val combined = ((text ?: "") + " " + (desc ?: "")).lowercase(Locale.ROOT)
+                if (combined.contains("google.com")) {
+                    val clicked = clickNodeOrClickableAncestor(node)
+                    Log.i(TAG, "SAFE_REDIRECT: suggestion click=$clicked text=\"$text\"")
+                    if (clicked) {
+                        if (!isRoot) try { node.recycle() } catch (e: Exception) {}
+                        return true
+                    }
+                }
+                val count = try { node.childCount } catch (e: Exception) { 0 }
+                for (i in 0 until count) {
+                    val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                    queue.add(child)
+                }
+                if (!isRoot) try { node.recycle() } catch (e: Exception) {}
+                depth++
+            }
+            false
+        } finally {
+            try { rootNode.recycle() } catch (e: Exception) {}
+        }
+    }
+
     private fun showBlockOverlay(result: MatchResult.Blocked, sourcePackage: String) {
         try {
             val intent = Intent(this, com.muddassir.clearview.ui.BlockOverlayActivity::class.java).apply {
@@ -2739,12 +2376,34 @@ class UrlBlockerService : AccessibilityService() {
                 putExtra("blocked_item", result.matchedItem)
                 putExtra("blocked_type", result.matchType.name)
                 putExtra("source_package", sourcePackage)
+                // The overlay explains Strict Mode when a broad keyword caused
+                // this block (see isStrictModeBlock).
+                putExtra("strict_hit", isStrictModeBlock(result))
             }
             startActivity(intent)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to show block overlay: ${e.message}", e)
             goToHome()
         }
+    }
+
+    /**
+     * True when [result] is a built-in keyword block whose keyword belongs to
+     * Strict Mode's curated discovery set AND Strict Mode is on — i.e.
+     * the block happened because of Strict Mode, not a base/custom/domain
+     * rule. The overlay uses this to explain how to search the term
+     * legitimately (turn Strict Mode off).
+     */
+    private fun isStrictModeBlock(result: MatchResult.Blocked): Boolean {
+        if (result.matchType != MatchType.BUILT_IN_KEYWORD) return false
+        if (!repository.isStrictMode) return false
+        val keyword = result.matchedItem.trim().lowercase(Locale.ROOT)
+        if (keyword !in BlockRepository.STRICT_MODE_KEYWORDS) {
+            return false
+        }
+        // Words that are ALSO always-block keywords block without Strict Mode —
+        // the note must not imply that turning it off would unblock them.
+        return keyword !in BlockRepository.ALWAYS_BLOCK_KEYWORDS
     }
 
     private fun goToHome() {

@@ -36,6 +36,32 @@ enum class FeedSortOrder(val label: String) {
     OLDEST_FIRST("Oldest first")
 }
 
+/**
+ * Source filter for the All Feed — where each video came from:
+ * [BY_URL] videos the user added manually by URL, and [SYSTEM] videos the
+ * app pulled automatically from saved channels (RSS). [BY_RSS] is the
+ * playlist-only option for exactly those channel-feed videos (inside user
+ * playlists [SYSTEM] is presented as "From device" — device audio imported
+ * into the playlist).
+ */
+enum class FeedSourceFilter(val label: String) {
+    ALL("All"),
+    BY_URL("By URL"),
+    BY_RSS("By RSS"),
+    SYSTEM("From channels")
+}
+
+/**
+ * Media-type filter used inside user playlists — playlists can hold both
+ * YouTube videos and audio imported from the device: [VIDEO] keeps only
+ * YouTube videos, [AUDIO] keeps only the imported device audio.
+ */
+enum class PlaylistTypeFilter(val label: String) {
+    ALL("All"),
+    VIDEO("Video"),
+    AUDIO("Audio")
+}
+
 /** Watch-status filter for the All Feed (combinable with the date filter). */
 enum class FeedWatchStatus(val label: String) {
     ALL("All"),
@@ -45,7 +71,7 @@ enum class FeedWatchStatus(val label: String) {
 }
 
 /**
- * The Media tab's All Feed filters. Defaults: All time + All content +
+ * The Media tab's All Feed filters. Defaults: Last 3 days + All content +
  * Newest first. [customStartEpochMillis] / [customEndEpochMillis] only apply
  * when [date] is [FeedDateFilter.CUSTOM] (both are local start-of-day millis).
  *
@@ -54,21 +80,28 @@ enum class FeedWatchStatus(val label: String) {
  * decode, so no stale filter can lock the feed.
  */
 data class FeedFilter(
-    val date: FeedDateFilter = FeedDateFilter.ALL_TIME,
+    val date: FeedDateFilter = FeedDateFilter.LAST_3_DAYS,
     val content: FeedContentFilter = FeedContentFilter.ALL,
     val sort: FeedSortOrder = FeedSortOrder.NEWEST_FIRST,
     // Unwatched by default: the feed leads with videos the user hasn't seen,
     // rather than everything mixed together.
     val watchStatus: FeedWatchStatus = FeedWatchStatus.UNWATCHED,
+    /** Where the videos come from (manual by-URL, channels, playlists). */
+    val source: FeedSourceFilter = FeedSourceFilter.ALL,
+    /** Media type — only meaningful inside user playlists (YouTube video vs
+     *  audio imported from the device). */
+    val playlistType: PlaylistTypeFilter = PlaylistTypeFilter.ALL,
     val customStartEpochMillis: Long? = null,
     val customEndEpochMillis: Long? = null
 ) {
     /** True when anything differs from the defaults (drives the active indicator). */
     val isActive: Boolean
-        get() = date != FeedDateFilter.ALL_TIME ||
+        get() = date != FeedDateFilter.LAST_3_DAYS ||
             content != FeedContentFilter.ALL ||
             sort != FeedSortOrder.NEWEST_FIRST ||
-            watchStatus != FeedWatchStatus.UNWATCHED
+            watchStatus != FeedWatchStatus.UNWATCHED ||
+            source != FeedSourceFilter.ALL ||
+            playlistType != PlaylistTypeFilter.ALL
 }
 
 /** Local start-of-day (midnight) for [epochMillis] in the device's time zone. */

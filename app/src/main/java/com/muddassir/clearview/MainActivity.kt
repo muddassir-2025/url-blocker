@@ -3,10 +3,12 @@ package com.muddassir.clearview
 import android.app.Activity
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -37,12 +39,15 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.worker.AudioWorkScheduler
 import com.muddassir.clearview.media.worker.MediaWorkScheduler
+import com.muddassir.clearview.phonelimit.PhoneLimitCoordinator
 import com.muddassir.clearview.quran.worker.QuranWorkScheduler
+import com.muddassir.clearview.todo.data.TodoNotifier
+import com.muddassir.clearview.todo.data.TodoScheduler
 import com.muddassir.clearview.ui.BlockTab
 import com.muddassir.clearview.ui.ContentHubTabContent
 import com.muddassir.clearview.ui.ContentHubTopBar
 import com.muddassir.clearview.ui.ContentTab
-import com.muddassir.clearview.ui.applyImmersiveIfNeeded
+import com.muddassir.clearview.ui.ApplyImmersiveIfNeeded
 import com.muddassir.clearview.ui.contentHubNavItems
 import com.muddassir.clearview.ui.isLandscape
 import com.muddassir.clearview.ui.rememberContentHubState
@@ -50,6 +55,46 @@ import com.muddassir.clearview.ui.theme.UrlblockerTheme
 import com.muddassir.clearview.viewmodel.MainViewModel
 
 open class MainActivity : ComponentActivity() {
+
+    /**
+     * Warm-start request for the Todo screen: a Todo-reminder notification tap
+     * while the app is already running delivers a new intent via [onNewIntent];
+     * this snapshot state lets MainScreen react. The cold-start path reads the
+     * same flag straight from the launcher intent instead.
+     */
+    private val todoRequestState = mutableStateOf(false)
+    val todoScreenRequested: Boolean get() = todoRequestState.value
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(TodoNotifier.EXTRA_OPEN_TODO, false)) {
+            intent.removeExtra(TodoNotifier.EXTRA_OPEN_TODO)
+            todoRequestState.value = true
+        }
+        // Phone Limit deep link (widget START fallback / expiry notification).
+        if (intent.getBooleanExtra(PhoneLimitCoordinator.EXTRA_OPEN_PHONE_LIMIT, false)) {
+            intent.removeExtra(PhoneLimitCoordinator.EXTRA_OPEN_PHONE_LIMIT)
+            phoneLimitRequestState.value = true
+        }
+    }
+
+    /** Clears the warm-start request after MainScreen has handled it. */
+    fun consumeTodoScreenRequest() {
+        todoRequestState.value = false
+    }
+
+    // ── Phone Limit deep link (widget fallback / expiry notification) ──
+
+    /** Warm-start request for the Phone Limit sheet (same pattern as Todo). */
+    private val phoneLimitRequestState = mutableStateOf(false)
+    val phoneLimitScreenRequested: Boolean get() = phoneLimitRequestState.value
+
+    /** Clears the warm-start request after MainScreen has handled it. */
+    fun consumePhoneLimitScreenRequest() {
+        phoneLimitRequestState.value = false
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -68,6 +113,11 @@ open class MainActivity : ComponentActivity() {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.deleteNotificationChannel("media_badge")
             nm.deleteNotificationChannel("protection_monitor")
+            // Todo reminders: keep both channels (reminders + the silent alarm
+            // channel) in their correct state from the very first launch — an
+            // older build's alarm channel without the silent tone must be
+            // rebuilt here, not only when the first alarm happens to fire.
+            TodoNotifier.ensureChannel(this)
         }
 
         // Quran Reminder: ensure the initial download + 6-hour refresh work is
@@ -100,6 +150,11 @@ open class MainActivity : ComponentActivity() {
                 // Settings).
                 viewModel.checkAccessibilityStatus(this)
                 viewModel.checkDeviceAdminStatus(this)
+                // The user may have just returned from granting the exact-alarm
+                // permission (SCHEDULE_EXACT_ALARM). Re-sync every todo alarm:
+                // the ones scheduled BEFORE the grant were inexact, and a
+                // re-arm now upgrades them to exact so reminders ring on time.
+                TodoScheduler.rescheduleAll(this)
             }
         })
 
@@ -121,6 +176,54 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
 
     var selectedTab by rememberSaveable { mutableStateOf(MainTab.QURAN) }
     val hub = rememberContentHubState()
+
+    // A Todo-reminder notification tap opens straight into the Todo screen —
+    // either from a cold start (the launcher intent carries EXTRA_OPEN_TODO) or
+    // a warm start (onNewIntent set todoScreenRequested). Both switch to the
+    // Quran tab first so the top bar that hosts the Todo screen is composed.
+    val activity = LocalActivity.current as? MainActivity
+    LaunchedEffect(Unit) {
+        if (activity?.intent?.getBooleanExtra(TodoNotifier.EXTRA_OPEN_TODO, false) == true) {
+            activity.intent.removeExtra(TodoNotifier.EXTRA_OPEN_TODO)
+            selectedTab = MainTab.QURAN
+            hub.selectedTab = ContentTab.QURAN
+            hub.showTodoScreen = true
+        }
+    }
+    val todoRequested = activity?.todoScreenRequested == true
+    LaunchedEffect(todoRequested) {
+        if (todoRequested) {
+            activity?.consumeTodoScreenRequest()
+            selectedTab = MainTab.QURAN
+            hub.selectedTab = ContentTab.QURAN
+            hub.showTodoScreen = true
+        }
+    }
+
+    // A Phone Limit deep link (widget START fallback, expiry notification tap)
+    // opens straight into the Phone Limit sheet — the "timer window", not just
+    // the Quran tab. Cold start: the launcher intent carries the flag; warm
+    // start: onNewIntent set phoneLimitRequested.
+    LaunchedEffect(Unit) {
+        if (activity?.intent?.getBooleanExtra(
+                PhoneLimitCoordinator.EXTRA_OPEN_PHONE_LIMIT, false
+            ) == true
+        ) {
+            activity.intent.removeExtra(PhoneLimitCoordinator.EXTRA_OPEN_PHONE_LIMIT)
+            selectedTab = MainTab.QURAN
+            hub.selectedTab = ContentTab.QURAN
+            hub.showPhoneLimitSheet = true
+        }
+    }
+    val phoneLimitRequested = activity?.phoneLimitScreenRequested == true
+    LaunchedEffect(phoneLimitRequested) {
+        if (phoneLimitRequested) {
+            activity?.consumePhoneLimitScreenRequest()
+            selectedTab = MainTab.QURAN
+            hub.selectedTab = ContentTab.QURAN
+            hub.showPhoneLimitSheet = true
+        }
+    }
 
     LaunchedEffect(Unit) {
         viewModel.initialize(context)
@@ -186,7 +289,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     val isFullscreen =
         (landscape && (hub.playingVideo != null || hub.selectedTab == ContentTab.LIVE)) ||
             (hub.playerFullscreen && hub.playingVideo != null)
-    applyImmersiveIfNeeded(isFullscreen)
+    ApplyImmersiveIfNeeded(isFullscreen)
 
     Scaffold(
         topBar = {
