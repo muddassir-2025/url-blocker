@@ -141,16 +141,6 @@ class BlockRepository(context: Context) {
         userKeywordsCache = null
     }
 
-    fun replaceUserKeyword(oldKeyword: String, newKeyword: String) {
-        val replacement = newKeyword.trim().lowercase(Locale.ROOT)
-        if (replacement.isEmpty()) return
-        val current = getUserKeywords().toMutableSet()
-        current.remove(oldKeyword.trim().lowercase(Locale.ROOT))
-        current.add(replacement)
-        prefs.edit().putStringSet(KEY_USER_KEYWORDS, current).apply()
-        userKeywordsCache = null
-    }
-
     // ── Blocked domains / websites ─────────────────────────────────
 
     fun getBlockedDomains(): Set<String> {

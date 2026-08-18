@@ -916,6 +916,7 @@ private fun DhikrSettingsScreen(
     }
 
     // ── Add / edit ──
+    val addedMsg = stringResource(R.string.dhikr_counter_added)
     if (adding) {
         DhikrEditDialog(
             title = stringResource(R.string.dhikr_counter_add_title),
@@ -932,7 +933,7 @@ private fun DhikrSettingsScreen(
                         )
                     )
                 )
-                Toast.makeText(context, context.getString(R.string.dhikr_counter_added), Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, addedMsg, Toast.LENGTH_SHORT).show()
                 adding = false
             },
             onDismiss = { adding = false }
@@ -969,6 +970,7 @@ private fun DhikrSettingsScreen(
     }
 
     // ── Delete confirmation ──
+    val removedMsg = stringResource(R.string.dhikr_counter_removed)
     pendingDelete?.let { item ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
@@ -987,7 +989,7 @@ private fun DhikrSettingsScreen(
                     pendingDelete = null
                     Toast.makeText(
                         context,
-                        context.getString(R.string.dhikr_counter_removed),
+                        removedMsg,
                         Toast.LENGTH_SHORT
                     ).show()
                 }) { Text(stringResource(R.string.dhikr_counter_remove), color = MaterialTheme.colorScheme.error) }
@@ -1028,6 +1030,7 @@ private fun DhikrSettingsScreen(
     }
 
     // ── Reset all progress ──
+    val resetAllDoneMsg = stringResource(R.string.dhikr_counter_reset_all_done)
     if (pendingResetAll) {
         AlertDialog(
             onDismissRequest = { pendingResetAll = false },
@@ -1039,7 +1042,7 @@ private fun DhikrSettingsScreen(
                     pendingResetAll = false
                     Toast.makeText(
                         context,
-                        context.getString(R.string.dhikr_counter_reset_all_done),
+                        resetAllDoneMsg,
                         Toast.LENGTH_SHORT
                     ).show()
                 }) { Text(stringResource(R.string.dhikr_counter_reset_all), color = MaterialTheme.colorScheme.error) }
@@ -1119,21 +1122,17 @@ private fun ManageRow(
                     )
                 }
                 Spacer(Modifier.height(2.dp))
+                val targetLabel = if (item.target > 0) {
+                    stringResource(R.string.dhikr_counter_target_value, item.target)
+                } else {
+                    stringResource(R.string.dhikr_counter_no_target)
+                }
                 Text(
                     text = buildString {
                         if (item.translation.isNotBlank()) {
                             append(item.translation).append(" · ")
                         }
-                        append(
-                            if (item.target > 0) {
-                                context.getString(
-                                    R.string.dhikr_counter_target_value,
-                                    item.target
-                                )
-                            } else {
-                                context.getString(R.string.dhikr_counter_no_target)
-                            }
-                        )
+                        append(targetLabel)
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

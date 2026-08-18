@@ -14,6 +14,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.muddassir.clearview.extractor.ContentExtractor
+import com.muddassir.clearview.matching.KeywordMatcher
 import com.muddassir.clearview.repository.BlockRepository
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
@@ -643,7 +644,14 @@ class YouTubeChromeTestCoordinator(
             title.orEmpty()
         }
         Log.i(TAG, "YT_TEST_MATCH_SOURCE ${if (isValidYouTubeShortTitle(title)) "title" else "tree-text"}")
-        val matched = testKeywords.firstOrNull { kw -> matchInput.contains(kw, ignoreCase = true) }
+        // Normalize both sides (NFKC + homoglyphs + leetspeak + separator
+        // collapsing — identity for plain text, so this changes nothing for
+        // ordinary keywords) so disguised spellings of a test keyword are
+        // caught generically instead of by manual list entries.
+        val normalizedMatchInput = KeywordMatcher.normalizeForMatching(matchInput)
+        val matched = testKeywords.firstOrNull { kw ->
+            normalizedMatchInput.contains(KeywordMatcher.normalizeForMatching(kw))
+        }
 
         if (matched != null) {
             lastMatchedTestKeyword = matched

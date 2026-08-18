@@ -74,6 +74,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -110,8 +111,14 @@ private val MISSED_RED = Color(0xFFE53935)
 private val TEMP_AMBER = Color(0xFFB26A00)
 private val PERM_BLUE = Color(0xFF1565C0)
 private val UPCOMING_VIOLET = Color(0xFF6A1B9A)
-private val HISTORY_DATE = DateTimeFormatter.ofPattern("EEE, MMM d", Locale.getDefault())
-private val MONTH_NAME = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())
+// Locale-aware formatters: built per locale (from the observable Compose
+// configuration) instead of frozen to the app's locale at class-load time, so
+// they react to locale changes while the app runs (ConstantLocale fix).
+private fun historyDateFormat(locale: Locale): DateTimeFormatter =
+    DateTimeFormatter.ofPattern("EEE, MMM d", locale)
+
+private fun monthNameFormat(locale: Locale): DateTimeFormatter =
+    DateTimeFormatter.ofPattern("MMMM yyyy", locale)
 
 /** Which metric the weekly bar graph shows. */
 private enum class BarMode { COMPLETED, INCOMPLETE, TOTAL }
@@ -719,12 +726,13 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
     }
 
     // ── Snooze (in-app) ──
+    val snoozedMsg = stringResource(R.string.todo_snoozed)
     snoozing?.let { item ->
         SnoozeSheet(
             onSnooze = { minutes ->
                 TodoScheduler.snoozeNext(context, item.id, minutes)
                 snoozeTick++
-                Toast.makeText(context, context.getString(R.string.todo_snoozed), Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, snoozedMsg, Toast.LENGTH_SHORT).show()
                 snoozing = null
             },
             onDismiss = { snoozing = null }
@@ -875,12 +883,13 @@ private fun EmptyLine(text: String) {
 /** A group header for the Upcoming list: \"Tomorrow\" / \"Wednesday\" / \"Mon, Aug 12\". */
 @Composable
 private fun UpcomingGroupHeader(date: LocalDate, today: LocalDate) {
+    val locale = LocalConfiguration.current.locales[0]
     val label = when (date) {
         today.plusDays(1) -> stringResource(R.string.todo_tomorrow)
         else -> if (date <= today.plusDays(7)) {
-            date.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.getDefault())
+            date.dayOfWeek.getDisplayName(TextStyle.FULL, locale)
         } else {
-            HISTORY_DATE.format(date)
+            historyDateFormat(locale).format(date)
         }
     }
     Text(
@@ -1356,6 +1365,7 @@ private fun HistoryRow(entry: TodoCodec.HistoryEntry) {
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(Modifier.height(2.dp))
+                val locale = LocalConfiguration.current.locales[0]
                 val parts = mutableListOf<String>()
                 if (entry.completedCount > 0) {
                     parts.add(stringResource(R.string.todo_history_completed, entry.completedCount))
@@ -1363,7 +1373,7 @@ private fun HistoryRow(entry: TodoCodec.HistoryEntry) {
                 if (entry.missedCount > 0) {
                     parts.add(stringResource(R.string.todo_history_missed, entry.missedCount))
                 }
-                parts.add(stringResource(R.string.todo_history_last, HISTORY_DATE.format(entry.lastOccurrence)))
+                parts.add(stringResource(R.string.todo_history_last, historyDateFormat(locale).format(entry.lastOccurrence)))
                 Text(
                     text = parts.joinToString(" · "),
                     style = MaterialTheme.typography.labelSmall,
@@ -1655,8 +1665,9 @@ private fun ScoreRow(
 private fun InsightsSection(stats: TodoStats.WeekStats) {
     if (stats.due <= 0) return
     val rows = mutableListOf<Pair<String, String>>()
+    val locale = LocalConfiguration.current.locales[0]
     stats.bestDay?.let { best ->
-        val dayName = best.date.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.getDefault())
+        val dayName = best.date.dayOfWeek.getDisplayName(TextStyle.FULL, locale)
         rows.add(
             "🔥" to stringResource(
                 R.string.todo_insight_best_day, dayName, (best.rate * 100).toInt()
@@ -1746,6 +1757,7 @@ private fun StatisticsSection(
     }
     val productiveWindow = stats.mostProductiveWindow ?: monthWindow
     if (stats.due == 0 && month.due == 0 && stats.bestDay == null && productiveWindow == null) return
+    val locale = LocalConfiguration.current.locales[0]
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1789,7 +1801,7 @@ private fun StatisticsSection(
                 )
             }
             stats.bestDay?.let { best ->
-                val dayName = best.date.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.getDefault())
+                val dayName = best.date.dayOfWeek.getDisplayName(TextStyle.FULL, locale)
                 StatRow(
                     label = stringResource(R.string.todo_stats_best_day_label),
                     value = stringResource(
@@ -1838,6 +1850,7 @@ private fun CalendarSection(
     onNextMonth: () -> Unit,
     onDayTap: (LocalDate) -> Unit
 ) {
+    val locale = LocalConfiguration.current.locales[0]
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -1854,7 +1867,7 @@ private fun CalendarSection(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    text = MONTH_NAME.format(month.atDay(1)),
+                    text = monthNameFormat(locale).format(month.atDay(1)),
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
@@ -2174,6 +2187,7 @@ private fun DayTodosDialog(
         mode == BarMode.INCOMPLETE -> active.filterNot { TodoCodec.completedOn(it, day) }
         else -> active
     }
+    val locale = LocalConfiguration.current.locales[0]
     val modeLabel = if (isFuture) stringResource(R.string.todo_calendar_scheduled)
     else stringResource(
         when (mode) {
@@ -2182,7 +2196,7 @@ private fun DayTodosDialog(
             BarMode.TOTAL -> R.string.todo_filter_all
         }
     )
-    val title = day.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.getDefault())
+    val title = day.dayOfWeek.getDisplayName(TextStyle.FULL, locale)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {

@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
@@ -25,6 +26,7 @@ import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.outlined.AdminPanelSettings
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.PlayCircle
@@ -43,7 +45,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.draw.drawBehind
@@ -59,10 +60,16 @@ import com.muddassir.clearview.viewmodel.MainViewModel
  *     (bikini, lingerie, cleavage, ...) on top of the always-on adult terms.
  *  3. Block Shorts — blocks YouTube Shorts in Chrome and the YouTube app
  *     (no need to add "shorts" as a keyword).
- *  4. Blocked Items — dotted editable list card: add / view keywords and
+ *  4. YouTube Chrome Test — Stage-1 experiment: Shorts + long-video blocking
+ *     in Chrome (pause + protection overlay).
+ *  5. YouTube Chrome Test Keywords — separate test-only keyword list.
+ *  6. Blocked Items — dotted editable list card: add / view keywords and
  *     websites.
- *  5. DNS protection — network-level filtering.
- *  6. Advanced — device admin, uninstall protection, app lock.
+ *  7. DNS protection — network-level filtering.
+ *  8. Advanced — device admin, uninstall protection, app lock.
+ *
+ * Every card carries an info (i) icon that expands the FULL context of what
+ * that feature does — tap it on any card to see everything it covers.
  */
 @Composable
 fun BlockTab(
@@ -100,6 +107,49 @@ fun BlockTab(
     }
 }
 
+// ── Shared: info icon + full-context details expander ────────────
+
+/**
+ * Small info (i) icon button on a card header. Tapping it toggles the card's
+ * expanded FULL-CONTEXT details section (FeatureDetailBlock) — everything that
+ * feature covers, since the one-line summaries can't hold it all.
+ */
+@Composable
+private fun InfoToggleButton(expanded: Boolean, onToggle: () -> Unit) {
+    IconButton(onClick = onToggle) {
+        Icon(
+            imageVector = if (expanded) Icons.Filled.Info else Icons.Outlined.Info,
+            contentDescription = if (expanded) "Hide details" else "Show full context",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp)
+        )
+    }
+}
+
+/** The expanded body shown under a card when its info icon is tapped. */
+@Composable
+private fun FeatureDetailBlock(bullets: List<String>) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp)
+            .background(
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        bullets.forEach { bullet ->
+            Text(
+                text = "• $bullet",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
 // ── 1. Protection toggle ──────────────────────────────────────────
 
 @Composable
@@ -112,6 +162,7 @@ private fun ProtectionCard(viewModel: MainViewModel, context: Context) {
     // stated, and consent is explicit — system Settings is only opened after
     // the user taps Continue. Disabling stays one tap away as before.
     var showDisclosure by remember { mutableStateOf(false) }
+    var showDetails by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -163,13 +214,27 @@ private fun ProtectionCard(viewModel: MainViewModel, context: Context) {
                         uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
                     )
                 )
+                InfoToggleButton(expanded = showDetails) { showDetails = !showDetails }
             }
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "Blocks incognito mode · Blocks explicit websites and searches · Works on YouTube search · Blocks your custom keywords",
+                text = "Blocks incognito · Adult sites & searches · YouTube Shorts & long videos · Pattern & custom keywords",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (isEnabled) Color(0xFFE8F5E9) else MaterialTheme.colorScheme.onSurfaceVariant
             )
+            AnimatedVisibility(visible = showDetails) {
+                FeatureDetailBlock(
+                    bullets = listOf(
+                        "Always-on adult filter — explicit websites, searches and video content are blocked in Chrome and the Google app.",
+                        "Incognito mode — detected and closed automatically, so blocked content can never be reached privately.",
+                        "YouTube Shorts — short-form videos are paused and covered with a protection overlay (toggle below).",
+                        "Long YouTube videos — the real title and description are checked on the watch page; blocked videos are paused exactly once and covered with a dark overlay and a \"Go to YouTube Home\" button.",
+                        "Pattern blocking — innocent words like women, girl, hot or beach only block when combined with adult terms (e.g. \"women bikini\"), so everyday browsing is never blocked.",
+                        "Custom keywords & websites — everything under Blocked Items is enforced in every monitored app.",
+                        "100% on-device — screen text is processed instantly on your phone and never leaves it."
+                    )
+                )
+            }
         }
     }
 
@@ -217,6 +282,7 @@ private fun ProtectionCard(viewModel: MainViewModel, context: Context) {
 @Composable
 private fun StrictModeCard(viewModel: MainViewModel, context: Context) {
     val active = viewModel.isStrictMode
+    var showDetails by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -256,6 +322,17 @@ private fun StrictModeCard(viewModel: MainViewModel, context: Context) {
                 checked = active,
                 onCheckedChange = { viewModel.toggleStrictMode(context) }
             )
+            InfoToggleButton(expanded = showDetails) { showDetails = !showDetails }
+        }
+        AnimatedVisibility(visible = showDetails) {
+            FeatureDetailBlock(
+                bullets = listOf(
+                    "Adds a curated list of risky-but-innocent discovery terms (bikini, lingerie, cleavage, beach, hot, ...) on top of the always-on adult filter.",
+                    "Gender and family words — women, female, girl, transgender, mom, wife, sister, daughter and more — are never blocked alone; they only block when combined with an adult term.",
+                    "Pattern matching applies everywhere: Chrome (every search tab), the Google app, YouTube, and your blocked list.",
+                    "When Strict Mode is off, only the always-on adult terms block — the discovery terms are ignored."
+                )
+            )
         }
     }
 }
@@ -265,6 +342,7 @@ private fun StrictModeCard(viewModel: MainViewModel, context: Context) {
 @Composable
 private fun BlockShortsCard(viewModel: MainViewModel) {
     val active = viewModel.blockShorts
+    var showDetails by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -304,6 +382,17 @@ private fun BlockShortsCard(viewModel: MainViewModel) {
                 checked = active,
                 onCheckedChange = { viewModel.toggleBlockShorts() }
             )
+            InfoToggleButton(expanded = showDetails) { showDetails = !showDetails }
+        }
+        AnimatedVisibility(visible = showDetails) {
+            FeatureDetailBlock(
+                bullets = listOf(
+                    "Blocks YouTube Shorts in Chrome and the YouTube app — no need to add \"shorts\" as a keyword.",
+                    "Blocked Shorts are paused and covered with a protection overlay, so taps can never reveal the controls or resume the video.",
+                    "Vertical swipes still work, so you can move between Shorts normally.",
+                    "Works together with the always-on adult filter and your custom keywords."
+                )
+            )
         }
     }
 }
@@ -313,6 +402,7 @@ private fun BlockShortsCard(viewModel: MainViewModel) {
 @Composable
 private fun YouTubeChromeTestCard(viewModel: MainViewModel) {
     val active = viewModel.youTubeChromeTest
+    var showDetails by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -342,7 +432,7 @@ private fun YouTubeChromeTestCard(viewModel: MainViewModel) {
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "EXPERIMENT — detects YouTube Shorts in Chrome, matches on-screen text against your blocked keywords, and pauses the video. Logs under tag ClearViewYTTest.",
+                    text = "EXPERIMENT — detects YouTube Shorts and long videos in Chrome, matches the real content against your blocked keywords, pauses it, and covers the player.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -352,6 +442,19 @@ private fun YouTubeChromeTestCard(viewModel: MainViewModel) {
                 checked = active,
                 onCheckedChange = { viewModel.toggleYouTubeChromeTest() }
             )
+            InfoToggleButton(expanded = showDetails) { showDetails = !showDetails }
+        }
+        AnimatedVisibility(visible = showDetails) {
+            FeatureDetailBlock(
+                bullets = listOf(
+                    "Stage-1 experiment for YouTube blocking inside Chrome.",
+                    "Shorts — detected on-screen, matched against keywords, paused once and covered with a protection overlay; swipes between Shorts still work.",
+                    "Long videos — the real title AND description are extracted from the watch page and matched against your keywords (browser strings like \"Share\", \"Subscribe\" or \"New tab\" are ignored).",
+                    "A blocked long video is paused exactly once, then protected by a dark overlay with a \"Go to YouTube Home\" button that clears the block and navigates to m.youtube.com.",
+                    "Allowed videos keep playing untouched — no overlay, no pause.",
+                    "Every step is logged under ClearViewYTTest (Shorts) and ClearViewLongVideo (long videos) — check logcat to verify."
+                )
+            )
         }
     }
 }
@@ -360,6 +463,7 @@ private fun YouTubeChromeTestCard(viewModel: MainViewModel) {
 
 @Composable
 private fun YouTubeChromeTestKeywordsCard(viewModel: MainViewModel) {
+    var showDetails by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -378,8 +482,10 @@ private fun YouTubeChromeTestKeywordsCard(viewModel: MainViewModel) {
                 Text(
                     text = "YouTube Chrome Test Keywords",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
                 )
+                InfoToggleButton(expanded = showDetails) { showDetails = !showDetails }
             }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
@@ -388,6 +494,16 @@ private fun YouTubeChromeTestKeywordsCard(viewModel: MainViewModel) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            AnimatedVisibility(visible = showDetails) {
+                FeatureDetailBlock(
+                    bullets = listOf(
+                        "A separate, test-only keyword list used by the YouTube Chrome Test.",
+                        "Matching Shorts are paused and covered instead of showing the normal ClearView block screen.",
+                        "The same list is matched against long-video titles and descriptions on watch pages.",
+                        "Does not affect your main Blocked Items list."
+                    )
+                )
+            }
             Spacer(modifier = Modifier.height(12.dp))
 
             // Add test keyword
@@ -447,6 +563,7 @@ private fun YouTubeChromeTestKeywordsCard(viewModel: MainViewModel) {
 @Composable
 private fun BlockedItemsCard(viewModel: MainViewModel) {
     var expanded by remember { mutableStateOf(false) }
+    var showDetails by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(16.dp)
     // Hoisted out of drawBehind: MaterialTheme is a composable read and cannot
     // be accessed inside the non-composable DrawScope lambda.
@@ -486,6 +603,19 @@ private fun BlockedItemsCard(viewModel: MainViewModel) {
                 FilledIconButton(onClick = { expanded = !expanded }) {
                     Icon(Icons.Filled.Add, contentDescription = if (expanded) "Close editor" else "Add blocked items")
                 }
+                InfoToggleButton(expanded = showDetails) { showDetails = !showDetails }
+            }
+
+            AnimatedVisibility(visible = showDetails) {
+                FeatureDetailBlock(
+                    bullets = listOf(
+                        "Keywords block searches, video titles and page text across Chrome and the Google app.",
+                        "Websites are blocked by domain — every page on that domain is blocked.",
+                        "Matching uses word boundaries: \"button\" never matches \"butt\", \"brass\" never matches \"bra\".",
+                        "Your own keywords are always blocked as exact words; the built-in pattern system only blocks innocent words when they are combined with an adult term.",
+                        "Everything here is enforced alongside the always-on adult filter, Strict Mode, Shorts and long-video blocking."
+                    )
+                )
             }
 
             AnimatedVisibility(visible = expanded) {
@@ -626,6 +756,7 @@ private fun BlockedChip(label: String, onDelete: () -> Unit) {
 @Composable
 private fun DnsCard(viewModel: MainViewModel, context: Context) {
     var showSetupSheet by remember { mutableStateOf(false) }
+    var showDetails by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -644,8 +775,10 @@ private fun DnsCard(viewModel: MainViewModel, context: Context) {
                 Text(
                     text = "DNS Protection",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f)
                 )
+                InfoToggleButton(expanded = showDetails) { showDetails = !showDetails }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
@@ -653,6 +786,16 @@ private fun DnsCard(viewModel: MainViewModel, context: Context) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            AnimatedVisibility(visible = showDetails) {
+                FeatureDetailBlock(
+                    bullets = listOf(
+                        "Network-level filtering that works on ALL apps — including browsers the accessibility filter doesn't cover.",
+                        "Cannot be bypassed by incognito mode or by installing a new browser.",
+                        "Set your phone's Private DNS to a filtered provider (Cloudflare Family 1.1.1.3 or CleanBrowsing Family Filter) using the guide below.",
+                        "Works alongside ClearView's app-level blocking — both layers together close every gap."
+                    )
+                )
+            }
             Spacer(modifier = Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
@@ -846,6 +989,7 @@ private fun DeviceAdminCard(
     deviceAdminLauncher: ActivityResultLauncher<Intent>
 ) {
     val isAdmin = viewModel.isDeviceAdminEnabled
+    var showDetails by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -918,6 +1062,16 @@ private fun DeviceAdminCard(
                     Text("Activate", fontSize = 13.sp)
                 }
             }
+            InfoToggleButton(expanded = showDetails) { showDetails = !showDetails }
+        }
+        AnimatedVisibility(visible = showDetails) {
+            FeatureDetailBlock(
+                bullets = listOf(
+                    "Makes the app a Device Admin, which adds a confirmation step before the app can be uninstalled.",
+                    "Required before Device Owner (full uninstall block) can be set.",
+                    "Can be revoked anytime from Settings → Security → Device admin apps."
+                )
+            )
         }
     }
 }
@@ -929,6 +1083,7 @@ private fun UninstallProtectionCard(viewModel: MainViewModel, context: Context) 
     val isOwner = viewModel.isDeviceOwner
     val isAdmin = viewModel.isDeviceAdminEnabled
     var showRemoveOwnerConfirm by remember { mutableStateOf(false) }
+    var showDetails by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -969,6 +1124,17 @@ private fun UninstallProtectionCard(viewModel: MainViewModel, context: Context) 
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                InfoToggleButton(expanded = showDetails) { showDetails = !showDetails }
+            }
+
+            AnimatedVisibility(visible = showDetails) {
+                FeatureDetailBlock(
+                    bullets = listOf(
+                        "Device Owner blocks uninstall completely — a factory reset is required to remove the app.",
+                        "Set up via ADB (the steps appear on this card once Device Admin is active).",
+                        "Use \"Remove Uninstall Protection\" when you need to update or uninstall — all your data is kept."
+                    )
+                )
             }
 
             if (isOwner && isAdmin) {
@@ -1065,6 +1231,7 @@ private fun UninstallProtectionCard(viewModel: MainViewModel, context: Context) 
 @Composable
 private fun AppLockCard(viewModel: MainViewModel) {
     val hasPwd = viewModel.hasPassword
+    var showDetails by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -1111,6 +1278,16 @@ private fun AppLockCard(viewModel: MainViewModel) {
                     Text("Set", fontSize = 13.sp)
                 }
             }
+            InfoToggleButton(expanded = showDetails) { showDetails = !showDetails }
+        }
+        AnimatedVisibility(visible = showDetails) {
+            FeatureDetailBlock(
+                bullets = listOf(
+                    "Locks the Block tab whenever the app goes to the background.",
+                    "The password protects the dashboard and its settings from being changed by anyone else.",
+                    "No password = the tab is open to anyone."
+                )
+            )
         }
     }
 }

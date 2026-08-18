@@ -144,8 +144,19 @@ class KeywordMatcher(
         // be collected. Thread-safe: checks run on the main thread and on
         // Dispatchers.Default (thumbnail re-analysis).
         private class KeywordCache(
-            val sorted: List<String>
-        )
+            // (original, normalized, needsBoundary): original is what a match
+            // reports (logs / block card); normalized is what's compared against
+            // the normalized scan text; needsBoundary is the whole-word verdict
+            // for the NORMALIZED form. All precomputed once per set so the hot
+            // path never normalizes or re-classifies keywords per event/poll.
+            val entries: List<KeywordEntry>
+        ) {
+            class KeywordEntry(
+                val original: String,
+                val normalized: String,
+                val needsBoundary: Boolean
+            )
+        }
 
         private val keywordCacheLock = Any()
         private val keywordCache = java.util.WeakHashMap<Set<String>, KeywordCache>()
@@ -157,9 +168,12 @@ class KeywordMatcher(
             // Build outside the lock (the sort of ~700 strings is ~tens of µs;
             // a concurrent duplicate build is benign — the put below keeps one).
             val cache = KeywordCache(
-                sorted = keywords.sortedWith(
+                entries = keywords.sortedWith(
                     compareByDescending<String> { it.length }.thenBy { it }
-                )
+                ).map { kw ->
+                    val normalized = normalizeForMatching(kw)
+                    KeywordCache.KeywordEntry(kw, normalized, isPlainWordKeyword(normalized))
+                }
             )
             synchronized(keywordCacheLock) {
                 keywordCache.putIfAbsent(keywords, cache)?.let { return it }
@@ -170,23 +184,246 @@ class KeywordMatcher(
         // Compiled once, not per event (was constructed inside checkShortsBlock).
         private val SHORTS_SIGNAL_REGEX = Regex("\\bshorts\\b")
 
-        // ── Boundary-protected long keywords ────────────────────────
-        // The generic short-word rule only boundary-matches keywords <= 4
-        // letters. These LONGER anatomy words also need a token boundary:
-        // "breast" must never substring-match innocent compounds like
-        // "breastfeeding" (kept in STRICT_MODE_KEYWORDS so it only blocks
-        // while Strict Mode is on) or "breaststroke". "breast cancer"
-        // still matches (the space after "breast" is a boundary).
-        internal val boundaryProtectedKeywords: Set<String> = setOf(
-            "breast",
-            "breasts",
-            // "trans" is a gender/transgender generic combo half; as a bare
-            // 5-letter word it would otherwise substring-match inside innocent
-            // words (transmission, transport, transparent, transaction). A
-            // word boundary keeps "trans girl" a hit while "hot transmission"
-            // can never false-positive.
-            "trans"
+        // ── Whole-word matching (hot path) ──────────────────────────
+        // Plain-word keywords (letters + spaces only, every space-separated
+        // token a real word of >= 2 letters) match ONLY as whole words: the
+        // keyword must never be glued to a neighboring letter/digit. The
+        // boundary test uses Char.isLetterOrDigit(), which is Unicode-aware —
+        // unlike Java regex \b, it treats non-Latin letters as letters, so
+        // "cock" can never hide inside "cocktail"/"peacock", "ass" inside
+        // "class"/"grass", "anal" inside "analysis", "bra" inside
+        // "library", "man"/"men" inside "management"/"German", "hot"
+        // inside "hotel", "sex" inside "Middlesex"/"sextant", "erect"
+        // inside "erector", and the phrase "sex tape" inside "sex tapeworm".
+        //
+        // Obfuscation / leetspeak / misspelling keywords — anything containing
+        // digits, punctuation, underscores or emoji ("p0rn", "s3x", "f*ck",
+        // "p.o.r.n", "f_u_c_k", "18+", "x-rated", "🔞"), and spaced
+        // single-letter forms ("n u d e", "x n x x") — keep plain substring
+        // matching. They are intentionally punctuation-embedded, so their only
+        // realistic occurrences ARE standalone, and inflected variants
+        // ("f*cked", "p0rnhub", "s3xual") must keep matching.
+        internal fun isPlainWordKeyword(keyword: String): Boolean {
+            var sawLetter = false
+            for (ch in keyword) {
+                if (ch == ' ') continue
+                if (!ch.isLetter()) return false
+                sawLetter = true
+            }
+            if (!sawLetter) return false
+            // Spaced single-letter obfuscations ("n u d e", "x n x x") are
+            // NOT plain words — keep substring matching for them.
+            for (token in keyword.split(' ')) {
+                if (token.length < 2) return false
+            }
+            return true
+        }
+
+        /**
+         * True when a Google-app query represents a SUBMITTED search (results
+         * page showing), not live text the user is still typing in the search
+         * box.
+         *
+         * The Google app exposes the search-box text as the query WHILE the
+         * user types (SEARCH_BAR / EDITABLE_FIELD / ACCESSIBILITY_EVENT
+         * sources), so a query check without this gate blocks the moment a
+         * partial word matches (e.g. "ass" as the first letters of
+         * "assignment") — before any search runs. Committed-search signals:
+         *  - querySource == WINDOW_TITLE (the "keyword - Google Search"
+         *    window title only exists on the results page);
+         *  - googleTab != null (the All/Images/Videos tab chips only exist on
+         *    the results page);
+         *  - the window title parses as a Google search title (defense in
+         *    depth when the chip scan misses);
+         *  - a google.com/search URL is exposed (Chrome; the Google app
+         *    rarely exposes it, but when it does the search is committed).
+         *
+         * While typing on the Google home screen none of these are true, so
+         * the typed text is never treated as a search. Chrome is unaffected
+         * by design: its query comes from the URL q= param or the
+         * results-page window title, which only exist after submission.
+         */
+        internal fun isGoogleSearchCommitted(snapshot: ContentSnapshot): Boolean =
+            snapshot.querySource == QuerySource.WINDOW_TITLE ||
+                snapshot.googleTab != null ||
+                GoogleSignalParser.queryFromWindowTitle(snapshot.title ?: "") != null ||
+                snapshot.url?.contains("google.com/search") == true
+
+        /**
+         * Whole-word aware keyword matching. [needsBoundary] is
+         * [isPlainWordKeyword]'s verdict for [keyword] (precomputed per set by
+         * the cache); pass false to get a plain substring search for the
+         * obfuscation/leetspeak forms. The text must already be lowercased.
+         */
+        internal fun containsKeyword(text: String, keyword: String, needsBoundary: Boolean): Boolean {
+            if (!needsBoundary) return text.contains(keyword)
+            var start = text.indexOf(keyword)
+            while (start >= 0) {
+                val end = start + keyword.length
+                val beforeIsWord = start > 0 && text[start - 1].isLetterOrDigit()
+                val afterIsWord = end < text.length && text[end].isLetterOrDigit()
+                if (!beforeIsWord && !afterIsWord) return true
+                start = text.indexOf(keyword, start + 1)
+            }
+            return false
+        }
+
+        // ── Text normalization (pre-keyword matching) ──────────────────
+        // Runs BEFORE every keyword comparison so disguised spellings are
+        // caught generically instead of by hardcoded evasion entries: Unicode
+        // NFKC + homoglyph folding + leetspeak substitution + single-letter
+        // separator collapsing. O(n) over the text length using precomputed
+        // lookup maps only (no regex compiled per call, no live Unicode
+        // confusables database). Applied to BOTH the scanned text and the
+        // keywords (via the cache), so existing literal entries keep matching
+        // their raw forms and redundant evasions simply become harmless. The
+        // result feeds the whole-word boundary check in containsKeyword —
+        // normalization never bypasses it ("p.o.r.n" → "porn", and "porn"
+        // still needs word boundaries, so "pornstar" stays unmatched by it).
+
+        /** Visually-similar non-Latin letters folded to their Latin look-alikes. */
+        private val HOMOGLYPH_MAP: Map<Char, Char> = mapOf(
+            // Cyrillic look-alikes.
+            'а' to 'a', 'е' to 'e', 'о' to 'o', 'р' to 'p', 'с' to 'c', 'у' to 'y',
+            'х' to 'x', 'в' to 'b', 'н' to 'h', 'м' to 'm', 'т' to 't', 'к' to 'k',
+            'і' to 'i', 'ѕ' to 's', 'г' to 'r',
+            // Greek look-alikes (practical subset).
+            'α' to 'a', 'ε' to 'e', 'ο' to 'o', 'ρ' to 'p', 'σ' to 's', 'ς' to 's',
+            'ι' to 'i', 'ν' to 'v', 'χ' to 'x', 'κ' to 'k', 'μ' to 'm', 'τ' to 't'
         )
+
+        /** Digit/symbol → letter leetspeak stand-ins (word-like tokens only). */
+        private val LEET_MAP: Map<Char, Char> = mapOf(
+            '0' to 'o', '1' to 'i', '3' to 'e', '4' to 'a', '5' to 's',
+            '7' to 't', '@' to 'a', '$' to 's', '!' to 'i'
+        )
+
+        /**
+         * Canonical form used for ALL keyword comparisons. Steps:
+         *  1. lowercase + NFKC (collapses fullwidth/compatibility variants:
+         *     "ＰＯＲＮ" / "ｐｏｒｎ" → "porn");
+         *  2. homoglyph folding (Cyrillic/Greek → Latin look-alikes);
+         *  3. per whitespace token: intra-token separator collapsing
+         *     ("p.o.r.n" → "porn"), then whitespace single-letter-run
+         *     collapsing ("n u d e" → "nude", "p o r n site" → "porn site");
+         *  4. leetspeak substitution on word-like tokens ("p0rn" → "porn",
+         *     "v1brator" → "vibrator"), never on pure-numeric tokens or
+         *     serials like "4x4" (fewer than 2 real letters).
+         * Ordinary text — "the score was 100 to 0", "class of 2025",
+         * "watch porn now" — passes through unchanged.
+         */
+        internal fun normalizeForMatching(text: String): String {
+            // 1. Lowercase, then NFKC.
+            val base = java.text.Normalizer.normalize(
+                text.lowercase(Locale.ROOT),
+                java.text.Normalizer.Form.NFKC
+            )
+            // 2. Homoglyph folding (only when the text contains any).
+            val folded = if (base.any { it in HOMOGLYPH_MAP }) {
+                buildString(base.length) {
+                    for (ch in base) append(HOMOGLYPH_MAP[ch] ?: ch)
+                }
+            } else {
+                base
+            }
+            // 3. Per-token separator collapsing, then single-letter-run
+            //    collapsing across whitespace, then leetspeak.
+            val tokens = folded.split(' ').filter { it.isNotEmpty() }
+            val collapsed = ArrayList<String>(tokens.size)
+            for (token in tokens) collapsed.add(collapseSingleLetterSeparators(token))
+            val runs = collapseSingleLetterRuns(collapsed)
+            val out = ArrayList<String>(runs.size)
+            for (token in runs) out.add(applyLeet(token))
+            return out.joinToString(" ")
+        }
+
+        /** Pure numeric tokens ("100", "0", "3.14", "1,000", "2025") are never leeted. */
+        private fun isPureNumericToken(token: String): Boolean {
+            if (token.isEmpty()) return false
+            for (ch in token) {
+                if (!ch.isDigit() && ch != '.' && ch != ',') return false
+            }
+            return true
+        }
+
+        /**
+         * Leetspeak substitution. Applied only to word-like tokens (at least
+         * two real letters) so serials like "4x4", "2fast" or "1st" are not
+         * mangled, while "p0rn", "s3x", "v1brator" are. Pure-numeric tokens
+         * ("100", "2025", "3.14") are returned untouched.
+         */
+        private fun applyLeet(token: String): String {
+            if (isPureNumericToken(token)) return token
+            var letters = 0
+            for (ch in token) if (ch.isLetter()) letters++
+            if (letters < 2) return token
+            var changed = false
+            for (ch in token) {
+                if (ch in LEET_MAP) { changed = true; break }
+            }
+            if (!changed) return token
+            return buildString(token.length) {
+                for (ch in token) append(LEET_MAP[ch] ?: ch)
+            }
+        }
+
+        /**
+         * Collapse punctuation/underscore separators between SINGLE characters
+         * inside a token: "p.o.r.n" → "porn", "p_o_r_n" → "porn",
+         * "p..o..r..n" → "porn", "p/o/r/n" → "porn", "n_u_d_3" → "nud3"
+         * (leeted to "nude" later). Digits are LEETSPEAK LETTERS, not
+         * separators, so "s3x", "p0rn" and "4x4" are never split. Tokens
+         * with a multi-character run ("x-videos", "18+") or no content
+         * ("🔞") are returned unchanged.
+         */
+        private fun collapseSingleLetterSeparators(token: String): String {
+            if (token.length <= 1) return token
+            var i = 0
+            var anySeparator = false
+            val content = StringBuilder()
+            while (i < token.length) {
+                if (token[i].isLetter() || token[i].isDigit()) {
+                    var j = i
+                    while (j < token.length && (token[j].isLetter() || token[j].isDigit())) j++
+                    if (j - i > 1) return token // multi-char run → not the pattern
+                    content.append(token[i])
+                    i = j
+                } else {
+                    anySeparator = true
+                    i++
+                }
+            }
+            return if (anySeparator && content.isNotEmpty()) content.toString() else token
+        }
+
+        /**
+         * Join consecutive single-character tokens: "n u d e" → "nude",
+         * "p o r n site" → "porn site". Longer tokens break the run, so
+         * normal multi-word text ("watch porn now") is never joined.
+         */
+        private fun collapseSingleLetterRuns(tokens: List<String>): List<String> {
+            if (tokens.size < 2) return tokens
+            val out = ArrayList<String>(tokens.size)
+            var i = 0
+            while (i < tokens.size) {
+                if (tokens[i].length == 1) {
+                    val runStart = i
+                    while (i < tokens.size && tokens[i].length == 1) i++
+                    if (i - runStart >= 2) {
+                        val joined = buildString(i - runStart) {
+                            for (k in runStart until i) append(tokens[k])
+                        }
+                        out.add(joined)
+                    } else {
+                        out.add(tokens[runStart])
+                    }
+                } else {
+                    out.add(tokens[i])
+                    i++
+                }
+            }
+            return out
+        }
 
         // ── Weighted risk-score model for pre-emptive feed blocking ──
         // The user's requested flow scores each feed card's signals and
@@ -664,13 +901,27 @@ class KeywordMatcher(
             }
         }
 
-        // 2. Check search query
+        // 2. Check search query — ONLY for committed (submitted) searches.
+        //    The Google app exposes the live search-box text as the query
+        //    while the user types (SEARCH_BAR / EDITABLE_FIELD /
+        //    ACCESSIBILITY_EVENT sources), so without the gate a partial
+        //    typed word (e.g. "ass" while typing "assignment") blocks before
+        //    any search runs — the reported "blocks as soon as I type". The
+        //    gate ([isGoogleSearchCommitted]) requires a results-page signal:
+        //    the query came from the window title, the tab chips are visible,
+        //    the window title parses as "... - Google Search", or a
+        //    google.com/search URL is exposed. Chrome is unaffected (its
+        //    query only exists post-submission).
         if (!googleQuery.isNullOrBlank()) {
-            val queryRes = checkString(googleQuery, isUrl = false, builtInKeywords = builtInKeywords)
-            if (queryRes is MatchResult.Blocked) {
-                val finalRes = queryRes.copy(matchSource = MatchSource.QUERY)
-                Log.i(TAG, buildBlockLog("QUERY", googleQuery, finalRes))
-                return finalRes
+            if (isGoogleSearchCommitted(snapshot)) {
+                val queryRes = checkString(googleQuery, isUrl = false, builtInKeywords = builtInKeywords)
+                if (queryRes is MatchResult.Blocked) {
+                    val finalRes = queryRes.copy(matchSource = MatchSource.QUERY)
+                    Log.i(TAG, buildBlockLog("QUERY", googleQuery, finalRes))
+                    return finalRes
+                }
+            } else {
+                Log.d(TAG, "GOOGLE_QUERY_TYPING_SKIPPED query='$googleQuery' (search not submitted)")
             }
         }
 
@@ -819,8 +1070,8 @@ class KeywordMatcher(
         text: String,
         builtInKeywords: Set<String> = repository.activeBuiltInKeywords
     ) {
-        val lower = text.lowercase(Locale.ROOT)
-        val builtIn = checkKeywords(lower, builtInKeywords, protectShortWords = true)
+        val normalized = normalizeForMatching(text)
+        val builtIn = checkKeywords(normalized, builtInKeywords)
         if (builtIn != null) {
             Log.d(TAG, """
                 PAGE TEXT MATCH FOUND
@@ -829,7 +1080,7 @@ class KeywordMatcher(
                 Reason = Not current URL / query
             """.trimIndent())
         } else {
-            val userKeyword = checkKeywords(lower, repository.getUserKeywords())
+            val userKeyword = checkKeywords(normalized, repository.getUserKeywords())
             if (userKeyword != null) {
                 Log.d(TAG, """
                     PAGE TEXT MATCH FOUND
@@ -883,22 +1134,26 @@ class KeywordMatcher(
         isUrl: Boolean,
         builtInKeywords: Set<String> = repository.activeBuiltInKeywords
     ): MatchResult {
-        val lower = text.lowercase(Locale.ROOT)
+        // Text normalization runs BEFORE all matching (NFKC + homoglyphs +
+        // leetspeak + separator collapsing — see normalizeForMatching); the
+        // whole-word boundary check in containsKeyword then applies to the
+        // normalized text and the cache's normalized keyword forms.
+        val normalized = normalizeForMatching(text)
 
         // Domain matching for URLs
         if (isUrl) {
-            val matchedDomain = checkDomains(lower)
+            val matchedDomain = checkDomains(normalized)
             if (matchedDomain != null) {
                 return MatchResult.Blocked(matchedDomain, MatchType.DOMAIN, MatchSource.DOMAIN)
             }
         }
 
-        val matchedBuiltIn = checkKeywords(lower, builtInKeywords, protectShortWords = true)
+        val matchedBuiltIn = checkKeywords(normalized, builtInKeywords)
         if (matchedBuiltIn != null) {
             return MatchResult.Blocked(matchedBuiltIn, MatchType.BUILT_IN_KEYWORD, MatchSource.NONE)
         }
 
-        val matchedUser = checkKeywords(lower, repository.getUserKeywords())
+        val matchedUser = checkKeywords(normalized, repository.getUserKeywords())
         if (matchedUser != null) {
             return MatchResult.Blocked(matchedUser, MatchType.USER_KEYWORD, MatchSource.NONE)
         }
@@ -908,7 +1163,7 @@ class KeywordMatcher(
         // text — raw URLs are exempt so a legitimate page path like
         // /photos/beach.html can never trip it.
         if (!isUrl) {
-            val matchedCombo = checkCombinationTerms(lower)
+            val matchedCombo = checkCombinationTerms(normalized)
             if (matchedCombo != null) {
                 return MatchResult.Blocked(matchedCombo, MatchType.BUILT_IN_KEYWORD, MatchSource.NONE)
             }
@@ -923,10 +1178,9 @@ class KeywordMatcher(
      * (bikini, lingerie, pics, ...): "woman bikini", "girl pics". This catches
      * searches clearly heading toward sexualized content in NORMAL mode without
      * blocking the halves individually; in Strict Mode the individual terms
-     * already block. Reuses the same word-boundary rule as checkKeywords
-     * (short words <= 4 letters need token boundaries), so "hottest" never
-     * counts as "hot", "brass" never counts as "bra", and "button" never
-     * counts as "butt".
+     * already block. Reuses the same whole-word rule as checkKeywords, so
+     * "hottest" never counts as "hot", "brass" never counts as "bra", and
+     * "button" never counts as "butt".
      */
     private fun checkCombinationTerms(lowercaseText: String): String? {
         val generic = BlockRepository.COMBINATION_GENERIC_TERMS
@@ -934,7 +1188,7 @@ class KeywordMatcher(
         if (generic.isEmpty() || risky.isEmpty()) return null
         var genericHit: String? = null
         for (term in generic) {
-            if (containsKeyword(lowercaseText, term, protectShortWords = true)) {
+            if (containsKeyword(lowercaseText, term, isPlainWordKeyword(term))) {
                 genericHit = term
                 // Some terms are BOTH a generic and a risky half ("beach"): a
                 // term must never self-combine, so a bare "beach" stays
@@ -950,7 +1204,7 @@ class KeywordMatcher(
         for (term in risky) {
             // Self-combination guard: a bare "beach" must never block.
             if (term == genericHit) continue
-            if (containsKeyword(lowercaseText, term, protectShortWords = true)) {
+            if (containsKeyword(lowercaseText, term, isPlainWordKeyword(term))) {
                 return "$genericHit + $term"
             }
         }
@@ -972,38 +1226,19 @@ class KeywordMatcher(
     }
 
     private fun checkKeywords(
-        lowercaseText: String,
-        keywords: Set<String>,
-        protectShortWords: Boolean = false
+        normalizedText: String,
+        keywords: Set<String>
     ): String? {
         if (keywords.isEmpty()) return null
-        // The per-keyword scan runs in the original longest-first order; the
-        // sorted list is cached (the previous per-call sort is gone). Results
-        // are identical to the original implementation.
-        for (keyword in cacheFor(keywords).sorted) {
-            if (containsKeyword(lowercaseText, keyword, protectShortWords)) {
-                return keyword
+        // The per-keyword scan runs in the original longest-first order; each
+        // entry carries its precomputed normalized form + boundary flag, so
+        // there is no per-call normalization, sort, or classification.
+        for (entry in cacheFor(keywords).entries) {
+            if (containsKeyword(normalizedText, entry.normalized, entry.needsBoundary)) {
+                return entry.original
             }
         }
         return null
-    }
-
-    private fun containsKeyword(text: String, keyword: String, protectShortWords: Boolean): Boolean {
-        var start = text.indexOf(keyword)
-        while (start >= 0) {
-            val end = start + keyword.length
-            // Word-boundary protection for short keywords (<= 4 letters):
-            // "sex" never matches "sexy", "bra" never matches "brass", and
-            // "butt" never matches "button"/"butter". Longer phrases
-            // ("anal sex", "see through") are unambiguous and stay substring.
-            val requiresBoundary = protectShortWords &&
-                (keyword.length <= 4 || keyword in boundaryProtectedKeywords)
-            val beforeIsWord = start > 0 && text[start - 1].isLetterOrDigit()
-            val afterIsWord = end < text.length && text[end].isLetterOrDigit()
-            if (!requiresBoundary || (!beforeIsWord && !afterIsWord)) return true
-            start = text.indexOf(keyword, start + 1)
-        }
-        return false
     }
 
     /**

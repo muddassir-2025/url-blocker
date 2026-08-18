@@ -106,7 +106,7 @@ object TodoNotifier {
                 NotificationChannel(
                     CHANNEL_ALARM_ID,
                     context.getString(R.string.todo_alarm_channel),
-                    NotificationManager.IMPORTANCE_MAX
+                    NotificationManager.IMPORTANCE_HIGH
                 ).apply {
                     description = context.getString(R.string.todo_alarm_channel_desc)
                     // Silent tone + no vibration: the service supplies the real

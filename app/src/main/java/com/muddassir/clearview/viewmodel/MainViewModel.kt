@@ -108,12 +108,6 @@ class MainViewModel : ViewModel() {
         // only explicitly from the App Lock card's "Set" button.
     }
 
-    /** Unlock the app (used after password verified). */
-    fun unlockApp() {
-        isAppLocked = false
-        appLockTriggered = false
-    }
-
     /** Clear the password and unlock. */
     fun clearAppPassword() {
         repository?.clearPassword()
@@ -199,11 +193,6 @@ class MainViewModel : ViewModel() {
         refreshYoutubeTestKeywords()
     }
 
-    fun clearYoutubeTestKeywords() {
-        youtubeTestKeywordRepository?.clearKeywords()
-        refreshYoutubeTestKeywords()
-    }
-
     private fun refreshYoutubeTestKeywords() {
         youtubeTestKeywords.clear()
         youtubeTestKeywords.addAll((youtubeTestKeywordRepository?.getKeywords() ?: emptySet()).sorted())
@@ -264,9 +253,6 @@ class MainViewModel : ViewModel() {
     var isDeviceOwner by mutableStateOf(false)
         private set
 
-    var isUninstallBlocked by mutableStateOf(false)
-        private set
-
     fun checkDeviceAdminStatus(context: Context) {
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val component = ComponentName(context, com.muddassir.clearview.receiver.DeviceAdminReceiver::class.java)
@@ -283,25 +269,12 @@ class MainViewModel : ViewModel() {
             val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 isDeviceOwner = dpm.isDeviceOwnerApp(context.packageName)
-                if (isDeviceOwner) {
-                    val component = ComponentName(context, com.muddassir.clearview.receiver.DeviceAdminReceiver::class.java)
-                    isUninstallBlocked = try {
-                        // setUninstallBlocked doesn't have a getter, so we infer from admin status + owner
-                        dpm.isAdminActive(component) && isDeviceOwner
-                    } catch (e: Exception) {
-                        false
-                    }
-                } else {
-                    isUninstallBlocked = false
-                }
             } else {
                 isDeviceOwner = false
-                isUninstallBlocked = false
             }
         } catch (e: Exception) {
             android.util.Log.e("MainViewModel", "Failed to check Device Owner: ${e.message}")
             isDeviceOwner = false
-            isUninstallBlocked = false
         }
     }
 
@@ -340,7 +313,6 @@ class MainViewModel : ViewModel() {
             //    device owner app itself.
             dpm.clearDeviceOwnerApp(context.packageName)
             isDeviceOwner = false
-            isUninstallBlocked = false
             checkDeviceAdminStatus(context)
             android.util.Log.i("MainViewModel", "Device Owner removed — uninstall/updates allowed again")
         } catch (e: Exception) {
@@ -387,11 +359,6 @@ class MainViewModel : ViewModel() {
 
     fun removeKeyword(keyword: String) {
         repository?.removeUserKeyword(keyword)
-        refreshKeywords()
-    }
-
-    fun editKeyword(oldKeyword: String, newKeyword: String) {
-        repository?.replaceUserKeyword(oldKeyword, newKeyword)
         refreshKeywords()
     }
 

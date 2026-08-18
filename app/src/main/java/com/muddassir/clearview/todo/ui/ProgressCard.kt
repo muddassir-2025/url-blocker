@@ -66,6 +66,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
@@ -249,7 +250,8 @@ private fun NameInputStep(
 ) {
     var showFromPicker by remember { mutableStateOf(false) }
     var showToPicker by remember { mutableStateOf(false) }
-    val dateFmt = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault())
+    val locale = LocalConfiguration.current.locales[0]
+    val dateFmt = DateTimeFormatter.ofPattern("MMM d, yyyy", locale)
 
     Column(
         modifier = Modifier
@@ -400,6 +402,8 @@ private fun CardPreviewStep(
     // The score is always the range's own v2 score — the card is a
     // self-contained analytics dashboard for the selected period.
     val rendered = rememberProgressCardImage(stats, name, context, isStory)
+    val cardSavedMsg = stringResource(R.string.progress_card_saved)
+    val cardSaveFailedMsg = stringResource(R.string.progress_card_save_failed)
 
     // Pre-Android-10 gallery save goes through the system save dialog (SAF);
     // Android 10+ writes straight into MediaStore Pictures/ClearView.
@@ -410,9 +414,7 @@ private fun CardPreviewStep(
             val ok = writePngToUri(context, uri, rendered.bitmap)
             Toast.makeText(
                 context,
-                context.getString(
-                    if (ok) R.string.progress_card_saved else R.string.progress_card_save_failed
-                ),
+                if (ok) cardSavedMsg else cardSaveFailedMsg,
                 Toast.LENGTH_SHORT
             ).show()
         }
@@ -458,10 +460,7 @@ private fun CardPreviewStep(
                         val ok = saveCardToMediaStore(context, rendered.bitmap)
                         Toast.makeText(
                             context,
-                            context.getString(
-                                if (ok) R.string.progress_card_saved
-                                else R.string.progress_card_save_failed
-                            ),
+                            if (ok) cardSavedMsg else cardSaveFailedMsg,
                             Toast.LENGTH_SHORT
                         ).show()
                     } else {

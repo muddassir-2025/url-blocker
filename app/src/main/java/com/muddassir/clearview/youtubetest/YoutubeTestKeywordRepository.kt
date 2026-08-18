@@ -44,10 +44,6 @@ class YoutubeTestKeywordRepository(context: Context) {
         prefs.edit().putStringSet(KEY, current).apply()
     }
 
-    fun clearKeywords() {
-        prefs.edit().remove(KEY).apply()
-    }
-
     companion object {
         private const val PREFS_NAME = "yt_chrome_test_prefs"
         private const val KEY = "youtube_test_keywords"

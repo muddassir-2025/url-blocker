@@ -13,12 +13,10 @@
     <string name="widget_quran_copied">Verse copied to clipboard</string>
     <string name="widget_quran_refreshing">Picking a new verse…</string>
     <string name="quran_verse_header">Quran Reminder</string>
-    <string name="quran_verse_loading">Loading verse…</string>
     <string name="quran_verse_unavailable">Verses are being downloaded. Check back in a moment.</string>
     <string name="quran_tab">Quran</string>
     <string name="media_tab">Media</string>
     <string name="live_tab">Live</string>
-    <string name="quran_share">Share verse</string>
     <string name="quran_share_via">Share verse via</string>
     <string name="quran_bookmark">Bookmark</string>
     <string name="quran_bookmarked">Verse bookmarked</string>
@@ -41,7 +39,6 @@
     <string name="media_notification_channel_desc">New videos from your saved channels</string>
     <string name="quran_verse_refresh_frequency">New verse every</string>
     <string name="quran_verse_hour_short">%1$d hr</string>
-    <string name="quran_verse_surah">Surah %1$s</string>
     <string name="quran_verse_reference">Quran %1$d:%2$d</string>
     <string name="quran_more_options">More options</string>
     <string name="quran_settings_title">Settings</string>
@@ -147,7 +144,7 @@
     <string name="dhikr_counter_set_target">Set target count</string>
     <string name="dhikr_counter_set_target_for">Target for %1$s: %2$s</string>
     <string name="dhikr_counter_target_label">Target count</string>
-    <string name="dhikr_counter_target_value">Target %1$s</string>
+    <string name="dhikr_counter_target_value">Target %1$d</string>
     <string name="dhikr_counter_target_custom">Custom count</string>
     <string name="dhikr_counter_reset_current">Reset current dhikr</string>
     <string name="dhikr_counter_reset_all">Reset all progress</string>
@@ -249,7 +246,6 @@
     <string name="todo_snooze_10m">10 minutes</string>
     <string name="todo_snooze_30m">30 minutes</string>
     <string name="todo_snooze_1h">1 hour</string>
-    <string name="todo_snooze_tomorrow">Tomorrow (9:00 AM)</string>
     <string name="todo_snooze_custom">Custom</string>
     <string name="todo_snooze_custom_minutes">Minutes</string>
     <string name="todo_weekly_progress">Weekly Progress</string>
@@ -263,19 +259,10 @@
     <string name="todo_weekly_insights">Weekly Insights</string>
     <string name="todo_insight_best_day">%1$s — %2$d%% completed</string>
     <string name="todo_insight_improvement">%1$s%% vs last week</string>
-    <plurals name="todo_insight_completed">
-        <item quantity="one">%1$d Todo completed</item>
-        <item quantity="other">%1$d Todos completed</item>
-    </plurals>
-    <string name="todo_insight_consistency">%1$d / 7 days active</string>
     <plurals name="todo_streak">
         <item quantity="one">%1$d day streak</item>
         <item quantity="other">%1$d day streak</item>
     </plurals>
-    <string name="todo_productive_morning">Morning</string>
-    <string name="todo_productive_afternoon">Afternoon</string>
-    <string name="todo_productive_evening">Evening</string>
-    <string name="todo_productive_night">Night</string>
     <string name="todo_graph_completed">Completed Todos</string>
     <string name="todo_graph_incomplete">Incomplete Todos</string>
     <string name="todo_graph_total">Total Todos</string>
@@ -307,7 +294,6 @@
     <string name="todo_target_label">Target todos per day</string>
     <string name="todo_upcoming_empty">Nothing scheduled ahead</string>
     <string name="todo_upcoming_section">Upcoming</string>
-    <string name="todo_upcoming_chip">Upcoming</string>
     <string name="todo_missed_chip">Missed</string>
     <string name="todo_today_all_done">All done for today! 🎉</string>
     <string name="todo_history_completed_section">Completed</string>
@@ -414,8 +400,6 @@
     <string name="quran_settings_section_quran">Quran / New Verse</string>
 
     <!-- In-app media player (YouTube IFrame API) -->
-    <string name="media_player_buffering">Loading video…</string>
-    <string name="media_player_tap_to_play">Tap to play</string>
     <string name="media_player_error_not_found">This video is unavailable or was removed.</string>
     <string name="media_player_error_embed_restricted">This video can\'t be embedded. The uploader has disabled embedding, so YouTube blocks in-app playback.</string>
     <string name="media_player_error_playback">This video can\'t be played in the in-app player. Try a different video.</string>
