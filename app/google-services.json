@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "843469386953",
+    "project_id": "clearview-28413",
+    "storage_bucket": "clearview-28413.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:843469386953:android:d9e293789041e69e45c918",
+        "android_client_info": {
+          "package_name": "com.muddassir.clearview"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC4b60yMkLUPuN0UaDml2pJ817RGGRgKZU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

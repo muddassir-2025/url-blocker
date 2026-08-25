@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.UserManager
 import android.provider.Settings
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -214,25 +215,56 @@ class MainViewModel : ViewModel() {
      */
     fun cleanBrowsingFamilyHostname(): String = "family-filter-dns.cleanbrowsing.org"
 
-    fun openPrivateDnsSettings(context: Context) {
-        try {
-            // Try the direct Private DNS intent first (works on most stock Android)
-            val intent = Intent("android.settings.PRIVATE_DNS_SETTINGS").apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-        } catch (e1: Exception) {
-            // Fallback: open Network & internet settings (Private DNS is a sub-menu here)
-            try {
-                android.util.Log.w("MainViewModel", "Direct Private DNS intent failed, trying Wireless settings: ${e1.message}")
-                val fallbackIntent = Intent(Settings.ACTION_WIRELESS_SETTINGS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(fallbackIntent)
-            } catch (e2: Exception) {
-                android.util.Log.e("MainViewModel", "Failed to open any network settings: ${e2.message}")
-            }
+    fun setPrivateDnsProvider(context: Context, hostname: String): Boolean {
+        if (hostname != cloudflareFamilyHostname() && hostname != cleanBrowsingFamilyHostname()) {
+            android.util.Log.e("MainViewModel", "Rejected unauthorized DNS hostname: $hostname")
+            return false
         }
+        
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                val component = ComponentName(context, com.muddassir.clearview.receiver.DeviceAdminReceiver::class.java)
+                
+                if (dpm.isDeviceOwnerApp(context.packageName)) {
+                    val result = dpm.setGlobalPrivateDnsModeSpecifiedHost(component, hostname)
+                    if (result == DevicePolicyManager.PRIVATE_DNS_SET_NO_ERROR) {
+                        dpm.addUserRestriction(component, UserManager.DISALLOW_CONFIG_PRIVATE_DNS)
+                        return true
+                    } else {
+                        android.util.Log.e("MainViewModel", "Failed to set Private DNS: DPM error code $result")
+                        return false
+                    }
+                } else {
+                    android.util.Log.e("MainViewModel", "Cannot set Private DNS: Not Device Owner")
+                    return false
+                }
+            } else {
+                android.util.Log.e("MainViewModel", "Private DNS requires API 29")
+                return false
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainViewModel", "Exception setting Private DNS", e)
+            return false
+        }
+    }
+
+    fun getPrivateDnsProvider(context: Context): String? {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                val component = ComponentName(context, com.muddassir.clearview.receiver.DeviceAdminReceiver::class.java)
+                if (dpm.isDeviceOwnerApp(context.packageName)) {
+                    val mode = dpm.getGlobalPrivateDnsMode(component)
+                    if (mode == DevicePolicyManager.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME) {
+                        return dpm.getGlobalPrivateDnsHost(component)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainViewModel", "Exception getting Private DNS", e)
+        }
+        return null
     }
 
     // ── Accessibility ──────────────────────────────────────────────

@@ -462,9 +462,23 @@ class KeywordMatcher(
         // Permanent built-in protection (no user toggle): any strong incognito
         // signal inside a Chrome package is blocked immediately, regardless of
         // URL/content. This prevents bypassing the filter via private mode.
+        //
+        // EXCEPTION: YouTube in incognito is NOT blanket-blocked because the
+        // LongVideoBlockCoordinator (or normal keyword/channel checks) already
+        // protect YouTube with proper watch-page overlays.  A blanket block here
+        // would override those granular checks and block EVERY video.
+        //
+        // NOTE: In incognito, Chrome hides the URL from the accessibility tree
+        // (snapshot.url is null), so we detect YouTube from the window title
+        // which Chrome DOES expose ("Video Title - YouTube").
         if (snapshot.incognito && isChromePackage(packageName)) {
-            Log.i(TAG, "INCOGNITO MODE DETECTED in $packageName — blocking all browsing")
-            return MatchResult.Blocked("Incognito browsing", MatchType.INCOGNITO, MatchSource.NONE)
+            val onYouTube = ContentExtractor.isYouTubeDomain(snapshot.url) ||
+                ContentExtractor.isYouTubeTitle(snapshot.title)
+            if (!onYouTube) {
+                Log.i(TAG, "INCOGNITO MODE DETECTED in $packageName — blocking all browsing")
+                return MatchResult.Blocked("Incognito browsing", MatchType.INCOGNITO, MatchSource.NONE)
+            }
+            Log.i(TAG, "INCOGNITO MODE in $packageName but on YouTube — falling through to keyword/channel checks")
         }
 
         // ── BLOCK SHORTS (Block tab toggle) ──────────────────────────
