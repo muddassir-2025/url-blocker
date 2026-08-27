@@ -85,10 +85,9 @@ class WatchProgressStore(context: Context) {
         const val WATCHED_THRESHOLD = 0.9f
         const val POS_PREFIX = "pos_"
         const val DUR_PREFIX = "dur_"
-        // Reactive revision: bumped on every mutation so feeds can recompose filter without polling
-        var revision = androidx.compose.runtime.mutableIntStateOf(0)
-            private set
-        fun bumpRevision() { revision.intValue++ }
+        private val _revisionFlow = kotlinx.coroutines.flow.MutableStateFlow(0)
+        val revisionFlow: kotlinx.coroutines.flow.StateFlow<Int> = _revisionFlow
+        fun bumpRevision() { _revisionFlow.value++ }
     }
     private fun bump() { bumpRevision() }
 }

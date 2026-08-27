@@ -443,9 +443,9 @@ fun MediaTab(
     // ALWAYS shows every one of its videos in playlist order — the All Feed's
     // date / content / watch / sort filters never apply to it (different
     // context, different behavior).
-    val watchRevision = WatchProgressStore.revision.intValue
+    val watchRev by androidx.compose.runtime.collectAsState(WatchProgressStore.revisionFlow)
     val displayed = remember(
-        channelVideos, feedFilter, manualIds, feedIsUserPlaylist, feedIsPlaylist, watchRevision
+        channelVideos, feedFilter, manualIds, feedIsUserPlaylist, feedIsPlaylist, watchRev
     ) {
         when {
             feedIsUserPlaylist -> {
