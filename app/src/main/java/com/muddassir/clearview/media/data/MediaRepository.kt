@@ -765,6 +765,9 @@ class MediaRepository(context: Context) {
                     .put("isLive", v.isLive)
                     .put("durationSeconds", v.durationSeconds)
                     .put("isOfflineAudio", v.isOfflineAudio)
+                    .put("platform", v.platform.name)
+                    .put("instagramType", v.instagramType?.name ?: JSONObject.NULL)
+                    .put("mediaUrl", v.mediaUrl ?: JSONObject.NULL)
             )
         }
         val obj = JSONObject()
@@ -778,6 +781,11 @@ class MediaRepository(context: Context) {
         return (0 until arr.length()).mapNotNull { i ->
             try {
                 val o = arr.getJSONObject(i)
+                val platformStr = o.optString("platform", "YOUTUBE")
+                val platform = runCatching { MediaPlatform.valueOf(platformStr) }.getOrDefault(MediaPlatform.YOUTUBE)
+                val igTypeStr = o.optString("instagramType", "").takeIf { it.isNotBlank() }
+                val igType = igTypeStr?.let { runCatching { InstagramMediaType.valueOf(it) }.getOrNull() }
+                val mediaUrl = o.optString("mediaUrl", "").takeIf { it.isNotBlank() }
                 MediaVideo(
                     videoId = o.getString("videoId"),
                     title = o.optString("title", ""),
@@ -789,7 +797,10 @@ class MediaRepository(context: Context) {
                     isShort = o.optBoolean("isShort", false),
                     isLive = o.optBoolean("isLive", false),
                     durationSeconds = o.optLong("durationSeconds", 0L),
-                    isOfflineAudio = o.optBoolean("isOfflineAudio", false)
+                    isOfflineAudio = o.optBoolean("isOfflineAudio", false),
+                    platform = platform,
+                    instagramType = igType,
+                    mediaUrl = mediaUrl
                 )
             } catch (e: Exception) {
                 null

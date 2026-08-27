@@ -60,11 +60,11 @@ fun applyFeedFilter(
         }
         val typeOk = when (filter.content) {
             FeedContentFilter.ALL -> true
-            FeedContentFilter.VIDEOS -> !v.isShort
-            FeedContentFilter.SHORTS -> v.isShort
+            FeedContentFilter.VIDEOS -> !v.isShort && v.platform == com.muddassir.clearview.media.model.MediaPlatform.YOUTUBE
+            FeedContentFilter.SHORTS -> v.isShort && v.platform == com.muddassir.clearview.media.model.MediaPlatform.YOUTUBE
             FeedContentFilter.LIVE -> v.isLive
-            FeedContentFilter.REELS -> v.instagramType == com.muddassir.clearview.media.model.InstagramMediaType.REEL
-            FeedContentFilter.IMAGE_POSTS -> v.instagramType == com.muddassir.clearview.media.model.InstagramMediaType.IMAGE
+            FeedContentFilter.REELS -> v.instagramType == com.muddassir.clearview.media.model.InstagramMediaType.REEL || (v.platform == com.muddassir.clearview.media.model.MediaPlatform.INSTAGRAM && v.isShort)
+            FeedContentFilter.IMAGE_POSTS -> v.instagramType == com.muddassir.clearview.media.model.InstagramMediaType.IMAGE || (v.platform == com.muddassir.clearview.media.model.MediaPlatform.INSTAGRAM && !v.isShort)
             FeedContentFilter.DOWNLOADS -> false
         } && platformOk
         val p = progressOf(v.videoId)

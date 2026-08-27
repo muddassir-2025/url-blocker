@@ -101,6 +101,7 @@ data class FeedFilter(
     /** True when anything differs from the defaults (drives the active indicator). */
     val isActive: Boolean
         get() = date != FeedDateFilter.LAST_3_DAYS ||
+            platform != FeedPlatformFilter.ALL ||
             content != FeedContentFilter.ALL ||
             sort != FeedSortOrder.NEWEST_FIRST ||
             watchStatus != FeedWatchStatus.UNWATCHED ||

@@ -1755,13 +1755,44 @@ private fun InstagramPlayer(
     video: MediaVideo,
     modifier: Modifier = Modifier
 ) {
-    val rawId = video.videoId.removePrefix("ig_")
-    val channelUser = video.channelId.removePrefix("ig_")
-    val url = when {
-        rawId.contains("_reels") -> "https://www.instagram.com/$channelUser/reels/"
-        rawId.contains("_posts") -> "https://www.instagram.com/$channelUser/"
-        video.isShort || video.instagramType == InstagramMediaType.REEL -> "https://www.instagram.com/reel/$rawId/embed/"
-        else -> "https://www.instagram.com/p/$rawId/embed/"
+    val isVideo = video.isShort || video.instagramType == InstagramMediaType.REEL ||
+        (video.mediaUrl != null && video.mediaUrl.contains(".mp4"))
+    val directUrl = video.mediaUrl ?: video.thumbnailUrl
+
+    val htmlContent = if (isVideo && directUrl.isNotBlank()) {
+        """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+            <style>
+                * { margin:0; padding:0; box-sizing:border-box; }
+                html, body { width:100%; height:100%; background:#000; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+                video { width:100%; height:100%; object-fit:contain; }
+            </style>
+        </head>
+        <body>
+            <video src="$directUrl" poster="${video.thumbnailUrl}" controls autoplay playsinline loop></video>
+        </body>
+        </html>
+        """.trimIndent()
+    } else {
+        """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+            <style>
+                * { margin:0; padding:0; box-sizing:border-box; }
+                html, body { width:100%; height:100%; background:#000; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+                img { max-width:100%; max-height:100%; object-fit:contain; }
+            </style>
+        </head>
+        <body>
+            <img src="${video.thumbnailUrl}" />
+        </body>
+        </html>
+        """.trimIndent()
     }
 
     AndroidView(
@@ -1770,16 +1801,12 @@ private fun InstagramPlayer(
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
-                settings.userAgentString =
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
                 webViewClient = WebViewClient()
-                loadUrl(url)
+                loadDataWithBaseURL("https://instagram.com", htmlContent, "text/html", "UTF-8", null)
             }
         },
         update = { webView ->
-            if (webView.url != url) {
-                webView.loadUrl(url)
-            }
+            webView.loadDataWithBaseURL("https://instagram.com", htmlContent, "text/html", "UTF-8", null)
         },
         modifier = modifier
     )
