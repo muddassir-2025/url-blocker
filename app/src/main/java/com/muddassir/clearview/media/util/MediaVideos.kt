@@ -32,6 +32,7 @@ object MediaVideos {
                     .put("platform", v.platform.name)
                     .put("instagramType", v.instagramType?.name ?: JSONObject.NULL)
                     .put("mediaUrl", v.mediaUrl ?: JSONObject.NULL)
+                    .put("instagramUrl", v.instagramUrl ?: JSONObject.NULL)
             )
         }
         return arr.toString()
@@ -63,7 +64,8 @@ object MediaVideos {
                             isOfflineAudio = o.optBoolean("isOfflineAudio", false),
                             platform = runCatching { com.muddassir.clearview.media.model.MediaPlatform.valueOf(o.optString("platform","YOUTUBE")) }.getOrDefault(com.muddassir.clearview.media.model.MediaPlatform.YOUTUBE),
                             instagramType = o.optString("instagramType","").takeIf { it.isNotBlank() }?.let { runCatching { com.muddassir.clearview.media.model.InstagramMediaType.valueOf(it) }.getOrNull() },
-                            mediaUrl = o.optString("mediaUrl", "").takeIf { it.isNotBlank() }
+                            mediaUrl = o.optString("mediaUrl", "").takeIf { it.isNotBlank() },
+                            instagramUrl = o.optString("instagramUrl", "").takeIf { it.isNotBlank() }
                         )
                     }
                 } catch (e: Exception) {

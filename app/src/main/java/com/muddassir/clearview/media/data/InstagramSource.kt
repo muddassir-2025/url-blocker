@@ -9,6 +9,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 sealed class InstagramFeedResult {
     data class Success(
@@ -27,12 +28,218 @@ sealed class InstagramFeedResult {
  */
 interface InstagramSource {
     val name: String
-    suspend fun fetchProfile(username: String): InstagramFeedResult
+    suspend fun fetchProfile(usernameOrUrl: String): InstagramFeedResult
 }
 
 /**
- * Mobile Web Profile API provider. Retrieves public Instagram user metadata,
- * direct CDN image URLs, and direct .mp4 video stream URLs without authentication.
+ * Direct RSS provider: used when a direct RSS feed URL is provided
+ * (e.g. an RSS.app feed URL like https://rss.app/feeds/xxx.xml or an RSS-Bridge URL).
+ */
+class DirectRssInstagramSource : InstagramSource {
+    override val name: String = "DirectRss"
+
+    override suspend fun fetchProfile(usernameOrUrl: String): InstagramFeedResult = withContext(Dispatchers.IO) {
+        val trimmed = usernameOrUrl.trim()
+        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+            return@withContext InstagramFeedResult.Error("Not an HTTP URL")
+        }
+        var connection: HttpURLConnection? = null
+        try {
+            connection = (URL(trimmed).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 12_000
+                readTimeout = 15_000
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+                setRequestProperty("Accept", "application/rss+xml, application/xml, text/xml, application/atom+xml, */*")
+            }
+            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                val xml = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val parsed = InstagramRssParser.parse(xml, "Instagram")
+                if (parsed != null && parsed.items.isNotEmpty()) {
+                    return@withContext InstagramFeedResult.Success(
+                        username = parsed.username,
+                        fullName = parsed.title,
+                        avatarUrl = parsed.avatarUrl,
+                        items = parsed.items
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.d("DirectRss", "Direct RSS fetch failed: ${e.message}")
+        } finally {
+            connection?.disconnect()
+        }
+        InstagramFeedResult.Error("Could not fetch or parse direct RSS feed")
+    }
+}
+
+/**
+ * Public RSS-Bridge provider: queries public RSS-Bridge instances for public
+ * Instagram accounts and parses the resulting Atom/RSS feed into [MediaVideo] items.
+ */
+class PublicRssBridgeInstagramSource : InstagramSource {
+    override val name: String = "PublicRssBridge"
+
+    companion object {
+        private const val TAG = "PublicRssBridge"
+        private val BRIDGES = listOf(
+            "https://rss-bridge.org/bridge01/",
+            "https://bridge.suumitsu.eu/",
+            "https://rss.bridges.im/"
+        )
+    }
+
+    override suspend fun fetchProfile(usernameOrUrl: String): InstagramFeedResult = withContext(Dispatchers.IO) {
+        val cleanUser = usernameOrUrl.removePrefix("@").trim()
+        if (cleanUser.startsWith("http")) return@withContext InstagramFeedResult.Error("Username required")
+
+        for (bridge in BRIDGES) {
+            val url = "${bridge}?action=display&bridge=InstagramBridge&context=Username&u=${URLEncoder.encode(cleanUser, "UTF-8")}&format=Atom"
+            var connection: HttpURLConnection? = null
+            try {
+                connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 8_000
+                    readTimeout = 12_000
+                    requestMethod = "GET"
+                    setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    setRequestProperty("Accept", "application/atom+xml, application/xml, text/xml, */*")
+                }
+                if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                    val xml = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val parsed = InstagramRssParser.parse(xml, cleanUser)
+                    if (parsed != null && parsed.items.isNotEmpty()) {
+                        Log.d(TAG, "Successfully fetched ${parsed.items.size} posts via $bridge")
+                        return@withContext InstagramFeedResult.Success(
+                            username = parsed.username,
+                            fullName = parsed.title,
+                            avatarUrl = parsed.avatarUrl,
+                            items = parsed.items
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Bridge $bridge failed: ${e.message}")
+            } finally {
+                connection?.disconnect()
+            }
+        }
+        InstagramFeedResult.Error("Public RSS bridges failed for $cleanUser")
+    }
+}
+
+/**
+ * Backend Proxy provider: fetches Instagram feed data via the ClearView backend.
+ * The backend handles server-side feed aggregation/caching and returns normalized JSON.
+ */
+class BackendInstagramSource(private val backendBaseUrl: String) : InstagramSource {
+    override val name: String = "BackendProxy"
+
+    companion object {
+        private const val TAG = "BackendIGSource"
+        private const val CONNECT_TIMEOUT = 12_000
+        private const val READ_TIMEOUT = 15_000
+    }
+
+    override suspend fun fetchProfile(usernameOrUrl: String): InstagramFeedResult = withContext(Dispatchers.IO) {
+        val cleanUsername = usernameOrUrl.removePrefix("@").trim().lowercase()
+        if (cleanUsername.startsWith("http")) return@withContext InstagramFeedResult.Error("Username required")
+        val encodedUsername = URLEncoder.encode(cleanUsername, "UTF-8")
+        val apiUrl = "${backendBaseUrl.trimEnd('/')}/api/instagram/feed?username=$encodedUsername"
+        var connection: HttpURLConnection? = null
+        try {
+            connection = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = CONNECT_TIMEOUT
+                readTimeout = READ_TIMEOUT
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("User-Agent", "ClearView-Android")
+            }
+
+            val responseCode = connection.responseCode
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                return@withContext InstagramFeedResult.Error("Backend returned $responseCode")
+            }
+
+            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val root = JSONObject(body)
+
+            val feedUsername = root.optString("username", cleanUsername)
+            val fullName = root.optString("fullName", feedUsername)
+            val avatarUrl = root.optString("avatarUrl", "").takeIf { it.isNotBlank() }
+            val channelId = "ig_${feedUsername.lowercase()}"
+
+            val postsArr = root.optJSONArray("posts")
+            if (postsArr == null || postsArr.length() == 0) {
+                return@withContext InstagramFeedResult.Error("No posts returned for $cleanUsername")
+            }
+
+            val posts = mutableListOf<MediaVideo>()
+            for (i in 0 until postsArr.length()) {
+                val post = postsArr.optJSONObject(i) ?: continue
+                val postId = post.optString("id", "").ifBlank { "ig_${cleanUsername}_$i" }
+                val typeStr = post.optString("type", "IMAGE").uppercase()
+                val igType = when (typeStr) {
+                    "REEL" -> InstagramMediaType.REEL
+                    "VIDEO" -> InstagramMediaType.VIDEO
+                    "CAROUSEL" -> InstagramMediaType.CAROUSEL
+                    else -> InstagramMediaType.IMAGE
+                }
+                val isVideo = igType == InstagramMediaType.REEL || igType == InstagramMediaType.VIDEO
+                val caption = post.optString("caption", "")
+                val title = caption.lineSequence().firstOrNull { it.isNotBlank() }?.take(120)
+                    ?: "$fullName ${if (isVideo) "Reel" else "Post"}"
+                val thumbnailUrl = post.optString("thumbnailUrl", "").ifBlank {
+                    post.optString("imageUrl", "")
+                }
+                val mediaUrl = post.optString("mediaUrl", "").takeIf { it.isNotBlank() }
+                val instagramUrl = post.optString("instagramUrl", "").takeIf { it.isNotBlank() }
+                val timestamp = post.optLong("timestamp", 0L).let {
+                    if (it > 0 && it < 10_000_000_000L) it * 1000L else it
+                }
+                val likeCount = post.optLong("likeCount", 0L)
+
+                posts.add(
+                    MediaVideo(
+                        videoId = if (postId.startsWith("ig_")) postId else "ig_$postId",
+                        title = title,
+                        channelId = channelId,
+                        channelName = fullName,
+                        publishedAtEpochMillis = if (timestamp > 0) timestamp else (System.currentTimeMillis() - (i * 3600_000L)),
+                        thumbnailUrl = thumbnailUrl,
+                        viewCount = likeCount,
+                        isShort = isVideo,
+                        isLive = false,
+                        durationSeconds = 0L,
+                        platform = MediaPlatform.INSTAGRAM,
+                        instagramType = igType,
+                        mediaUrl = mediaUrl,
+                        instagramUrl = instagramUrl
+                    )
+                )
+            }
+
+            if (posts.isNotEmpty()) {
+                Log.d(TAG, "Backend returned ${posts.size} posts for $cleanUsername")
+                InstagramFeedResult.Success(
+                    username = feedUsername,
+                    fullName = fullName,
+                    avatarUrl = avatarUrl,
+                    items = posts
+                )
+            } else {
+                InstagramFeedResult.Error("No valid posts parsed for $cleanUsername")
+            }
+        } catch (e: Exception) {
+            InstagramFeedResult.Error("Backend error: ${e.message}")
+        } finally {
+            connection?.disconnect()
+        }
+    }
+}
+
+/**
+ * Direct Web Profile API provider: retrieves public Instagram user metadata,
+ * timeline items, captions, and thumbnails without login or cookies.
  */
 class WebProfileInstagramSource : InstagramSource {
     override val name: String = "WebProfileApi"
@@ -43,8 +250,9 @@ class WebProfileInstagramSource : InstagramSource {
             "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
     }
 
-    override suspend fun fetchProfile(username: String): InstagramFeedResult = withContext(Dispatchers.IO) {
-        val cleanUsername = username.removePrefix("@").trim()
+    override suspend fun fetchProfile(usernameOrUrl: String): InstagramFeedResult = withContext(Dispatchers.IO) {
+        val cleanUsername = usernameOrUrl.removePrefix("@").trim()
+        if (cleanUsername.startsWith("http")) return@withContext InstagramFeedResult.Error("Username required")
         val url = "https://www.instagram.com/api/v1/users/web_profile_info/?username=$cleanUsername"
         var connection: HttpURLConnection? = null
         try {
@@ -81,6 +289,7 @@ class WebProfileInstagramSource : InstagramSource {
                             val shortcode = node.optString("shortcode")
                             if (shortcode.isBlank()) continue
                             val isVideo = node.optBoolean("is_video", false)
+                            val typename = node.optString("__typename", "")
                             val displayUrl = node.optString("display_url", "")
                             val videoUrl = node.optString("video_url", "").ifBlank { null }
                             val takenAt = node.optLong("taken_at_timestamp", 0L) * 1000L
@@ -88,11 +297,16 @@ class WebProfileInstagramSource : InstagramSource {
                             val captionText = captionEdges?.optJSONObject(0)?.optJSONObject("node")?.optString("text", "") ?: ""
                             val title = captionText.lineSequence().firstOrNull { it.isNotBlank() }?.take(120)
                                 ?: "$fullName ${if (isVideo) "Reel" else "Photo"}"
-                            val igType = if (isVideo) InstagramMediaType.REEL else InstagramMediaType.IMAGE
+                            val igType = when {
+                                typename == "GraphSidecar" -> InstagramMediaType.CAROUSEL
+                                isVideo -> InstagramMediaType.REEL
+                                else -> InstagramMediaType.IMAGE
+                            }
                             val views = node.optLong(
                                 "video_view_count",
                                 node.optJSONObject("edge_media_preview_like")?.optLong("count", 0L) ?: 0L
                             )
+                            val instagramUrl = "https://www.instagram.com/p/$shortcode/"
 
                             posts.add(
                                 MediaVideo(
@@ -108,7 +322,8 @@ class WebProfileInstagramSource : InstagramSource {
                                     durationSeconds = 0L,
                                     platform = MediaPlatform.INSTAGRAM,
                                     instagramType = igType,
-                                    mediaUrl = videoUrl ?: displayUrl
+                                    mediaUrl = if (isVideo) videoUrl else null,
+                                    instagramUrl = instagramUrl
                                 )
                             )
                         }

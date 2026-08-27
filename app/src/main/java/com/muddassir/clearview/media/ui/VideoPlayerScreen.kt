@@ -93,6 +93,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.viewinterop.AndroidView
 import com.muddassir.clearview.R
 import com.muddassir.clearview.media.data.MediaLibraryStore
@@ -1252,14 +1254,27 @@ private fun PlayerControlPanel(
                     }
                     // Audio download with its stateful label, mirroring the feed
                     // cards' ⋮ menu (Download audio / Cancel / Retry). Hidden once
-                    // offline (Play Offline owns that state) and for live streams
-                    // (they can't be downloaded).
-                    if (!isOffline && !isLive) {
+                    // offline (Play Offline owns that state), for live streams, and
+                    // for Instagram items.
+                    if (!isOffline && !isLive && video.platform != MediaPlatform.INSTAGRAM) {
                         DropdownMenuItem(
                             text = { Text(downloadMenuLabel(downloadStatus, false)) },
                             onClick = {
                                 showMoreMenu = false
                                 onDownloadMenuAction()
+                            }
+                        )
+                    }
+                    if (video.platform == MediaPlatform.INSTAGRAM && video.instagramUrl != null) {
+                        DropdownMenuItem(
+                            text = { Text("Open on Instagram") },
+                            onClick = {
+                                showMoreMenu = false
+                                try {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(video.instagramUrl)))
+                                } catch (_: ActivityNotFoundException) {
+                                    Toast.makeText(context, "Can't open link", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         )
                     }
@@ -1334,7 +1349,24 @@ private fun PlayerControlPanel(
         // Live broadcasts can't be downloaded, so the button is hidden for them.
         // The resolved audio size (≈ X MB) appears as soon as the stream is
         // resolved — before any bytes are downloaded.
-        if (!isLive) {
+        if (video.platform == MediaPlatform.INSTAGRAM) {
+            val igUrl = video.instagramUrl
+            if (!igUrl.isNullOrBlank()) {
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = {
+                        try {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(igUrl)))
+                        } catch (_: ActivityNotFoundException) {
+                            Toast.makeText(context, "Can't open link", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Open on Instagram")
+                }
+            }
+        } else if (!isLive) {
             val audioSize = AudioDownloads.pendingSizes[video.videoId]
             val sizeSuffix = if (audioSize != null && audioSize > 0L)
                 " · ≈ ${formatBytes(audioSize)}" else ""
@@ -1755,12 +1787,18 @@ private fun InstagramPlayer(
     video: MediaVideo,
     modifier: Modifier = Modifier
 ) {
-    val isVideo = video.isShort || video.instagramType == InstagramMediaType.REEL ||
+    val context = LocalContext.current
+    val isVideo = video.instagramType == InstagramMediaType.REEL ||
+        video.instagramType == InstagramMediaType.VIDEO ||
         (video.mediaUrl != null && video.mediaUrl.contains(".mp4"))
-    val directUrl = video.mediaUrl ?: video.thumbnailUrl
+    val hasDirectMedia = !video.mediaUrl.isNullOrBlank() &&
+        (video.mediaUrl.contains(".mp4") || video.mediaUrl.startsWith("http"))
 
-    val htmlContent = if (isVideo && directUrl.isNotBlank()) {
-        """
+    if (isVideo && hasDirectMedia) {
+        // Video with a direct media URL — play in an isolated WebView with NO
+        // Instagram base URL and ALL navigation blocked.
+        val directUrl = video.mediaUrl!!
+        val htmlContent = """
         <!DOCTYPE html>
         <html>
         <head>
@@ -1769,46 +1807,105 @@ private fun InstagramPlayer(
                 * { margin:0; padding:0; box-sizing:border-box; }
                 html, body { width:100%; height:100%; background:#000; overflow:hidden; display:flex; align-items:center; justify-content:center; }
                 video { width:100%; height:100%; object-fit:contain; }
+                .error { color:#aaa; font-family:sans-serif; text-align:center; padding:20px; }
             </style>
         </head>
         <body>
-            <video src="$directUrl" poster="${video.thumbnailUrl}" controls autoplay playsinline loop></video>
+            <video src="$directUrl" poster="${video.thumbnailUrl}" controls autoplay playsinline loop
+                   onerror="document.body.innerHTML='<div class=error>Video unavailable.<br>The media link may have expired.</div>'">
+            </video>
         </body>
         </html>
         """.trimIndent()
-    } else {
-        """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-            <style>
-                * { margin:0; padding:0; box-sizing:border-box; }
-                html, body { width:100%; height:100%; background:#000; overflow:hidden; display:flex; align-items:center; justify-content:center; }
-                img { max-width:100%; max-height:100%; object-fit:contain; }
-            </style>
-        </head>
-        <body>
-            <img src="${video.thumbnailUrl}" />
-        </body>
-        </html>
-        """.trimIndent()
-    }
 
-    AndroidView(
-        factory = { ctx ->
-            WebView(ctx).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.mediaPlaybackRequiresUserGesture = false
-                webViewClient = WebViewClient()
-                loadDataWithBaseURL("https://instagram.com", htmlContent, "text/html", "UTF-8", null)
+        AndroidView(
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    // CRITICAL: Block ALL navigation — never open Chrome or Instagram
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: android.webkit.WebView?,
+                            request: android.webkit.WebResourceRequest?
+                        ): Boolean = true // Block every navigation attempt
+                    }
+                    // Use null base URL — NOT instagram.com
+                    loadDataWithBaseURL(null, htmlContent, "text/html", "UTF-8", null)
+                }
+            },
+            modifier = modifier
+        )
+    } else {
+        // Image post, carousel, or video without direct media URL —
+        // render the thumbnail natively with Compose (no WebView at all)
+        Box(
+            modifier = modifier.background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            val thumbnailUrl = video.thumbnailUrl.takeIf { it.isNotBlank() }
+                ?: video.mediaUrl?.takeIf { it.isNotBlank() }
+
+            if (thumbnailUrl != null) {
+                RemoteImage(
+                    url = thumbnailUrl,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
+                )
+            } else {
+                // No image available — show placeholder
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Filled.MusicNote,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.5f),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Media unavailable",
+                        color = Color.White.copy(alpha = 0.6f),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
             }
-        },
-        update = { webView ->
-            webView.loadDataWithBaseURL("https://instagram.com", htmlContent, "text/html", "UTF-8", null)
-        },
-        modifier = modifier
-    )
+
+            // If this is a video/reel without a direct URL, show an explicit
+            // "Open on Instagram" button — never auto-navigate
+            if (isVideo && !hasDirectMedia) {
+                val igUrl = video.instagramUrl
+                if (igUrl != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.4f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Filled.PlayArrow,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(56.dp)
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            OutlinedButton(onClick = {
+                                try {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(igUrl))
+                                    )
+                                } catch (_: ActivityNotFoundException) {
+                                    Toast.makeText(context, "Can't open link", Toast.LENGTH_SHORT).show()
+                                }
+                            }) {
+                                Text("Open on Instagram", color = Color.White)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 

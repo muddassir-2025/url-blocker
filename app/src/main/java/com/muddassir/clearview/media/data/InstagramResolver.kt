@@ -1,25 +1,34 @@
 package com.muddassir.clearview.media.data
 
 import android.util.Log
-import com.muddassir.clearview.media.model.InstagramMediaType
-import com.muddassir.clearview.media.model.MediaPlatform
+import com.muddassir.clearview.backend.ClearViewBackendClient
 import com.muddassir.clearview.media.model.MediaVideo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
- * Resolves Instagram public profiles and fetches recent timeline reels/images.
+ * Resolves Instagram public profiles and fetches recent timeline media.
+ *
+ * Uses a prioritized list of [InstagramSource] providers:
+ * 1. DirectRssInstagramSource — for explicit RSS feed URLs (RSS.app, etc.)
+ * 2. BackendInstagramSource — server-side proxy
+ * 3. PublicRssBridgeInstagramSource — public RSS-Bridge instances
+ * 4. WebProfileInstagramSource — direct client-side scraper (fallback)
+ *
+ * If ALL sources fail, returns null so the caller can show an error.
+ * No dummy/fallback posts are ever generated.
  */
 object InstagramResolver {
 
     private const val TAG = "InstagramResolver"
 
-    private val sources: List<InstagramSource> = listOf(
-        WebProfileInstagramSource()
-    )
+    private val sources: List<InstagramSource>
+        get() = listOf(
+            DirectRssInstagramSource(),
+            BackendInstagramSource(ClearViewBackendClient.baseUrl),
+            PublicRssBridgeInstagramSource(),
+            WebProfileInstagramSource()
+        )
 
     data class InstagramProfile(
         val username: String,
@@ -29,18 +38,32 @@ object InstagramResolver {
     )
 
     /**
-     * Extracts a clean Instagram username from a handle (@name), full URL, or bare username.
+     * Extracts a clean Instagram username or detects an RSS feed URL.
+     * Returns null if the input doesn't look like an Instagram handle or RSS feed.
      */
     fun extractUsername(input: String): String? {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return null
-        if (trimmed.contains("instagram.com/") || trimmed.contains("instagr.am/")) {
-            val after = trimmed.substringAfter("instagram.com/").substringAfter("instagr.am/")
-            val user = after.substringBefore('/').substringBefore('?').substringBefore('#').trim()
-            if (user.isNotEmpty() && user != "p" && user != "reel" && user != "stories") {
-                return user.removePrefix("@")
+
+        // Direct RSS feed URL support (RSS.app / RSS-Bridge / generic RSS XML)
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            if (trimmed.contains("rss.app/feeds/") ||
+                trimmed.contains("bridge=Instagram") ||
+                trimmed.endsWith(".xml") ||
+                trimmed.contains("/rss") ||
+                trimmed.contains("/feed")
+            ) {
+                return trimmed
+            }
+            if (trimmed.contains("instagram.com/") || trimmed.contains("instagr.am/")) {
+                val after = trimmed.substringAfter("instagram.com/").substringAfter("instagr.am/")
+                val user = after.substringBefore('/').substringBefore('?').substringBefore('#').trim()
+                if (user.isNotEmpty() && user != "p" && user != "reel" && user != "stories") {
+                    return user.removePrefix("@")
+                }
             }
         }
+
         val clean = trimmed.removePrefix("@").trim()
         if (clean.matches(Regex("^[a-zA-Z0-9._]{1,30}$")) && !clean.startsWith("UC")) {
             return clean
@@ -50,22 +73,28 @@ object InstagramResolver {
 
     /**
      * Attempts to resolve an Instagram profile for [input].
+     * Returns null if the profile cannot be found or all sources fail.
+     * Never generates dummy/fallback posts.
      */
     suspend fun resolve(input: String): InstagramProfile? = withContext(Dispatchers.IO) {
-        val username = extractUsername(input) ?: return@withContext null
-        fetchProfile(username)
+        val usernameOrUrl = extractUsername(input) ?: return@withContext null
+        fetchProfile(usernameOrUrl)
     }
 
     /**
-     * Fetches public profile metadata and timeline media using registered InstagramSource providers.
+     * Fetches public profile metadata and timeline media using registered
+     * InstagramSource providers. Tries each source in order; returns the
+     * first successful result. Returns null if all sources fail.
      */
-    suspend fun fetchProfile(username: String): InstagramProfile? = withContext(Dispatchers.IO) {
-        val cleanUsername = username.removePrefix("@").trim()
-        
+    suspend fun fetchProfile(usernameOrUrl: String): InstagramProfile? = withContext(Dispatchers.IO) {
+        val cleanInput = usernameOrUrl.trim()
+
         for (source in sources) {
             try {
-                when (val result = source.fetchProfile(cleanUsername)) {
+                Log.d(TAG, "Trying source ${source.name} for $cleanInput")
+                when (val result = source.fetchProfile(cleanInput)) {
                     is InstagramFeedResult.Success -> {
+                        Log.d(TAG, "Source ${source.name} returned ${result.items.size} items for $cleanInput")
                         return@withContext InstagramProfile(
                             username = result.username,
                             fullName = result.fullName,
@@ -74,7 +103,7 @@ object InstagramResolver {
                         )
                     }
                     is InstagramFeedResult.Error -> {
-                        Log.d(TAG, "Source ${source.name} failed for $cleanUsername: ${result.message}")
+                        Log.d(TAG, "Source ${source.name} failed for $cleanInput: ${result.message}")
                     }
                 }
             } catch (e: Exception) {
@@ -82,49 +111,7 @@ object InstagramResolver {
             }
         }
 
-        // Resilient fallback: return valid profile so user can still add and view creator
-        val channelId = "ig_${cleanUsername.lowercase()}"
-        val fallbackPosts = createFallbackPosts(cleanUsername, cleanUsername, null)
-        InstagramProfile(
-            username = cleanUsername,
-            fullName = cleanUsername,
-            avatarUrl = null,
-            posts = fallbackPosts
-        )
-    }
-
-    private fun createFallbackPosts(username: String, fullName: String, avatarUrl: String?): List<MediaVideo> {
-        val channelId = "ig_${username.lowercase()}"
-        val now = System.currentTimeMillis()
-        return listOf(
-            MediaVideo(
-                videoId = "ig_${username}_reels",
-                title = "$fullName • Instagram Reels",
-                channelId = channelId,
-                channelName = fullName,
-                publishedAtEpochMillis = now,
-                thumbnailUrl = avatarUrl ?: "",
-                viewCount = 0L,
-                isShort = true,
-                isLive = false,
-                durationSeconds = 0L,
-                platform = MediaPlatform.INSTAGRAM,
-                instagramType = InstagramMediaType.REEL
-            ),
-            MediaVideo(
-                videoId = "ig_${username}_posts",
-                title = "$fullName • Recent Posts & Photos",
-                channelId = channelId,
-                channelName = fullName,
-                publishedAtEpochMillis = now - 60_000L,
-                thumbnailUrl = avatarUrl ?: "",
-                viewCount = 0L,
-                isShort = false,
-                isLive = false,
-                durationSeconds = 0L,
-                platform = MediaPlatform.INSTAGRAM,
-                instagramType = InstagramMediaType.IMAGE
-            )
-        )
+        Log.w(TAG, "All sources failed for $cleanInput")
+        null
     }
 }
