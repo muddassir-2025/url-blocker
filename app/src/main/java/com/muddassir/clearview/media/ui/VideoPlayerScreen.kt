@@ -486,9 +486,12 @@ fun VideoPlayerScreen(
         // Vertical fullscreen (Shorts style) fills the whole portrait screen;
         // landscape is naturally full screen; otherwise a 16:9 box at the top.
         val isInstagram = video.platform == MediaPlatform.INSTAGRAM || video.videoId.startsWith("ig_")
+        val isInstagramReel = isInstagram && (video.isShort || video.instagramType == InstagramMediaType.REEL || video.instagramType == InstagramMediaType.VIDEO)
         Box(
             modifier = when {
                 isLandscape || fullscreenVertical -> Modifier.fillMaxSize()
+                isInstagramReel -> Modifier.fillMaxWidth().aspectRatio(4f / 5f)
+                isInstagram -> Modifier.fillMaxWidth().aspectRatio(1f)
                 else -> Modifier.fillMaxWidth().aspectRatio(16f / 9f)
             }
         ) {
@@ -1849,6 +1852,74 @@ private fun InstagramPlayer(
                         settings.loadWithOverviewMode = true
                         settings.userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                         setBackgroundColor(android.graphics.Color.BLACK)
+
+                        // Bridge for capturing the raw .mp4 directly from the embed DOM
+                        addJavascriptInterface(object {
+                            @android.webkit.JavascriptInterface
+                            fun onVideoFound(url: String?) {
+                                if (!url.isNullOrBlank() && (url.startsWith("http") || url.contains(".mp4"))) {
+                                    post {
+                                        directMediaUrl = url
+                                    }
+                                }
+                            }
+                        }, "ClearViewBridge")
+
+                        val hideChromeJs = """
+                            (function() {
+                                var css = `
+                                    header, footer, 
+                                    .Header, .Footer, .Feedback, .SocialProof, .HoverFeedback, 
+                                    .EmbedCaption, .Caption, .FooterCTA, .CTA, 
+                                    [class*="Header"], [class*="Footer"], [class*="Feedback"], 
+                                    [class*="SocialProof"], [class*="Caption"], [class*="Engagement"],
+                                    a[href*="instagram.com"] {
+                                        display: none !important;
+                                        visibility: hidden !important;
+                                        height: 0 !important;
+                                        overflow: hidden !important;
+                                    }
+                                    html, body, .Embed, .EmbedFrame, #react-root, [class*="Root"] {
+                                        margin: 0 !important;
+                                        padding: 0 !important;
+                                        background: #000 !important;
+                                        width: 100% !important;
+                                        height: 100% !important;
+                                        overflow: hidden !important;
+                                        display: flex !important;
+                                        align-items: center !important;
+                                        justify-content: center !important;
+                                    }
+                                    .EmbeddedMedia, .EmbeddedMediaVideo, video {
+                                        width: 100% !important;
+                                        height: 100% !important;
+                                        max-height: 100% !important;
+                                        max-width: 100% !important;
+                                        object-fit: contain !important;
+                                    }
+                                `;
+                                var style = document.getElementById('cv-clean-style');
+                                if (!style) {
+                                    style = document.createElement('style');
+                                    style.id = 'cv-clean-style';
+                                    style.type = 'text/css';
+                                    style.appendChild(document.createTextNode(css));
+                                    (document.head || document.documentElement).appendChild(style);
+                                }
+                                function checkVideo() {
+                                    var v = document.querySelector('video');
+                                    if (v && v.src && v.src.indexOf('http') === 0 && window.ClearViewBridge) {
+                                        window.ClearViewBridge.onVideoFound(v.src);
+                                    }
+                                }
+                                checkVideo();
+                                if (!window.__cvObs) {
+                                    window.__cvObs = new MutationObserver(function() { checkVideo(); });
+                                    window.__cvObs.observe(document.body || document.documentElement, { childList: true, subtree: true, attributes: true });
+                                }
+                            })();
+                        """.trimIndent()
+
                         webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(
                                 view: WebView?,
@@ -1861,6 +1932,18 @@ private fun InstagramPlayer(
                                 }
                                 // Block top-level navigation away from the embed (never open Chrome or Instagram login)
                                 return true
+                            }
+
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                view?.evaluateJavascript(hideChromeJs, null)
+                                view?.postDelayed({ view.evaluateJavascript(hideChromeJs, null) }, 500)
+                                view?.postDelayed({ view.evaluateJavascript(hideChromeJs, null) }, 1500)
+                            }
+
+                            override fun onPageCommitVisible(view: WebView?, url: String?) {
+                                super.onPageCommitVisible(view, url)
+                                view?.evaluateJavascript(hideChromeJs, null)
                             }
                         }
                         loadUrl("https://www.instagram.com/p/$shortcode/embed/")
