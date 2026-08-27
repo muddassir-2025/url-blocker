@@ -68,6 +68,7 @@ import com.muddassir.clearview.R
 import com.muddassir.clearview.todo.data.TodoCodec
 import com.muddassir.clearview.todo.data.TodoScheduler
 import com.muddassir.clearview.todo.model.ReminderConfig
+import com.muddassir.clearview.todo.model.TodoBehavior
 import com.muddassir.clearview.todo.model.TodoItem
 import com.muddassir.clearview.todo.model.TodoPriority
 import com.muddassir.clearview.todo.model.TodoType
@@ -185,6 +186,8 @@ fun TodoEditorDialog(
         )
     }
     var priority by remember { mutableStateOf(initial?.priority ?: TodoPriority.NORMAL) }
+    var behavior by remember { mutableStateOf(initial?.behavior ?: TodoBehavior.NORMAL) }
+    var targetDurationMinutes by remember { mutableStateOf(initial?.targetDurationMinutes ?: 60) }
     // Strict interval: a RANGE todo is only completable INSIDE its start–end
     // window. When the window ends uncompleted, that day is locked as missed
     // ("can't redo") — the checkbox disables and the notification Complete
@@ -296,7 +299,11 @@ fun TodoEditorDialog(
                 timeEndMinutes = rangeEnd,
                 reminder = reminder,
                 priority = priority,
-                strictInterval = strictInterval && timeChoice == TimeChoice.RANGE
+                strictInterval = strictInterval && timeChoice == TimeChoice.RANGE,
+                behavior = behavior,
+                targetDurationMinutes = if (behavior == TodoBehavior.TIME) targetDurationMinutes else null,
+                events = initial?.events ?: emptyList(),
+                isDeleted = initial?.isDeleted ?: false
             )
         )
     }
@@ -390,6 +397,62 @@ fun TodoEditorDialog(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+
+                    Spacer(Modifier.height(20.dp))
+                    SectionTitle("Task Variety")
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TodoBehavior.entries.forEach { b ->
+                            FilterChip(
+                                selected = behavior == b,
+                                onClick = { behavior = b },
+                                label = {
+                                    Text(
+                                        when (b) {
+                                            TodoBehavior.NORMAL -> "Normal"
+                                            TodoBehavior.ATTEMPTED -> "Attempted"
+                                            TodoBehavior.TIME -> "Time-based"
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = when (behavior) {
+                            TodoBehavior.NORMAL -> "Simple checkbox: directly mark as completed"
+                            TodoBehavior.ATTEMPTED -> "3-step progress: Not started → Attempted → Completed"
+                            TodoBehavior.TIME -> "Duration tracker: log completed time against a target"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (behavior == TodoBehavior.TIME) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            text = "Target Duration",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(
+                                15 to "15m",
+                                30 to "30m",
+                                45 to "45m",
+                                60 to "1h",
+                                120 to "2h",
+                                180 to "3h"
+                            ).forEach { (mins, lbl) ->
+                                FilterChip(
+                                    selected = targetDurationMinutes == mins,
+                                    onClick = { targetDurationMinutes = mins },
+                                    label = { Text(lbl) }
+                                )
+                            }
+                        }
+                    }
 
                     Spacer(Modifier.height(20.dp))
                     SectionTitle(stringResource(R.string.todo_date))

@@ -93,6 +93,7 @@ import com.muddassir.clearview.todo.data.TodoSort
 import com.muddassir.clearview.todo.data.TodoScheduler
 import com.muddassir.clearview.todo.data.TodoStats
 import com.muddassir.clearview.todo.data.TodoStore
+import com.muddassir.clearview.todo.model.TodoBehavior
 import com.muddassir.clearview.todo.model.TodoItem
 import com.muddassir.clearview.todo.model.TodoType
 import java.time.LocalDate
@@ -561,11 +562,14 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
                                         // (⋮ menu: Edit / Snooze / Delete) — Today is purely
                                         // checkbox-based, and All stays a view-only aggregate.
                                         showActions = filter == TodoFilter.TEMPORARY ||
-                                            filter == TodoFilter.PERMANENT,
+                                            filter == TodoFilter.PERMANENT ||
+                                            filter == TodoFilter.TODAY,
                                         onToggle = { toggle(todo) },
                                         onEdit = { editing = todo },
                                         onDelete = { pendingDelete = todo },
-                                        onSnooze = { snoozing = todo }
+                                        onSnooze = { snoozing = todo },
+                                        onAttempt = { store.markAttempted(todo.id, today) },
+                                        onAddTime = { mins -> store.addTime(todo.id, mins, today) }
                                     )
                                 }
                             }
@@ -937,7 +941,9 @@ private fun TodoCard(
     onToggle: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    onSnooze: () -> Unit
+    onSnooze: () -> Unit,
+    onAttempt: (() -> Unit)? = null,
+    onAddTime: ((Int) -> Unit)? = null
 ) {
     val today = LocalDate.now()
     var menuOpen by remember(item.id) { mutableStateOf(false) }
@@ -1074,6 +1080,26 @@ private fun TodoCard(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    val isAttempted = remember(item, today) { TodoCodec.isAttemptedOn(item, today) }
+                    val timeSpent = remember(item, today) { TodoCodec.timeSpentOn(item, today) }
+                    if (item.behavior == TodoBehavior.ATTEMPTED && !completedToday) {
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = if (isAttempted) "State: Attempted ✓" else "State: Not started",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isAttempted) Color(0xFF00897B) else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else if (item.behavior == TodoBehavior.TIME) {
+                        Spacer(Modifier.height(2.dp))
+                        val target = item.targetDurationMinutes ?: 60
+                        Text(
+                            text = "Time: ${timeSpent}m / ${target}m",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (timeSpent >= target || completedToday) DONE_GREEN else MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
                 // The ⋮ menu (Edit / Snooze / Delete) shows in the manageable
                 // lists: Temporary and Permanent (Today / All / Upcoming are
@@ -1113,6 +1139,31 @@ private fun TodoCard(
                                     enabled = item.reminder?.enabled == true,
                                     leadingIcon = {
                                         Icon(Icons.Filled.Snooze, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    }
+                                )
+                            }
+                            if (item.behavior == TodoBehavior.ATTEMPTED && !completedToday && !missedToday && onAttempt != null) {
+                                DropdownMenuItem(
+                                    text = { Text("Mark Attempted") },
+                                    onClick = { menuOpen = false; onAttempt() },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    }
+                                )
+                            }
+                            if (item.behavior == TodoBehavior.TIME && !completedToday && !missedToday && onAddTime != null) {
+                                DropdownMenuItem(
+                                    text = { Text("+15 min") },
+                                    onClick = { menuOpen = false; onAddTime(15) },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("+30 min") },
+                                    onClick = { menuOpen = false; onAddTime(30) },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                                     }
                                 )
                             }

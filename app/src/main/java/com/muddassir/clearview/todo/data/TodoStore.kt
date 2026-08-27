@@ -2,6 +2,7 @@ package com.muddassir.clearview.todo.data
 
 import android.content.Context
 import com.muddassir.clearview.todo.model.TodoItem
+import java.time.LocalDate
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONObject
@@ -31,6 +32,20 @@ class TodoStore(context: Context) {
     fun saveItems(items: List<TodoItem>) {
         prefs.edit().putString(KEY_ITEMS, TodoCodec.encode(items)).apply()
         TodoStore.itemsFlow.value = items
+    }
+
+    /** Marks a todo attempted on [day] (for ATTEMPTED behavior). */
+    fun markAttempted(id: String, day: LocalDate = LocalDate.now()) {
+        val current = getItems()
+        val updated = TodoCodec.attempted(current, id, day, System.currentTimeMillis())
+        saveItems(updated)
+    }
+
+    /** Adds time to a todo on [day] (for TIME behavior). */
+    fun addTime(id: String, minutes: Int, day: LocalDate = LocalDate.now()) {
+        val current = getItems()
+        val updated = TodoCodec.timeAdded(current, id, day, System.currentTimeMillis(), minutes)
+        saveItems(updated)
     }
 
     /** Reactive view of the persisted list (null until the first [saveItems]). */

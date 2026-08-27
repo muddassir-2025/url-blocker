@@ -67,59 +67,99 @@ class MediaRepository(context: Context) {
         return parseChannels(json)
     }
 
-    /** Result of adding a channel: success (with the channel) or an error message. */
+    /** Result of adding a channel: success (with the channel/channels) or an error message. */
     sealed class AddChannelResult {
-        data class Success(val channel: SavedChannel) : AddChannelResult()
+        data class Success(val channels: List<SavedChannel>) : AddChannelResult() {
+            constructor(channel: SavedChannel) : this(listOf(channel))
+            val channel: SavedChannel get() = channels.first()
+        }
         data class Error(val message: String) : AddChannelResult()
     }
 
     /**
      * Resolves [input] (bare id, channel URL or @handle) and saves the channel.
-     * Network resolution of handles runs on a background dispatcher. The
-     * avatar is NOT fetched here (it would block the add dialog on a page
-     * fetch) — [fillMissingAvatars] picks it up right after, triggered by the
-     * Media tab's channel-change effect; until then the UI shows initials.
+     * Supports both YouTube channels and Instagram public profiles — if both
+     * are found for the same handle/query, both are added.
      */
     suspend fun addChannel(input: String): AddChannelResult = withContext(Dispatchers.IO) {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) {
             return@withContext AddChannelResult.Error("Enter a channel id, URL or @handle")
         }
-        val channelId = ChannelIdResolver.resolve(trimmed)
-        if (channelId == null) {
-            return@withContext AddChannelResult.Error(
-                "Couldn't find that channel. Check the handle or paste the channel URL."
-            )
-        }
+
         val existing = getSavedChannels()
-        if (existing.any { it.channelId == channelId }) {
-            return@withContext AddChannelResult.Error("That channel is already saved")
+        val toAdd = mutableListOf<SavedChannel>()
+
+        // 1. Try resolving YouTube channel
+        val isExplicitInstagram = trimmed.contains("instagram.com/") || trimmed.contains("instagr.am/")
+        if (!isExplicitInstagram) {
+            val ytChannelId = ChannelIdResolver.resolve(trimmed)
+            if (ytChannelId != null && existing.none { it.channelId == ytChannelId } && toAdd.none { it.channelId == ytChannelId }) {
+                toAdd.add(
+                    SavedChannel(
+                        channelId = ytChannelId,
+                        displayName = channelDisplayName(trimmed),
+                        sourceRef = trimmed,
+                        addedAtEpochMillis = System.currentTimeMillis(),
+                        platform = MediaPlatform.YOUTUBE
+                    )
+                )
+            }
         }
-        val channel = SavedChannel(
-            channelId = channelId,
-            displayName = channelDisplayName(trimmed),
-            sourceRef = trimmed,
-            // Subscription moment: the worker's notification guard treats every
-            // video published before this instant as pre-existing backlog that
-            // must never be notified (see MediaUpdateWorker).
-            addedAtEpochMillis = System.currentTimeMillis()
-        )
-        saveChannels(existing + channel)
-        // Notification baseline: fetch the new channel's feed immediately and
-        // mark EVERY existing video as already-notified, so the background
-        // worker never notifies about pre-existing uploads (the "added a
-        // channel → notification spam of old videos" bug). The feed is also
-        // cached here, so the Media tab shows the content right away. The
-        // refresh skips duration enrichment (enrich = false) so the dialog
-        // stays fast — the feed effect enriches the channel right after.
-        runCatching {
-            refreshVideos(channelId, enrich = false)?.let { fresh ->
-                if (fresh.isNotEmpty()) {
-                    markVideosNotified(getNotifiedVideoIds() + fresh.map { it.videoId })
+
+        // 2. Try resolving Instagram profile
+        val igUsername = InstagramResolver.extractUsername(trimmed)
+        if (igUsername != null) {
+            val igProfile = InstagramResolver.resolve(trimmed)
+            if (igProfile != null) {
+                val igChannelId = "ig_${igProfile.username.lowercase()}"
+                if (existing.none { it.channelId == igChannelId } && toAdd.none { it.channelId == igChannelId }) {
+                    toAdd.add(
+                        SavedChannel(
+                            channelId = igChannelId,
+                            displayName = if (igProfile.fullName.isNotBlank()) igProfile.fullName else "@${igProfile.username}",
+                            sourceRef = "@${igProfile.username}",
+                            avatarUrl = igProfile.avatarUrl,
+                            addedAtEpochMillis = System.currentTimeMillis(),
+                            platform = MediaPlatform.INSTAGRAM
+                        )
+                    )
+                    if (igProfile.posts.isNotEmpty()) {
+                        writeCache(igChannelId, igProfile.posts)
+                    }
                 }
             }
         }
-        AddChannelResult.Success(channel)
+
+        if (toAdd.isEmpty()) {
+            val already = existing.any {
+                it.sourceRef.equals(trimmed, ignoreCase = true) ||
+                    it.channelId == ChannelIdResolver.extractChannelId(trimmed) ||
+                    (igUsername != null && it.channelId == "ig_${igUsername.lowercase()}")
+            }
+            return@withContext if (already) {
+                AddChannelResult.Error("That channel / profile is already saved")
+            } else {
+                AddChannelResult.Error("Couldn't find that channel or Instagram profile. Check the handle or paste the URL.")
+            }
+        }
+
+        saveChannels(existing + toAdd)
+
+        // Baseline notification guard
+        for (channel in toAdd) {
+            if (channel.platform == MediaPlatform.YOUTUBE) {
+                runCatching {
+                    refreshVideos(channel.channelId, enrich = false)?.let { fresh ->
+                        if (fresh.isNotEmpty()) {
+                            markVideosNotified(getNotifiedVideoIds() + fresh.map { it.videoId })
+                        }
+                    }
+                }
+            }
+        }
+
+        AddChannelResult.Success(toAdd)
     }
 
     /**
@@ -342,6 +382,16 @@ class MediaRepository(context: Context) {
         channelId: String,
         enrich: Boolean = true
     ): List<MediaVideo>? = withContext(Dispatchers.IO) {
+        if (channelId.startsWith("ig_")) {
+            val username = channelId.removePrefix("ig_")
+            val profile = InstagramResolver.fetchProfile(username)
+            if (profile != null && profile.posts.isNotEmpty()) {
+                writeCache(channelId, profile.posts)
+                return@withContext profile.posts
+            }
+            return@withContext getCachedVideos(channelId)?.first ?: emptyList()
+        }
+
         val url = "https://www.youtube.com/feeds/videos.xml?channel_id=$channelId"
         var connection: HttpURLConnection? = null
         try {
