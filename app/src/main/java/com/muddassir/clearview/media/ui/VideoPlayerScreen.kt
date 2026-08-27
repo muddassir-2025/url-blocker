@@ -1120,6 +1120,7 @@ private fun PlayerControlPanel(
     onRemoveManual: () -> Unit,
     onMarkWatched: () -> Unit
 ) {
+    val context = LocalContext.current
     var showMoreMenu by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
