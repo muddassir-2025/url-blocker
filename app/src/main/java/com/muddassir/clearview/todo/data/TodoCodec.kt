@@ -72,6 +72,15 @@ object TodoCodec {
                     })
                     .put("missedCleared", item.missedClearedBefore ?: JSONObject.NULL)
                     .put("completedCleared", item.completedClearedBefore ?: JSONObject.NULL)
+                    .put("kind", item.kind.name)
+                    .put("attemptState", item.attemptState.name)
+                    .put("totalDuration", item.totalDurationMinutes ?: JSONObject.NULL)
+                    .put("completedDuration", item.completedDurationMinutes)
+                    .put("history", JSONArray().apply {
+                        item.history.forEach { h ->
+                            put(JSONObject().put("ts", h.timestamp).put("ev", h.event).put("old", h.oldValue ?: JSONObject.NULL).put("new", h.newValue ?: JSONObject.NULL))
+                        }
+                    })
             )
         }
         return arr.toString()
@@ -154,7 +163,18 @@ object TodoCodec {
             missedClearedBefore = if (o.isNull("missedCleared")) null
             else o.optLong("missedCleared"),
             completedClearedBefore = if (o.isNull("completedCleared")) null
-            else o.optLong("completedCleared")
+            else o.optLong("completedCleared"),
+            kind = runCatching { com.muddassir.clearview.todo.model.TodoKind.valueOf(o.optString("kind","NORMAL")) }.getOrDefault(com.muddassir.clearview.todo.model.TodoKind.NORMAL),
+            attemptState = runCatching { com.muddassir.clearview.todo.model.AttemptState.valueOf(o.optString("attemptState","NOT_STARTED")) }.getOrDefault(com.muddassir.clearview.todo.model.AttemptState.NOT_STARTED),
+            totalDurationMinutes = if (o.isNull("totalDuration")) null else o.optInt("totalDuration"),
+            completedDurationMinutes = o.optInt("completedDuration",0),
+            history = runCatching {
+                val arr = o.optJSONArray("history") ?: return@runCatching emptyList<com.muddassir.clearview.todo.model.TodoHistoryEntry>()
+                (0 until arr.length()).mapNotNull { i ->
+                    val h = arr.getJSONObject(i)
+                    com.muddassir.clearview.todo.model.TodoHistoryEntry(h.optLong("ts"), h.optString("ev"), h.optString("old").takeIf { !h.isNull("old") }, h.optString("new").takeIf { !h.isNull("new") })
+                }
+            }.getOrDefault(emptyList())
         )
         return item.copy(
             completions = item.completions.filterKeys { day ->
@@ -259,7 +279,16 @@ object TodoCodec {
 
     /** Appends a new todo (id always fresh; completions start empty). */
     fun added(items: List<TodoItem>, item: TodoItem): List<TodoItem> =
-        items + item.copy(id = item.id.ifBlank { newId() }, completions = emptyMap())
+        items + item.copy(id = item.id.ifBlank { newId() }, completions = emptyMap(), history = item.history + com.muddassir.clearview.todo.model.TodoHistoryEntry(event="Created"))
+
+    fun withHistory(item: TodoItem, event: String, old: String? = null, new: String? = null): TodoItem =
+        item.copy(history = item.history + com.muddassir.clearview.todo.model.TodoHistoryEntry(event=event, oldValue=old, newValue=new))
+
+    fun validSnoozeTimes(item: TodoItem, nowMinutes: Int): List<Int> {
+        val start = item.timeStartMinutes ?: 0
+        val end = item.timeEndMinutes ?: 1439
+        return listOf(15,30,45,60).mapNotNull { d -> (nowMinutes + d).takeIf { it in start..end } }
+    }
 
     /**
      * Replaces the todo with the same id. Completion history and created-at

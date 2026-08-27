@@ -12,11 +12,24 @@ package com.muddassir.clearview.todo.model
  * history ([completions], epochDay → completedAt epoch millis) is never
  * pruned — weekly statistics depend on it.
  */
+enum class TodoKind { NORMAL, ATTEMPTED, TIME_BASED }
+enum class AttemptState { NOT_STARTED, ATTEMPTED, COMPLETED }
+data class TodoHistoryEntry(
+    val timestamp: Long = System.currentTimeMillis(),
+    val event: String,
+    val oldValue: String? = null,
+    val newValue: String? = null
+)
 data class TodoItem(
     val id: String,
     val title: String,
     val details: String = "",
     val type: TodoType = TodoType.TEMPORARY,
+    val kind: TodoKind = TodoKind.NORMAL,
+    val attemptState: AttemptState = AttemptState.NOT_STARTED,
+    val totalDurationMinutes: Int? = null,
+    val completedDurationMinutes: Int = 0,
+    val history: List<TodoHistoryEntry> = emptyList(),
     /** First day this todo is active (epoch day). */
     val startDateEpochDay: Long,
     /** Last active day; null = no end (permanent). */

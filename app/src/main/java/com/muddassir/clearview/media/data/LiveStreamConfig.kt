@@ -29,6 +29,14 @@ object LiveStreamConfig {
             channelUrl = "https://www.youtube.com/channel/UCos52azQNBgW63_9uDJoPDA"
         ),
         LiveStreamSource(
+            id = "makkah_backup",
+            title = "🕋 Makkah Live (Backup)",
+            subtitle = "AlQuran4k القرآن الكريم · Backup",
+            name = "AlQuran4k القرآن الكريم",
+            channelId = "UCn4gM8oVdh2y2b4T8v3G5aQ_backup",
+            channelUrl = "https://www.youtube.com/@AlQuran4k"
+        ),
+        LiveStreamSource(
             id = "madinah",
             title = "🕌 Madinah Live",
             subtitle = "Al-Masjid an-Nabawi · Live from Madinah",
