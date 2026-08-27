@@ -389,12 +389,14 @@ class MediaRepository(context: Context) {
     ): List<MediaVideo>? = withContext(Dispatchers.IO) {
         if (channelId.startsWith("ig_")) {
             val username = channelId.removePrefix("ig_")
-            val cached = getCachedVideos(channelId)?.first ?: emptyList()
+            val cachedRaw = getCachedVideos(channelId)?.first ?: emptyList()
+            val cached = cachedRaw.filterNot { it.videoId.endsWith("_reels") || it.videoId.endsWith("_posts") }
             val profile = try { InstagramResolver.fetchProfile(username) } catch (e: Exception) { null }
             if (profile != null && profile.posts.isNotEmpty()) {
+                val cleanPosts = profile.posts.filterNot { it.videoId.endsWith("_reels") || it.videoId.endsWith("_posts") }
                 // Merge: fresh items take priority, then cached items not in fresh set
-                val freshIds = profile.posts.map { it.videoId }.toSet()
-                val merged = profile.posts + cached.filter { it.videoId !in freshIds }
+                val freshIds = cleanPosts.map { it.videoId }.toSet()
+                val merged = cleanPosts + cached.filter { it.videoId !in freshIds }
                 val sorted = merged.sortedByDescending { it.publishedAtEpochMillis }
                 writeCache(channelId, sorted)
                 return@withContext sorted
@@ -748,6 +750,7 @@ class MediaRepository(context: Context) {
             val obj = JSONObject(file.readText(Charsets.UTF_8))
             val savedAt = obj.optLong("savedAt", 0L)
             val videos = parseVideos(obj.optJSONArray("videos"))
+                .filterNot { it.videoId.endsWith("_reels") || it.videoId.endsWith("_posts") }
             if (videos.isEmpty()) null else videos to savedAt
         } catch (e: Exception) {
             null

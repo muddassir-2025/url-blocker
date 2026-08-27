@@ -1350,24 +1350,7 @@ private fun PlayerControlPanel(
         // Live broadcasts can't be downloaded, so the button is hidden for them.
         // The resolved audio size (≈ X MB) appears as soon as the stream is
         // resolved — before any bytes are downloaded.
-        if (video.platform == MediaPlatform.INSTAGRAM) {
-            val igUrl = video.instagramUrl
-            if (!igUrl.isNullOrBlank()) {
-                Spacer(Modifier.height(10.dp))
-                OutlinedButton(
-                    onClick = {
-                        try {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(igUrl)))
-                        } catch (_: ActivityNotFoundException) {
-                            Toast.makeText(context, "Can't open link", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Open on Instagram")
-                }
-            }
-        } else if (!isLive) {
+        if (!isLive && video.platform != MediaPlatform.INSTAGRAM) {
             val audioSize = AudioDownloads.pendingSizes[video.videoId]
             val sizeSuffix = if (audioSize != null && audioSize > 0L)
                 " · ≈ ${formatBytes(audioSize)}" else ""
@@ -1792,55 +1775,107 @@ private fun InstagramPlayer(
     val isVideo = video.instagramType == InstagramMediaType.REEL ||
         video.instagramType == InstagramMediaType.VIDEO ||
         (video.mediaUrl != null && video.mediaUrl.contains(".mp4"))
-    val hasDirectMedia = !video.mediaUrl.isNullOrBlank() &&
-        (video.mediaUrl.contains(".mp4") || video.mediaUrl.startsWith("http"))
 
-    if (isVideo && hasDirectMedia) {
-        // Video with a direct media URL — play in an isolated WebView with NO
-        // Instagram base URL and ALL navigation blocked.
-        val directUrl = video.mediaUrl!!
-        val htmlContent = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-            <style>
-                * { margin:0; padding:0; box-sizing:border-box; }
-                html, body { width:100%; height:100%; background:#000; overflow:hidden; display:flex; align-items:center; justify-content:center; }
-                video { width:100%; height:100%; object-fit:contain; }
-                .error { color:#aaa; font-family:sans-serif; text-align:center; padding:20px; }
-            </style>
-        </head>
-        <body>
-            <video src="$directUrl" poster="${video.thumbnailUrl}" controls autoplay playsinline loop
-                   onerror="document.body.innerHTML='<div class=error>Video unavailable.<br>The media link may have expired.</div>'">
-            </video>
-        </body>
-        </html>
-        """.trimIndent()
-
-        AndroidView(
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.mediaPlaybackRequiresUserGesture = false
-                    // CRITICAL: Block ALL navigation — never open Chrome or Instagram
-                    webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(
-                            view: android.webkit.WebView?,
-                            request: android.webkit.WebResourceRequest?
-                        ): Boolean = true // Block every navigation attempt
-                    }
-                    // Use null base URL — NOT instagram.com
-                    loadDataWithBaseURL(null, htmlContent, "text/html", "UTF-8", null)
-                }
-            },
-            modifier = modifier
+    var directMediaUrl by remember(video.videoId) {
+        mutableStateOf(video.mediaUrl?.takeIf { it.contains(".mp4") || it.startsWith("http") })
+    }
+    val shortcode = remember(video.videoId, video.instagramUrl) {
+        com.muddassir.clearview.media.data.InstagramStreamResolver.extractShortcode(
+            video.instagramUrl ?: video.videoId
         )
+    }
+
+    // Try resolving direct .mp4 stream on-device without login
+    LaunchedEffect(video.videoId) {
+        if (isVideo && directMediaUrl == null && shortcode.isNotBlank()) {
+            val resolved = com.muddassir.clearview.media.data.InstagramStreamResolver.resolveStreamUrl(shortcode)
+            if (!resolved.isNullOrBlank()) {
+                directMediaUrl = resolved
+            }
+        }
+    }
+
+    if (isVideo) {
+        val streamUrl = directMediaUrl
+        if (!streamUrl.isNullOrBlank()) {
+            // Direct MP4 stream: play natively in isolated video container
+            val htmlContent = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <style>
+                    * { margin:0; padding:0; box-sizing:border-box; }
+                    html, body { width:100%; height:100%; background:#000; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+                    video { width:100%; height:100%; object-fit:contain; }
+                    .error { color:#aaa; font-family:sans-serif; text-align:center; padding:20px; }
+                </style>
+            </head>
+            <body>
+                <video src="$streamUrl" poster="${video.thumbnailUrl}" controls autoplay playsinline loop
+                       onerror="document.body.innerHTML='<div class=error>Video loading...</div>'">
+                </video>
+            </body>
+            </html>
+            """.trimIndent()
+
+            AndroidView(
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.mediaPlaybackRequiresUserGesture = false
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): Boolean = true
+                        }
+                        loadDataWithBaseURL(null, htmlContent, "text/html", "UTF-8", null)
+                    }
+                },
+                modifier = modifier
+            )
+        } else {
+            // Public embed player: renders the public Reel/video directly with playback controls
+            // Zero login required, and all external navigation is completely blocked
+            val embedHtml = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <style>
+                    * { margin:0; padding:0; box-sizing:border-box; }
+                    html, body { width:100%; height:100%; background:#000; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+                    iframe { width:100%; height:100%; border:none; max-width:540px; }
+                </style>
+            </head>
+            <body>
+                <iframe src="https://www.instagram.com/p/$shortcode/embed/" allowfullscreen="true" frameborder="0"></iframe>
+            </body>
+            </html>
+            """.trimIndent()
+
+            AndroidView(
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.mediaPlaybackRequiresUserGesture = false
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): Boolean = true // Never open Chrome or Instagram login
+                        }
+                        loadDataWithBaseURL("https://www.instagram.com", embedHtml, "text/html", "UTF-8", null)
+                    }
+                },
+                modifier = modifier
+            )
+        }
     } else {
-        // Image post, carousel, or video without direct media URL —
-        // render the thumbnail natively with Compose (no WebView at all)
+        // Image post or carousel — render native Compose RemoteImage
         Box(
             modifier = modifier.background(Color.Black),
             contentAlignment = Alignment.Center
@@ -1855,7 +1890,6 @@ private fun InstagramPlayer(
                     contentScale = ContentScale.Fit
                 )
             } else {
-                // No image available — show placeholder
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
                         imageVector = Icons.Filled.MusicNote,
@@ -1869,41 +1903,6 @@ private fun InstagramPlayer(
                         color = Color.White.copy(alpha = 0.6f),
                         style = MaterialTheme.typography.bodyMedium
                     )
-                }
-            }
-
-            // If this is a video/reel without a direct URL, show an explicit
-            // "Open on Instagram" button — never auto-navigate
-            if (isVideo && !hasDirectMedia) {
-                val igUrl = video.instagramUrl
-                if (igUrl != null) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.4f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                imageVector = Icons.Filled.PlayArrow,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(56.dp)
-                            )
-                            Spacer(Modifier.height(12.dp))
-                            OutlinedButton(onClick = {
-                                try {
-                                    context.startActivity(
-                                        Intent(Intent.ACTION_VIEW, Uri.parse(igUrl))
-                                    )
-                                } catch (_: ActivityNotFoundException) {
-                                    Toast.makeText(context, "Can't open link", Toast.LENGTH_SHORT).show()
-                                }
-                            }) {
-                                Text("Open on Instagram", color = Color.White)
-                            }
-                        }
-                    }
                 }
             }
         }
