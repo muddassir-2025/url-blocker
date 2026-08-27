@@ -3,7 +3,9 @@ package com.muddassir.clearview.media.data
 import android.content.Context
 import android.util.Log
 import com.muddassir.clearview.media.model.FeedFilter
+import com.muddassir.clearview.media.model.InstagramMediaType
 import com.muddassir.clearview.media.model.MediaChannelUpdate
+import com.muddassir.clearview.media.model.MediaPlatform
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.model.SavedChannel
 import com.muddassir.clearview.media.model.SavedPlaylist
@@ -158,6 +160,8 @@ class MediaRepository(context: Context) {
                     .put("sourceRef", c.sourceRef)
                     .put("avatarUrl", c.avatarUrl ?: "")
                     .put("addedAt", c.addedAtEpochMillis)
+                    .put("platform", c.platform.name)
+                    .put("instagramType", c.instagramType?.name ?: JSONObject.NULL)
             )
         }
         prefs.edit().putString(KEY_CHANNELS, arr.toString()).apply()
@@ -175,7 +179,13 @@ class MediaRepository(context: Context) {
                     avatarUrl = o.optString("avatarUrl", "").ifBlank { null },
                     // Missing on channels saved by older builds → 0 → the
                     // worker's subscription guard stays inactive for them.
-                    addedAtEpochMillis = o.optLong("addedAt", 0L)
+                    addedAtEpochMillis = o.optLong("addedAt", 0L),
+                    platform = runCatching {
+                        MediaPlatform.valueOf(o.optString("platform", "YOUTUBE"))
+                    }.getOrDefault(MediaPlatform.YOUTUBE),
+                    instagramType = o.optString("instagramType", "").takeIf { it.isNotBlank() }?.let {
+                        runCatching { InstagramMediaType.valueOf(it) }.getOrNull()
+                    }
                 )
             }
         } catch (e: Exception) {

@@ -40,6 +40,7 @@ class WatchProgressStore(context: Context) {
     fun set(videoId: String, fraction: Float) {
         if (fraction < 0f) return
         prefs.edit().putFloat(videoId, fraction.coerceIn(0f, 1f)).apply()
+        bump()
     }
 
     /** The full watch snapshot for [videoId], or null if never watched. */
@@ -65,6 +66,7 @@ class WatchProgressStore(context: Context) {
             .putLong(POS_PREFIX + videoId, positionSeconds.coerceAtLeast(0L))
             .putLong(DUR_PREFIX + videoId, durationSeconds.coerceAtLeast(0L))
             .apply()
+        bump()
     }
 
     /** True once ~90% or more of the video was watched. */
@@ -76,12 +78,17 @@ class WatchProgressStore(context: Context) {
             .remove(POS_PREFIX + videoId)
             .remove(DUR_PREFIX + videoId)
             .apply()
+        bump()
     }
 
-    private companion object {
+    companion object {
         const val PREFS_NAME = "media_watch_progress"
         const val WATCHED_THRESHOLD = 0.9f
         const val POS_PREFIX = "pos_"
         const val DUR_PREFIX = "dur_"
+        private val _revisionFlow = kotlinx.coroutines.flow.MutableStateFlow(0)
+        val revisionFlow: kotlinx.coroutines.flow.StateFlow<Int> = _revisionFlow
+        fun bumpRevision() { _revisionFlow.value++ }
     }
+    private fun bump() { bumpRevision() }
 }

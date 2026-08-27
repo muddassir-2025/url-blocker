@@ -27,8 +27,11 @@ enum class FeedContentFilter(val label: String) {
     VIDEOS("Videos"),
     SHORTS("Shorts"),
     LIVE("Live"),
-    DOWNLOADS("Downloads")
+    DOWNLOADS("Downloads"),
+    REELS("Reels"),
+    IMAGE_POSTS("Image Posts")
 }
+enum class FeedPlatformFilter(val label: String) { ALL("All"), YOUTUBE("YouTube"), INSTAGRAM("Instagram") }
 
 /** Sort order for the All Feed. */
 enum class FeedSortOrder(val label: String) {
@@ -81,6 +84,7 @@ enum class FeedWatchStatus(val label: String) {
  */
 data class FeedFilter(
     val date: FeedDateFilter = FeedDateFilter.LAST_3_DAYS,
+    val platform: FeedPlatformFilter = FeedPlatformFilter.ALL,
     val content: FeedContentFilter = FeedContentFilter.ALL,
     val sort: FeedSortOrder = FeedSortOrder.NEWEST_FIRST,
     // Unwatched by default: the feed leads with videos the user hasn't seen,

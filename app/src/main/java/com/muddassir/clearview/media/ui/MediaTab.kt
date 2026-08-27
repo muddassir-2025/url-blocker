@@ -371,20 +371,21 @@ fun MediaTab(
         val id = selectedPlaylistId ?: return@LaunchedEffect
         playlistLoading = true
         playlistError = null
-        val cached = withContext(Dispatchers.IO) { repository.getCachedPlaylistVideos(id) }
-        if (cached?.first?.isNotEmpty() == true) playlistVideos = cached.first
-        val fresh = repository.refreshPlaylistVideos(id)
-        when {
-            fresh == null && cached?.first?.isNotEmpty() != true ->
-                playlistError = "Couldn't load this playlist. Check your connection."
-            fresh != null && fresh.isEmpty() && cached?.first?.isNotEmpty() != true ->
-                playlistError = "This playlist is private or unavailable."
-            fresh != null && fresh.isNotEmpty() -> {
-                playlistVideos = fresh
-                playlistRefreshedAt = System.currentTimeMillis()
+        try {
+            val cached = withContext(Dispatchers.IO) { repository.getCachedPlaylistVideos(id) }
+            if (cached?.first?.isNotEmpty() == true) playlistVideos = cached.first
+            val fresh = repository.refreshPlaylistVideos(id)
+            when {
+                fresh == null && cached?.first?.isNotEmpty() != true ->
+                    playlistError = "Couldn't load this playlist. Check your connection."
+                fresh != null && fresh.isEmpty() && cached?.first?.isNotEmpty() != true ->
+                    playlistError = "This playlist is private or unavailable."
+                fresh != null && fresh.isNotEmpty() -> {
+                    playlistVideos = fresh
+                    playlistRefreshedAt = System.currentTimeMillis()
+                }
             }
-        }
-        playlistLoading = false
+        } finally { playlistLoading = false }
     }
 
     // The feed plus the user's library (manually added videos — which can be
@@ -442,8 +443,9 @@ fun MediaTab(
     // ALWAYS shows every one of its videos in playlist order — the All Feed's
     // date / content / watch / sort filters never apply to it (different
     // context, different behavior).
+    val watchRev by androidx.compose.runtime.collectAsState(WatchProgressStore.revisionFlow)
     val displayed = remember(
-        channelVideos, feedFilter, manualIds, feedIsUserPlaylist, feedIsPlaylist
+        channelVideos, feedFilter, manualIds, feedIsUserPlaylist, feedIsPlaylist, watchRev
     ) {
         when {
             feedIsUserPlaylist -> {

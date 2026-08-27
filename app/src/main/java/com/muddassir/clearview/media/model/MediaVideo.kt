@@ -48,7 +48,9 @@ data class MediaVideo(
     val isShort: Boolean = false,
     val isLive: Boolean = false,
     val durationSeconds: Long = 0L,
-    val isOfflineAudio: Boolean = false
+    val isOfflineAudio: Boolean = false,
+    val platform: MediaPlatform = MediaPlatform.YOUTUBE,
+    val instagramType: InstagramMediaType? = null
 ) {
     companion object {
         /**

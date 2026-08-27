@@ -18,10 +18,14 @@ package com.muddassir.clearview.media.model
  *                      failed. 0 for channels added before this field existed
  *                      (guard inactive — their behavior is unchanged).
  */
+enum class MediaPlatform { YOUTUBE, INSTAGRAM }
+enum class InstagramMediaType { REEL, IMAGE }
 data class SavedChannel(
     val channelId: String,
     val displayName: String,
     val sourceRef: String,
     val avatarUrl: String? = null,
-    val addedAtEpochMillis: Long = 0L
+    val addedAtEpochMillis: Long = 0L,
+    val platform: MediaPlatform = MediaPlatform.YOUTUBE,
+    val instagramType: InstagramMediaType? = null
 )

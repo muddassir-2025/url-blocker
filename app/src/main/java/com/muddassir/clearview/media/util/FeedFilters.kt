@@ -53,15 +53,20 @@ fun applyFeedFilter(
     val filtered = videos.filter { v ->
         val afterStart = start == null || v.publishedAtEpochMillis >= start
         val beforeEnd = end == null || v.publishedAtEpochMillis <= end
+        val platformOk = when (filter.platform) {
+            com.muddassir.clearview.media.model.FeedPlatformFilter.ALL -> true
+            com.muddassir.clearview.media.model.FeedPlatformFilter.YOUTUBE -> v.platform == com.muddassir.clearview.media.model.MediaPlatform.YOUTUBE
+            com.muddassir.clearview.media.model.FeedPlatformFilter.INSTAGRAM -> v.platform == com.muddassir.clearview.media.model.MediaPlatform.INSTAGRAM
+        }
         val typeOk = when (filter.content) {
             FeedContentFilter.ALL -> true
             FeedContentFilter.VIDEOS -> !v.isShort
             FeedContentFilter.SHORTS -> v.isShort
             FeedContentFilter.LIVE -> v.isLive
-            // The Downloads filter switches the Media tab to the dedicated
-            // Downloads section; the feed list itself never shows here.
+            FeedContentFilter.REELS -> v.instagramType == com.muddassir.clearview.media.model.InstagramMediaType.REEL
+            FeedContentFilter.IMAGE_POSTS -> v.instagramType == com.muddassir.clearview.media.model.InstagramMediaType.IMAGE
             FeedContentFilter.DOWNLOADS -> false
-        }
+        } && platformOk
         val p = progressOf(v.videoId)
         val statusOk = when (filter.watchStatus) {
             FeedWatchStatus.ALL -> true
@@ -130,6 +135,7 @@ private fun customRangeLabel(filter: FeedFilter): String {
 fun encodeFeedFilter(filter: FeedFilter): String =
     JSONObject()
         .put("date", filter.date.name)
+        .put("platform", filter.platform.name)
         .put("content", filter.content.name)
         .put("sort", filter.sort.name)
         .put("watchStatus", filter.watchStatus.name)
@@ -152,6 +158,9 @@ fun decodeFeedFilter(json: String?): FeedFilter? {
         val o = JSONObject(json)
         val date = runCatching { FeedDateFilter.valueOf(o.optString("date", "")) }.getOrNull()
             ?: return null
+        val platform = runCatching {
+            com.muddassir.clearview.media.model.FeedPlatformFilter.valueOf(o.optString("platform", ""))
+        }.getOrNull() ?: com.muddassir.clearview.media.model.FeedPlatformFilter.ALL
         var content = runCatching { FeedContentFilter.valueOf(o.optString("content", "")) }.getOrNull()
             ?: return null
         // The Live content filter was removed from the UI (Filter → Content); a
@@ -182,6 +191,7 @@ fun decodeFeedFilter(json: String?): FeedFilter? {
         }.getOrNull() ?: PlaylistTypeFilter.ALL
         FeedFilter(
             date = date,
+            platform = platform,
             content = content,
             sort = sort,
             watchStatus = watchStatus,

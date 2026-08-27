@@ -66,8 +66,66 @@ data class TodoItem(
      * still count them (see TodoStats, which reads [completions] directly).
      * Null = nothing cleared.
      */
-    val completedClearedBefore: Long? = null
+    val completedClearedBefore: Long? = null,
+    /** Behavior of the Todo (normal checkbox, attempted state, or time tracking) */
+    val behavior: TodoBehavior = TodoBehavior.NORMAL,
+    /** For TIME behavior: the target duration in minutes */
+    val targetDurationMinutes: Int? = null,
+    /** Permanent history of all modifications and daily state changes */
+    val events: List<TodoEvent> = emptyList(),
+    /** True if the Todo was deleted but its history was preserved. */
+    val isDeleted: Boolean = false
 )
+
+/** The task type/behavior, independent of its TEMPORARY/PERMANENT persistence. */
+enum class TodoBehavior { NORMAL, ATTEMPTED, TIME }
+
+/** Permanent historical events for a Todo. */
+sealed class TodoEvent {
+    abstract val timestampMillis: Long
+
+    // -- Overarching Todo changes --
+
+    data class Created(
+        override val timestampMillis: Long,
+        val title: String,
+        val timeMinutes: Int?,
+        val durationMinutes: Int?
+    ) : TodoEvent()
+
+    data class Edited(
+        override val timestampMillis: Long,
+        val oldTitle: String?,
+        val newTitle: String?,
+        val oldTimeMinutes: Int?,
+        val newTimeMinutes: Int?,
+        val oldDurationMinutes: Int?,
+        val newDurationMinutes: Int?
+    ) : TodoEvent()
+
+    // -- Day-specific occurrence changes --
+
+    data class Attempted(
+        override val timestampMillis: Long,
+        val epochDay: Long
+    ) : TodoEvent()
+
+    data class Completed(
+        override val timestampMillis: Long,
+        val epochDay: Long
+    ) : TodoEvent()
+
+    data class Uncompleted(
+        override val timestampMillis: Long,
+        val epochDay: Long
+    ) : TodoEvent()
+
+    data class TimeAdded(
+        override val timestampMillis: Long,
+        val epochDay: Long,
+        val addedMinutes: Int
+    ) : TodoEvent()
+}
 
 /** A temporary todo leaves the active list after its period; a permanent one stays. */
 enum class TodoType { TEMPORARY, PERMANENT }
@@ -105,3 +163,6 @@ data class ReminderConfig(
     /** True = ring the system alarm clock; false = post a notification. */
     val asAlarm: Boolean = false
 )
+
+
+

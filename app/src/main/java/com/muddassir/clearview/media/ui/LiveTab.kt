@@ -105,6 +105,10 @@ fun LiveTab(
     // BOUNDED, so YouTube is never hammered. A DNS-filter block (Restricted
     // Mode) stops retrying and explains itself — retrying cannot help while
     // the filter maps www.youtube.com to Restricted Mode.
+    // Backup for stream: when primary fails try backup source if available
+    val backupStream = remember(selectedId) {
+        LiveStreamConfig.backupStreams[selectedId]
+    }
     LaunchedEffect(selectedId, retryToken) {
         playerRetryToken = 0
         playerState = YtState.UNSTARTED
@@ -113,11 +117,16 @@ fun LiveTab(
         while (true) {
             state = if (attempt == 0) LiveState.Resolving else LiveState.Retrying
             if (attempt > 0) playerRetryToken++ // force re-apply, same id or not
-            val result = LiveStreamResolver.resolveLiveVideoId(
+            var result = LiveStreamResolver.resolveLiveVideoId(
                 source = stream,
                 cacheStore = cacheStore,
                 forceRefresh = attempt > 0
             )
+            // Graceful fallback: if Makkah primary unavailable try backup
+            if (result.videoId == null && !result.blockedByFilter && backupStream != null) {
+                val fallback = LiveStreamResolver.resolveLiveVideoId(backupStream, cacheStore, forceRefresh = attempt > 0)
+                if (fallback.videoId != null) result = fallback
+            }
             if (result.videoId != null) {
                 videoId = result.videoId
                 // Wait for the embed to actually start playing; surface the
