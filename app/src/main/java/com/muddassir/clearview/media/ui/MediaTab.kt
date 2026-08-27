@@ -42,6 +42,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
@@ -81,6 +82,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -444,7 +446,7 @@ fun MediaTab(
     // ALWAYS shows every one of its videos in playlist order — the All Feed's
     // date / content / watch / sort filters never apply to it (different
     // context, different behavior).
-    val watchRev by androidx.compose.runtime.collectAsState(WatchProgressStore.revisionFlow)
+    val watchRev by WatchProgressStore.revisionFlow.collectAsState()
     val displayed = remember(
         channelVideos, feedFilter, manualIds, feedIsUserPlaylist, feedIsPlaylist, watchRev
     ) {
@@ -847,7 +849,7 @@ fun MediaTab(
                             SearchChannelCard(
                                 channel = ch,
                                 onClick = {
-                                    selectedChannelId = ch.channelId
+                                    filterChannelId = ch.channelId
                                     searchActive = false
                                     searchQuery = ""
                                 }
@@ -1606,7 +1608,7 @@ private fun SearchChannelCard(
                 )
             }
             Icon(
-                Icons.Filled.ChevronRight,
+                Icons.AutoMirrored.Filled.ArrowForward,
                 contentDescription = "Open channel",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
