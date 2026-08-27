@@ -486,12 +486,9 @@ fun VideoPlayerScreen(
         // Vertical fullscreen (Shorts style) fills the whole portrait screen;
         // landscape is naturally full screen; otherwise a 16:9 box at the top.
         val isInstagram = video.platform == MediaPlatform.INSTAGRAM || video.videoId.startsWith("ig_")
-        val isInstagramReel = isInstagram && (video.isShort || video.instagramType == InstagramMediaType.REEL || video.instagramType == InstagramMediaType.VIDEO)
         Box(
             modifier = when {
                 isLandscape || fullscreenVertical -> Modifier.fillMaxSize()
-                isInstagramReel -> Modifier.fillMaxWidth().aspectRatio(4f / 5f)
-                isInstagram -> Modifier.fillMaxWidth().aspectRatio(1f)
                 else -> Modifier.fillMaxWidth().aspectRatio(16f / 9f)
             }
         ) {
@@ -1851,61 +1848,7 @@ private fun InstagramPlayer(
                         settings.useWideViewPort = true
                         settings.loadWithOverviewMode = true
                         settings.userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                        setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
-
-                        val hideChromeJs = """
-                            (function() {
-                                var css = `
-                                    header, footer, 
-                                    .Header, .EmbedHeader, 
-                                    .Footer, .EmbedFooter, 
-                                    .Feedback, .HoverFeedback, 
-                                    .SocialProof, .EmbedSocialProof, 
-                                    .Caption, .EmbedCaption {
-                                        display: none !important;
-                                        visibility: hidden !important;
-                                        height: 0 !important;
-                                        overflow: hidden !important;
-                                    }
-                                    html, body {
-                                        margin: 0 !important;
-                                        padding: 0 !important;
-                                        background: #000 !important;
-                                        overflow: hidden !important;
-                                    }
-                                    .Embed, .EmbedFrame {
-                                        margin: 0 auto !important;
-                                        padding: 0 !important;
-                                        background: #000 !important;
-                                        border: none !important;
-                                        box-shadow: none !important;
-                                        width: 100% !important;
-                                        height: 100% !important;
-                                    }
-                                    .EmbeddedMedia, .EmbeddedMediaVideo, a.EmbeddedMedia, video {
-                                        display: block !important;
-                                        visibility: visible !important;
-                                        opacity: 1 !important;
-                                        width: 100% !important;
-                                        height: 100% !important;
-                                        max-height: 100% !important;
-                                        max-width: 100% !important;
-                                        object-fit: contain !important;
-                                        margin: 0 auto !important;
-                                    }
-                                `;
-                                var style = document.getElementById('cv-clean-style');
-                                if (!style) {
-                                    style = document.createElement('style');
-                                    style.id = 'cv-clean-style';
-                                    style.type = 'text/css';
-                                    style.appendChild(document.createTextNode(css));
-                                    (document.head || document.documentElement).appendChild(style);
-                                }
-                            })();
-                        """.trimIndent()
-
+                        setBackgroundColor(android.graphics.Color.BLACK)
                         webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(
                                 view: WebView?,
@@ -1918,18 +1861,6 @@ private fun InstagramPlayer(
                                 }
                                 // Block top-level navigation away from the embed (never open Chrome or Instagram login)
                                 return true
-                            }
-
-                            override fun onPageFinished(view: WebView?, url: String?) {
-                                super.onPageFinished(view, url)
-                                view?.evaluateJavascript(hideChromeJs, null)
-                                view?.postDelayed({ view.evaluateJavascript(hideChromeJs, null) }, 500)
-                                view?.postDelayed({ view.evaluateJavascript(hideChromeJs, null) }, 1500)
-                            }
-
-                            override fun onPageCommitVisible(view: WebView?, url: String?) {
-                                super.onPageCommitVisible(view, url)
-                                view?.evaluateJavascript(hideChromeJs, null)
                             }
                         }
                         loadUrl("https://www.instagram.com/p/$shortcode/embed/")
