@@ -1851,51 +1851,48 @@ private fun InstagramPlayer(
                         settings.useWideViewPort = true
                         settings.loadWithOverviewMode = true
                         settings.userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-                        setBackgroundColor(android.graphics.Color.BLACK)
-
-                        // Bridge for capturing the raw .mp4 directly from the embed DOM
-                        addJavascriptInterface(object {
-                            @android.webkit.JavascriptInterface
-                            fun onVideoFound(url: String?) {
-                                if (!url.isNullOrBlank() && (url.startsWith("http") || url.contains(".mp4"))) {
-                                    post {
-                                        directMediaUrl = url
-                                    }
-                                }
-                            }
-                        }, "ClearViewBridge")
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
 
                         val hideChromeJs = """
                             (function() {
                                 var css = `
                                     header, footer, 
-                                    .Header, .Footer, .Feedback, .SocialProof, .HoverFeedback, 
-                                    .EmbedCaption, .Caption, .FooterCTA, .CTA, 
-                                    [class*="Header"], [class*="Footer"], [class*="Feedback"], 
-                                    [class*="SocialProof"], [class*="Caption"], [class*="Engagement"],
-                                    a[href*="instagram.com"] {
+                                    .Header, .EmbedHeader, 
+                                    .Footer, .EmbedFooter, 
+                                    .Feedback, .HoverFeedback, 
+                                    .SocialProof, .EmbedSocialProof, 
+                                    .Caption, .EmbedCaption {
                                         display: none !important;
                                         visibility: hidden !important;
                                         height: 0 !important;
                                         overflow: hidden !important;
                                     }
-                                    html, body, .Embed, .EmbedFrame, #react-root, [class*="Root"] {
+                                    html, body {
                                         margin: 0 !important;
                                         padding: 0 !important;
                                         background: #000 !important;
+                                        overflow: hidden !important;
+                                    }
+                                    .Embed, .EmbedFrame {
+                                        margin: 0 auto !important;
+                                        padding: 0 !important;
+                                        background: #000 !important;
+                                        border: none !important;
+                                        box-shadow: none !important;
                                         width: 100% !important;
                                         height: 100% !important;
-                                        overflow: hidden !important;
-                                        display: flex !important;
-                                        align-items: center !important;
-                                        justify-content: center !important;
                                     }
-                                    .EmbeddedMedia, .EmbeddedMediaVideo, video {
+                                    .EmbeddedMedia, .EmbeddedMediaVideo, a.EmbeddedMedia, video {
+                                        display: block !important;
+                                        visibility: visible !important;
+                                        opacity: 1 !important;
                                         width: 100% !important;
                                         height: 100% !important;
                                         max-height: 100% !important;
                                         max-width: 100% !important;
                                         object-fit: contain !important;
+                                        margin: 0 auto !important;
                                     }
                                 `;
                                 var style = document.getElementById('cv-clean-style');
@@ -1905,17 +1902,6 @@ private fun InstagramPlayer(
                                     style.type = 'text/css';
                                     style.appendChild(document.createTextNode(css));
                                     (document.head || document.documentElement).appendChild(style);
-                                }
-                                function checkVideo() {
-                                    var v = document.querySelector('video');
-                                    if (v && v.src && v.src.indexOf('http') === 0 && window.ClearViewBridge) {
-                                        window.ClearViewBridge.onVideoFound(v.src);
-                                    }
-                                }
-                                checkVideo();
-                                if (!window.__cvObs) {
-                                    window.__cvObs = new MutationObserver(function() { checkVideo(); });
-                                    window.__cvObs.observe(document.body || document.documentElement, { childList: true, subtree: true, attributes: true });
                                 }
                             })();
                         """.trimIndent()
