@@ -55,6 +55,12 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -900,6 +906,18 @@ fun MediaTab(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
                 ) {
+                    if (filterChannelId != null && !isSearching) {
+                        val activeChannel = channels.find { it.channelId == filterChannelId }
+                        if (activeChannel != null) {
+                            item(key = "channel-profile-header") {
+                                ChannelProfileHeader(
+                                    channel = activeChannel,
+                                    onClose = { filterChannelId = null }
+                                )
+                            }
+                        }
+                    }
+
                     // Matching channels in search results
                     if (matchingChannels.isNotEmpty() && isSearching) {
                         item(key = "matching-channels-header") {
@@ -2022,104 +2040,77 @@ private fun LongVideoCard(
     val watched = !video.isLive && (fraction ?: 0f) >= 0.9f
     val live = video.isLive
 
-    Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-        )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(bottom = 14.dp)
     ) {
-        Row {
-            // ── Thumbnail + progress overlay ──
-            Box(
-                modifier = Modifier
-                    .width(176.dp)
-                    .aspectRatio(16f / 9f)
-            ) {
-                if (video.thumbnailUrl.isBlank()) {
-                    // Device/system audio has no thumbnail — a soft minimalist
-                    // gradient with a music note keeps the card looking
-                    // intentional instead of showing a broken image.
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.linearGradient(
-                                    listOf(
-                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
-                                        MaterialTheme.colorScheme.surfaceVariant
-                                    )
+        // ── Full-width 16:9 Thumbnail ──
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(10.dp))
+        ) {
+            if (video.thumbnailUrl.isBlank()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.linearGradient(
+                                listOf(
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
+                                    MaterialTheme.colorScheme.surfaceVariant
                                 )
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Filled.MusicNote,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.size(42.dp)
-                        )
-                    }
-                } else {
-                    RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
-                }
-                // Watched treatment: dim the whole thumbnail FIRST, so every
-                // badge (LIVE, menu, duration) stays bright on top — matching
-                // the ShortCard ordering.
-                if (watched) {
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.35f))
+                            )
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.MusicNote,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.size(42.dp)
                     )
                 }
-                // Live indicator on the thumbnail.
-                if (live) {
-                    Surface(
-                        modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
-                        shape = RoundedCornerShape(5.dp),
-                        color = Color(0xFFD93025)
+            } else {
+                RemoteImage(url = video.thumbnailUrl, modifier = Modifier.fillMaxSize())
+            }
+            if (watched) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.35f))
+                )
+            }
+            // Live indicator on the thumbnail.
+            if (live) {
+                Surface(
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    shape = RoundedCornerShape(5.dp),
+                    color = Color(0xFFD93025)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(6.dp)
-                                    .background(Color.White, CircleShape)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                text = "LIVE",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
-                            )
-                        }
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .background(Color.White, CircleShape)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "LIVE",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
                     }
                 }
-                // Overflow menu (add to playlist / download / hide / remove
-                // manual / remove from playlist).
-                VideoCardMenu(
-                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
-                    isManual = isManual,
-                    downloadLabel = downloadMenuLabel(downloadStatus, isOffline),
-                    onDownloadAction = downloadMenuAction(
-                        downloadStatus, isOffline, onDownload, onCancelDownload, onDeleteDownload
-                    ),
-                    onPlayOffline = if (isOffline) onPlayOffline else null,
-                    onHide = onHide,
-                    onRemoveManual = onRemoveManual,
-                    onAddToPlaylist = onAddToPlaylist,
-                    onRemoveFromPlaylist = onRemoveFromPlaylist,
-                    inPlaylist = inPlaylist
-                )
-            // Live download progress renders on the thumbnail itself (a
-            // status pill + bottom progress bar); the ⋮ menu keeps the
-            // Cancel / Retry action. Bottom-end stack: status pills +
-            // duration pill. Everything sits above the download/watch bar.
+            }
+            // Duration & offline badge at bottom-end
             Column(
                 modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
                 horizontalAlignment = Alignment.End,
@@ -2153,93 +2144,94 @@ private fun LongVideoCard(
                 }
                 DurationBadge(seconds = video.durationSeconds)
             }
-                if (watched) {
-                    // Watched badge (the dim is already applied above).
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(6.dp),
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.primary
+            if (watched) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(8.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.primary
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Filled.Check,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.size(12.dp)
-                            )
-                            Spacer(Modifier.width(3.dp))
-                            Text(
-                                text = "Watched",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimary
-                            )
-                        }
-                    }
-                } else if (downloadStatus != null) {
-                    DownloadThumbOverlay(status = downloadStatus)
-                } else if (fraction != null && fraction > 0.02f && !live) {
-                    // In-progress: YouTube-style thin progress bar + a small
-                    // "NN%" pill (top-right) so the watched amount is visible
-                    // at a glance.
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(6.dp),
-                        shape = RoundedCornerShape(5.dp),
-                        color = Color.Black.copy(alpha = 0.6f)
-                    ) {
-                        Text(
-                            text = "${(fraction.coerceIn(0f, 1f) * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color.White,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(12.dp)
                         )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .fillMaxWidth()
-                            .height(3.dp)
-                            .background(Color.Black.copy(alpha = 0.45f))
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .fillMaxWidth(fraction.coerceIn(0f, 1f))
-                                .background(MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(3.dp))
+                        Text(
+                            text = "Watched",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary
                         )
                     }
                 }
+            } else if (downloadStatus != null) {
+                DownloadThumbOverlay(status = downloadStatus)
+            } else if (fraction != null && fraction > 0.02f && !live) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .background(Color.Black.copy(alpha = 0.45f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
             }
+        }
 
-            // ── Title / channel · views · date ──
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(12.dp)
+        Spacer(Modifier.height(10.dp))
+
+        // ── Channel Avatar + Title/Metadata + Menu Row ──
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Surface(
+                modifier = Modifier.size(36.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surfaceVariant
             ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = video.channelName.take(1).uppercase(),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = video.title,
-                    style = MaterialTheme.typography.titleSmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(4.dp))
                 Text(
                     text = buildString {
                         append(video.channelName.ifBlank { "YouTube" })
                         if (video.viewCount > 0L) {
-                            append(" · ").append(formatViews(video.viewCount)).append(" views")
+                            append(" • ").append(formatViews(video.viewCount)).append(" views")
                         }
                         if (video.publishedAtEpochMillis > 0L) {
-                            append(" · ").append(
+                            append(" • ").append(
                                 DateUtils.getRelativeTimeSpanString(
                                     video.publishedAtEpochMillis,
                                     System.currentTimeMillis(),
@@ -2254,6 +2246,19 @@ private fun LongVideoCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+            VideoCardMenu(
+                isManual = isManual,
+                downloadLabel = downloadMenuLabel(downloadStatus, isOffline),
+                onDownloadAction = downloadMenuAction(
+                    downloadStatus, isOffline, onDownload, onCancelDownload, onDeleteDownload
+                ),
+                onPlayOffline = if (isOffline) onPlayOffline else null,
+                onHide = onHide,
+                onRemoveManual = onRemoveManual,
+                onAddToPlaylist = onAddToPlaylist,
+                onRemoveFromPlaylist = onRemoveFromPlaylist,
+                inPlaylist = inPlaylist
+            )
         }
     }
 }
@@ -2275,175 +2280,245 @@ private fun InstagramMediaCard(
     val isWatched = remember(video.videoId, watchRev) {
         progressStore.isWatched(video.videoId)
     }
+    var showMenu by remember { mutableStateOf(false) }
 
-    Card(
-        onClick = onClick,
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-        )
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(bottom = 20.dp)
     ) {
-        Column {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-                    .background(Color.Black),
-                contentAlignment = Alignment.Center
+        // ── Instagram Header: Creator Avatar + Name + ⋮ Menu ──
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                modifier = Modifier.size(32.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surfaceVariant
             ) {
-                if (video.thumbnailUrl.isNotBlank()) {
-                    RemoteImage(
-                        url = video.thumbnailUrl,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = video.channelName.take(1).uppercase(),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFE1306C)
                     )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.surfaceVariant),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Filled.MusicNote,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.size(48.dp)
-                        )
-                    }
                 }
-
-                if (isWatched) {
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.35f))
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = video.channelName,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Box {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        contentDescription = "Post options",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
                     )
-                    Surface(
-                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.primary
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Filled.Check,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.size(12.dp)
-                            )
-                            Spacer(Modifier.width(3.dp))
-                            Text(
-                                text = "Watched",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimary
-                            )
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text(if (isWatched) "Mark as unwatched" else "Mark as watched") },
+                        onClick = {
+                            showMenu = false
+                            if (isWatched) {
+                                progressStore.remove(video.videoId)
+                            } else {
+                                progressStore.set(video.videoId, 1.0f)
+                            }
                         }
-                    }
-                } else {
-                    val typeLabel = when (video.instagramType) {
-                        InstagramMediaType.REEL -> "Reel"
-                        InstagramMediaType.VIDEO -> "Video"
-                        InstagramMediaType.CAROUSEL -> "Carousel"
-                        else -> if (video.isShort) "Reel" else "Post"
-                    }
-                    Surface(
-                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-                        shape = RoundedCornerShape(5.dp),
-                        color = Color.Black.copy(alpha = 0.65f)
-                    ) {
-                        Text(
-                            text = typeLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Hide post") },
+                        onClick = {
+                            showMenu = false
+                            onHide()
+                        }
+                    )
                 }
+            }
+        }
 
-                var showMenu by remember { mutableStateOf(false) }
-                Box(modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
-                    Surface(
-                        modifier = Modifier
-                            .size(30.dp)
-                            .clip(CircleShape)
-                            .clickable { showMenu = true },
-                        shape = CircleShape,
-                        color = Color.Black.copy(alpha = 0.45f)
+        // ── Square Media / Carousel Box ──
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.Black)
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) {
+            if (video.thumbnailUrl.isNotBlank()) {
+                RemoteImage(
+                    url = video.thumbnailUrl,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.MusicNote,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.size(48.dp)
+                    )
+                }
+            }
+
+            if (isWatched) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.35f))
+                )
+                Surface(
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.primary
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            Icons.Filled.MoreVert,
-                            contentDescription = "Post options",
-                            tint = Color.White,
-                            modifier = Modifier.padding(5.dp)
+                            Icons.Filled.Check,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(12.dp)
                         )
-                    }
-                    DropdownMenu(
-                        expanded = showMenu,
-                        onDismissRequest = { showMenu = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text(if (isWatched) "Mark as unwatched" else "Mark as watched") },
-                            onClick = {
-                                showMenu = false
-                                if (isWatched) {
-                                    progressStore.remove(video.videoId)
-                                } else {
-                                    progressStore.set(video.videoId, 1.0f)
-                                }
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Hide post") },
-                            onClick = {
-                                showMenu = false
-                                onHide()
-                            }
+                        Spacer(Modifier.width(3.dp))
+                        Text(
+                            text = "Watched",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary
                         )
                     }
                 }
+            } else {
+                val typeLabel = when (video.instagramType) {
+                    InstagramMediaType.REEL -> "Reel"
+                    InstagramMediaType.VIDEO -> "Video"
+                    InstagramMediaType.CAROUSEL -> "Carousel"
+                    else -> if (video.isShort) "Reel" else "Post"
+                }
+                Surface(
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    shape = RoundedCornerShape(5.dp),
+                    color = Color.Black.copy(alpha = 0.65f)
+                ) {
+                    Text(
+                        text = typeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+        }
+
+        // ── Action Bar: Watched / Like + Share ──
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = {
+                    if (isWatched) {
+                        progressStore.remove(video.videoId)
+                    } else {
+                        progressStore.set(video.videoId, 1.0f)
+                    }
+                },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    imageVector = if (isWatched) Icons.Filled.CheckCircle else Icons.Outlined.CheckCircle,
+                    contentDescription = if (isWatched) "Watched" else "Mark watched",
+                    tint = if (isWatched) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text(
-                    text = video.channelName,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                if (video.title.isNotBlank()) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = video.title,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                if (video.publishedAtEpochMillis > 0L) {
-                    Spacer(Modifier.height(4.dp))
-                    val relTime = remember(video.publishedAtEpochMillis) {
-                        DateUtils.getRelativeTimeSpanString(
-                            video.publishedAtEpochMillis,
-                            System.currentTimeMillis(),
-                            DateUtils.MINUTE_IN_MILLIS,
-                            DateUtils.FORMAT_ABBREV_RELATIVE
-                        ).toString()
+            Spacer(Modifier.width(8.dp))
+
+            IconButton(
+                onClick = {
+                    val shareUrl = video.instagramUrl ?: "https://www.instagram.com/"
+                    val sendIntent = Intent().apply {
+                        action = Intent.ACTION_SEND
+                        putExtra(Intent.EXTRA_TEXT, "${video.title}\n$shareUrl")
+                        type = "text/plain"
                     }
-                    Text(
-                        text = relTime,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
-                }
+                    context.startActivity(Intent.createChooser(sendIntent, "Share post"))
+                },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    Icons.Filled.Share,
+                    contentDescription = "Share",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
+        }
+
+        // ── Caption & Timestamp ──
+        if (video.title.isNotBlank()) {
+            Text(
+                text = buildAnnotatedString {
+                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                        append(video.channelName)
+                        append(" ")
+                    }
+                    append(video.title)
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(horizontal = 6.dp),
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        if (video.publishedAtEpochMillis > 0L) {
+            val relTime = remember(video.publishedAtEpochMillis) {
+                DateUtils.getRelativeTimeSpanString(
+                    video.publishedAtEpochMillis,
+                    System.currentTimeMillis(),
+                    DateUtils.MINUTE_IN_MILLIS,
+                    DateUtils.FORMAT_ABBREV_RELATIVE
+                ).toString()
+            }
+            Text(
+                text = relTime,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+            )
         }
     }
 }
@@ -2733,27 +2808,98 @@ private fun FeedHeader(
     }
 }
 
-/**
- * Bottom sheet with the All Feed filter controls: Date presets (+ custom range
- * via date pickers), Content type, Sort, and Reset / Apply. Draft state is
- * only committed on Apply.
- */
-@OptIn(
-    ExperimentalMaterial3Api::class,
-    androidx.compose.foundation.layout.ExperimentalLayoutApi::class
-)
+@Composable
+private fun ChannelProfileHeader(
+    channel: SavedChannel,
+    onClose: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Close channel profile",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier.size(60.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                if (!channel.avatarUrl.isNullOrBlank()) {
+                    RemoteImage(
+                        url = channel.avatarUrl,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = channel.displayName.take(1).uppercase(),
+                            style = MaterialTheme.typography.headlineMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            Text(
+                text = channel.displayName,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = if (channel.platform == MediaPlatform.INSTAGRAM)
+                    Color(0xFFE1306C).copy(alpha = 0.15f)
+                else
+                    Color(0xFFFF0000).copy(alpha = 0.15f)
+            ) {
+                Text(
+                    text = if (channel.platform == MediaPlatform.INSTAGRAM) "Instagram Creator" else "YouTube Channel",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (channel.platform == MediaPlatform.INSTAGRAM) Color(0xFFE1306C) else Color(0xFFFF0000),
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun FilterSheet(
     filter: FeedFilter,
-    /** Inside a user playlist only the Source (By URL / From device / By RSS) and Type
-     *  (Video / Audio) filters apply — playlists keep their hand-picked order,
-     *  so the sheet shows just those two sections there. */
     isPlaylistContext: Boolean = false,
     onApply: (FeedFilter) -> Unit,
     onReset: (FeedFilter) -> Unit,
     onDismiss: () -> Unit
 ) {
     var draft by remember { mutableStateOf(filter) }
+    var showAdvanced by remember { mutableStateOf(false) }
     var showStartPicker by remember { mutableStateOf(false) }
     var showEndPicker by remember { mutableStateOf(false) }
 
@@ -2763,58 +2909,144 @@ private fun FilterSheet(
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp)
+                .padding(bottom = 32.dp)
         ) {
-            Text(
-                text = "Filter",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Filters",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                TextButton(onClick = { draft = FeedFilter() }) {
+                    Text("Clear all", color = MaterialTheme.colorScheme.primary)
+                }
+            }
 
+            // ── Content: All, Videos, Shorts, Posts, Downloads ──
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Content",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(8.dp))
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(
+                    FeedContentFilter.ALL to "All",
+                    FeedContentFilter.VIDEOS to "Videos",
+                    FeedContentFilter.SHORTS to "Shorts",
+                    FeedContentFilter.REELS to "Posts",
+                    FeedContentFilter.DOWNLOADS to "Downloads"
+                ).forEach { (type, label) ->
+                    FilterChip(
+                        selected = draft.content == type,
+                        onClick = { draft = draft.copy(content = type) },
+                        label = { Text(label) }
+                    )
+                }
+            }
+
+            // ── Source: All, Following, Added by me ──
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Source",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(8.dp))
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(
+                    FeedSourceFilter.ALL to "All",
+                    FeedSourceFilter.SYSTEM to "Following",
+                    FeedSourceFilter.BY_URL to "Added by me"
+                ).forEach { (src, label) ->
+                    FilterChip(
+                        selected = draft.source == src,
+                        onClick = { draft = draft.copy(source = src) },
+                        label = { Text(label) }
+                    )
+                }
+            }
+
+            // ── Status: All, Unwatched, Watched ──
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Status",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(8.dp))
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(
+                    FeedWatchStatus.ALL to "All",
+                    FeedWatchStatus.UNWATCHED to "Unwatched",
+                    FeedWatchStatus.WATCHED to "Watched"
+                ).forEach { (status, label) ->
+                    FilterChip(
+                        selected = draft.watchStatus == status,
+                        onClick = { draft = draft.copy(watchStatus = status) },
+                        label = { Text(label) }
+                    )
+                }
+            }
+
+            // ── Time: Any time, Today, This week, This month ──
             if (!isPlaylistContext) {
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    text = "Date",
+                    text = "Time",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold
                 )
-                Spacer(Modifier.height(4.dp))
-                FeedDateFilter.entries.forEach { option ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { draft = draft.copy(date = option) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = draft.date == option,
-                            onClick = { draft = draft.copy(date = option) }
+                Spacer(Modifier.height(8.dp))
+                androidx.compose.foundation.layout.FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        FeedDateFilter.ALL_TIME to "Any time",
+                        FeedDateFilter.TODAY to "Today",
+                        FeedDateFilter.LAST_7_DAYS to "This week",
+                        FeedDateFilter.LAST_30_DAYS to "This month"
+                    ).forEach { (dt, label) ->
+                        FilterChip(
+                            selected = draft.date == dt,
+                            onClick = { draft = draft.copy(date = dt) },
+                            label = { Text(label) }
                         )
-                        Spacer(Modifier.width(4.dp))
-                        Text(option.label, style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-                if (draft.date == FeedDateFilter.CUSTOM) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = { showStartPicker = true },
-                            modifier = Modifier.weight(1f)
-                        ) { Text(formatShortDate(draft.customStartEpochMillis, "Start")) }
-                        OutlinedButton(
-                            onClick = { showEndPicker = true },
-                            modifier = Modifier.weight(1f)
-                        ) { Text(formatShortDate(draft.customEndEpochMillis, "End")) }
                     }
                 }
 
-                if (!isPlaylistContext) {
-                    Spacer(Modifier.height(16.dp))
+                // ── Advanced / Sort ──
+                Spacer(Modifier.height(12.dp))
+                TextButton(
+                    onClick = { showAdvanced = !showAdvanced },
+                    contentPadding = PaddingValues(0.dp)
+                ) {
                     Text(
-                        text = "Platform",
+                        text = if (showAdvanced) "− Fewer filters" else "+ More filters",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                if (showAdvanced) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Sort Order",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -2823,197 +3055,24 @@ private fun FilterSheet(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        com.muddassir.clearview.media.model.FeedPlatformFilter.entries.forEach { option ->
+                        FeedSortOrder.entries.forEach { option ->
                             FilterChip(
-                                selected = draft.platform == option,
-                                onClick = { draft = draft.copy(platform = option) },
+                                selected = draft.sort == option,
+                                onClick = { draft = draft.copy(sort = option) },
                                 label = { Text(option.label) }
                             )
                         }
                     }
                 }
-
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    text = "Content",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(8.dp))
-                val contentOptions = when (draft.platform) {
-                    com.muddassir.clearview.media.model.FeedPlatformFilter.YOUTUBE ->
-                        listOf(FeedContentFilter.ALL, FeedContentFilter.VIDEOS, FeedContentFilter.SHORTS, FeedContentFilter.DOWNLOADS)
-                    com.muddassir.clearview.media.model.FeedPlatformFilter.INSTAGRAM ->
-                        listOf(FeedContentFilter.ALL, FeedContentFilter.REELS, FeedContentFilter.IMAGE_POSTS)
-                    else ->
-                        FeedContentFilter.entries.filterNot { it == FeedContentFilter.LIVE }
-                }
-                androidx.compose.foundation.layout.FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    contentOptions.forEach { option ->
-                        FilterChip(
-                            selected = draft.content == option,
-                            onClick = { draft = draft.copy(content = option) },
-                            label = { Text(option.label) }
-                        )
-                    }
-                }
-            }
-
-            // Type — only meaningful inside a user playlist, which can hold
-            // both YouTube videos and audio imported from the device.
-            if (isPlaylistContext) {
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    text = "Type",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "Show everything, only the YouTube videos, or only the audio added from your device.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                androidx.compose.foundation.layout.FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    PlaylistTypeFilter.entries.forEach { option ->
-                        FilterChip(
-                            selected = draft.playlistType == option,
-                            onClick = { draft = draft.copy(playlistType = option) },
-                            label = { Text(option.label) }
-                        )
-                    }
-                }
-            }
-
-            // Source — always available: it's the only feed filter that also
-            // applies inside a user playlist (playlists keep their own order).
-            Spacer(Modifier.height(16.dp))
-            Text(
-                text = "Source",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = if (isPlaylistContext) {
-                    "Where the audio in this playlist comes from: added by URL, pulled from your channels, or imported from your device."
-                } else {
-                    "Where the videos come from: added by URL, or pulled automatically from your channels."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(8.dp))
-            androidx.compose.foundation.layout.FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // "By RSS" is a playlist-only option — the All Feed already
-                // covers channel-feed videos with "From channels". It stays
-                // visible when already selected (a filter picked inside a
-                // playlist can outlive the playlist), so an active filter is
-                // never left with a hidden chip.
-                val sourceOptions = FeedSourceFilter.entries.filterNot {
-                    it == FeedSourceFilter.BY_RSS && !isPlaylistContext &&
-                        draft.source != FeedSourceFilter.BY_RSS
-                }
-                sourceOptions.forEach { option ->
-                    FilterChip(
-                        selected = draft.source == option,
-                        onClick = {
-                            draft = draft.copy(
-                                source = option,
-                                // A source filter means "everything from here" —
-                                // the default Unwatched status would otherwise
-                                // hide already-watched videos and make the filter
-                                // look like it shows the wrong videos.
-                                watchStatus = if (option == FeedSourceFilter.ALL) {
-                                    draft.watchStatus
-                                } else {
-                                    FeedWatchStatus.ALL
-                                }
-                            )
-                        },
-                        label = {
-                            Text(
-                                if (option == FeedSourceFilter.SYSTEM && isPlaylistContext) DEVICE_SOURCE_LABEL
-                                else option.label
-                            )
-                        }
-                    )
-                }
-            }
-
-            if (!isPlaylistContext) {
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    text = "Sort",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(4.dp))
-                FeedSortOrder.entries.forEach { option ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { draft = draft.copy(sort = option) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = draft.sort == option,
-                            onClick = { draft = draft.copy(sort = option) }
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text(option.label, style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    text = "Watch Status",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(4.dp))
-                FeedWatchStatus.entries.forEach { option ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { draft = draft.copy(watchStatus = option) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = draft.watchStatus == option,
-                            onClick = { draft = draft.copy(watchStatus = option) }
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text(option.label, style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
             }
 
             Spacer(Modifier.height(24.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            Button(
+                onClick = { onApply(draft) },
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(12.dp)
             ) {
-                OutlinedButton(
-                    onClick = { draft = FeedFilter() },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Reset") }
-                Button(
-                    onClick = { onApply(draft) },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Apply") }
+                Text("Apply Filters", fontWeight = FontWeight.SemiBold)
             }
         }
     }

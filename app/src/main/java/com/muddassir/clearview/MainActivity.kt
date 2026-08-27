@@ -50,6 +50,7 @@ import com.muddassir.clearview.ui.ContentTab
 import com.muddassir.clearview.ui.ApplyImmersiveIfNeeded
 import com.muddassir.clearview.ui.contentHubNavItems
 import com.muddassir.clearview.ui.isLandscape
+import com.muddassir.clearview.ui.ContentHubSheetsHost
 import com.muddassir.clearview.ui.rememberContentHubState
 import com.muddassir.clearview.ui.theme.UrlblockerTheme
 import com.muddassir.clearview.viewmodel.MainViewModel
@@ -167,7 +168,14 @@ open class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class MainTab { QURAN, MEDIA, LIVE, BLOCK }
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import com.muddassir.clearview.ui.HomeScreen
+import com.muddassir.clearview.ui.ToolsScreen
+import com.muddassir.clearview.quran.ui.QuranScreen
+import com.muddassir.clearview.media.ui.MediaTab
+
+private enum class MainTab { HOME, MEDIA, QURAN, TOOLS, BLOCK }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -175,7 +183,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     val context = LocalContext.current
     val landscape = isLandscape()
 
-    var selectedTab by rememberSaveable { mutableStateOf(MainTab.QURAN) }
+    var selectedTab by rememberSaveable { mutableStateOf(MainTab.HOME) }
     val hub = rememberContentHubState()
 
     // A Todo-reminder notification tap opens straight into the Todo screen —
@@ -295,23 +303,25 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     Scaffold(
         topBar = {
             if (!isFullscreen) {
-                if (selectedTab == MainTab.BLOCK) {
+                if (hub.playingAudio != null) {
+                    ContentHubTopBar(state = hub, onBack = null)
+                } else if (selectedTab == MainTab.BLOCK) {
                     TopAppBar(
                         title = {
                             Column {
                                 Text(
-                                    "ClearView",
-                                    fontWeight = FontWeight.Bold
+                                    "ClearView Shield",
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.titleLarge
                                 )
                                 Text(
-                                    "Security & controls",
+                                    "Security & protection controls",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         },
                         actions = {
-                            // Lock indicator — tap to re-lock the Block tab.
                             IconButton(onClick = {
                                 if (viewModel.hasPassword) {
                                     viewModel.lockApp()
@@ -322,7 +332,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                                         Icons.Filled.Lock
                                     else
                                         Icons.Outlined.LockOpen,
-                                    contentDescription = if (viewModel.hasPassword) "Lock Block tab" else "No password set",
+                                    contentDescription = if (viewModel.hasPassword) "Lock Shield tab" else "No password set",
                                     tint = if (viewModel.hasPassword && viewModel.isAppLocked)
                                         MaterialTheme.colorScheme.error
                                     else
@@ -334,62 +344,142 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                             containerColor = MaterialTheme.colorScheme.surface
                         )
                     )
-                } else {
-                    // The main app has nothing to navigate back to on the content
-                    // tabs; the shared top bar's player branch handles its own
-                    // back (returns to the Media tab).
-                    ContentHubTopBar(state = hub, onBack = null)
                 }
             }
         },
         bottomBar = {
             if (hub.playingVideo == null && hub.playingAudio == null && !isFullscreen) {
-                NavigationBar {
-                    contentHubNavItems().forEach { item ->
-                        NavigationBarItem(
-                            selected = selectedTab == tabFor(item.tab),
-                            onClick = {
-                                hub.selectedTab = item.tab
-                                selectedTab = tabFor(item.tab)
-                            },
-                            icon = {
-                                // Channel-update badge: shows the number of
-                                // unseen updates; clears once Media is opened.
-                                if (item.tab == ContentTab.MEDIA && hub.unreadMediaUpdates > 0) {
-                                    BadgedBox(
-                                        badge = {
-                                            Badge {
-                                                Text(hub.unreadMediaUpdates.coerceAtMost(99).toString())
-                                            }
-                                        }
-                                    ) {
-                                        item.icon()
-                                    }
-                                } else {
-                                    item.icon()
-                                }
-                            },
-                            label = { Text(item.label) }
-                        )
-                    }
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 3.dp
+                ) {
                     NavigationBarItem(
-                        selected = selectedTab == MainTab.BLOCK,
-                        onClick = { selectedTab = MainTab.BLOCK },
-                        icon = { Icon(Icons.Filled.Shield, contentDescription = null) },
-                        label = { Text("Block") }
+                        selected = selectedTab == MainTab.HOME,
+                        onClick = { selectedTab = MainTab.HOME },
+                        icon = {
+                            Icon(
+                                if (selectedTab == MainTab.HOME) Icons.Filled.Home else Icons.Outlined.Home,
+                                contentDescription = "Home"
+                            )
+                        },
+                        label = { Text("Home") }
+                    )
+                    NavigationBarItem(
+                        selected = selectedTab == MainTab.MEDIA,
+                        onClick = {
+                            selectedTab = MainTab.MEDIA
+                            hub.selectedTab = ContentTab.MEDIA
+                        },
+                        icon = {
+                            if (hub.unreadMediaUpdates > 0) {
+                                BadgedBox(
+                                    badge = {
+                                        Badge {
+                                            Text(hub.unreadMediaUpdates.coerceAtMost(99).toString())
+                                        }
+                                    }
+                                ) {
+                                    Icon(
+                                        if (selectedTab == MainTab.MEDIA) Icons.Filled.PlayCircle else Icons.Outlined.PlayCircle,
+                                        contentDescription = "Media"
+                                    )
+                                }
+                            } else {
+                                Icon(
+                                    if (selectedTab == MainTab.MEDIA) Icons.Filled.PlayCircle else Icons.Outlined.PlayCircle,
+                                    contentDescription = "Media"
+                                )
+                            }
+                        },
+                        label = { Text("Media") }
+                    )
+                    NavigationBarItem(
+                        selected = selectedTab == MainTab.QURAN,
+                        onClick = {
+                            selectedTab = MainTab.QURAN
+                            hub.selectedTab = ContentTab.QURAN
+                        },
+                        icon = {
+                            Icon(
+                                if (selectedTab == MainTab.QURAN) Icons.AutoMirrored.Filled.MenuBook else Icons.AutoMirrored.Outlined.MenuBook,
+                                contentDescription = "Quran"
+                            )
+                        },
+                        label = { Text("Quran") }
+                    )
+                    NavigationBarItem(
+                        selected = selectedTab == MainTab.TOOLS || selectedTab == MainTab.BLOCK,
+                        onClick = { selectedTab = MainTab.TOOLS },
+                        icon = {
+                            Icon(
+                                if (selectedTab == MainTab.TOOLS || selectedTab == MainTab.BLOCK) Icons.Filled.GridView else Icons.Outlined.GridView,
+                                contentDescription = "Tools"
+                            )
+                        },
+                        label = { Text("Tools") }
                     )
                 }
             }
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-            when (selectedTab) {
-                MainTab.BLOCK -> {
-                    // The Block tab is the ONLY password-protected surface. It
-                    // is gated on first open too: no password set → the setup
-                    // screen forces one before the dashboard is revealed;
-                    // password set but locked → unlock screen; otherwise the
-                    // security dashboard.
+            when {
+                hub.playingVideo != null || hub.playingAudio != null -> ContentHubTabContent(
+                    state = hub,
+                    isLandscape = landscape
+                )
+
+                selectedTab == MainTab.HOME -> HomeScreen(
+                    state = hub,
+                    onPlayVideo = { video -> hub.playVideo(video, emptyList(), -1) },
+                    onNavigateToMedia = {
+                        selectedTab = MainTab.MEDIA
+                        hub.selectedTab = ContentTab.MEDIA
+                    },
+                    onNavigateToQuran = {
+                        selectedTab = MainTab.QURAN
+                        hub.selectedTab = ContentTab.QURAN
+                    },
+                    onNavigateToShield = { selectedTab = MainTab.BLOCK },
+                    onOpenSearch = { hub.showSearchSheet = true },
+                    onOpenNotifications = { hub.openNotificationsPanel() },
+                    onOpenSettings = { hub.showSettingsSheet = true },
+                    onOpenTodo = { hub.showTodoScreen = true }
+                )
+
+                selectedTab == MainTab.MEDIA -> MediaTab(
+                    hubState = hub,
+                    onPlayVideo = { video, queue, index ->
+                        hub.playVideo(video, queue, index)
+                        if (index < 0) hub.markMediaUpdatesSeen()
+                    },
+                    onPlayOffline = { video -> hub.playAudio(video) },
+                    onPlayAudio = { item -> hub.playAudioItem(item) },
+                    onMediaOpened = { hub.markMediaUpdatesSeen() }
+                )
+
+                selectedTab == MainTab.QURAN -> QuranScreen(
+                    state = hub,
+                    onOpenSearch = { hub.showSearchSheet = true },
+                    onOpenSettings = { hub.showSettingsSheet = true },
+                    onOpenBookmarks = { hub.showBookmarksSheet = true }
+                )
+
+                selectedTab == MainTab.TOOLS -> ToolsScreen(
+                    onOpenTodo = { hub.showTodoScreen = true },
+                    onOpenPhoneLimit = { hub.showPhoneLimitSheet = true },
+                    onOpenDhikr = { hub.showDhikrCounter = true },
+                    onOpenLive = {
+                        hub.selectedTab = ContentTab.LIVE
+                        selectedTab = MainTab.MEDIA
+                    },
+                    onOpenBookmarks = { hub.showBookmarksSheet = true },
+                    onOpenShield = { selectedTab = MainTab.BLOCK },
+                    onOpenSettings = { hub.showSettingsSheet = true },
+                    onOpenNotifications = { hub.openNotificationsPanel() }
+                )
+
+                selectedTab == MainTab.BLOCK -> {
                     if (!viewModel.hasPassword || viewModel.shouldShowLockScreen()) {
                         LockScreen(
                             onUnlock = { password -> viewModel.verifyAppPassword(password) },
@@ -400,16 +490,12 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         BlockTab(viewModel, deviceAdminLauncher)
                     }
                 }
-                else -> ContentHubTabContent(state = hub, isLandscape = landscape)
             }
+
+            // Always host the global modal sheets (Search, Settings, Bookmarks, Dhikr, Todo, Phone Limit)
+            ContentHubSheetsHost(state = hub)
         }
     }
-}
-
-private fun tabFor(tab: ContentTab): MainTab = when (tab) {
-    ContentTab.QURAN -> MainTab.QURAN
-    ContentTab.MEDIA -> MainTab.MEDIA
-    ContentTab.LIVE -> MainTab.LIVE
 }
 
 @Composable
@@ -427,122 +513,149 @@ private fun LockScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .background(MaterialTheme.colorScheme.background)
+            .padding(20.dp),
         contentAlignment = Alignment.Center
     ) {
-        Column(
-            modifier = Modifier
-                .padding(32.dp)
-                .fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
+        OutlinedCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.outlinedCardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            ),
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+            )
         ) {
-            Icon(
-                Icons.Filled.Lock,
-                contentDescription = null,
-                modifier = Modifier.size(48.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
+            Column(
+                modifier = Modifier
+                    .padding(28.dp)
+                    .fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(60.dp)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Lock,
+                        contentDescription = null,
+                        modifier = Modifier.size(30.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
 
-            Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(18.dp))
 
-            Text(
-                text = if (isSetupMode) "Set Block Password" else "Block Tab Locked",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = if (isSetupMode)
-                    "Create a password to protect the Block tab (keywords, websites and protection controls)"
-                else
-                    "Enter password to open Block settings",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            if (isSetupMode) {
-                OutlinedTextField(
-                    value = setupPasswordInput,
-                    onValueChange = { setupPasswordInput = it; errorMessage = null },
-                    label = { Text("New password") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    modifier = Modifier.fillMaxWidth(),
-                    isError = errorMessage != null
+                Text(
+                    text = if (isSetupMode) "Set Shield Password" else "ClearView Shield Locked",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
                 )
+
                 Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = setupConfirmInput,
-                    onValueChange = { setupConfirmInput = it; errorMessage = null },
-                    label = { Text("Confirm password") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    modifier = Modifier.fillMaxWidth(),
-                    isError = errorMessage != null
+
+                Text(
+                    text = if (isSetupMode)
+                        "Create a password to protect the Shield settings (keywords, websites, and tamper controls)"
+                    else
+                        "Enter your password to unlock Shield settings",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
                 )
-                if (errorMessage != null) {
-                    Text(
-                        text = errorMessage!!,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                if (isSetupMode) {
+                    OutlinedTextField(
+                        value = setupPasswordInput,
+                        onValueChange = { setupPasswordInput = it; errorMessage = null },
+                        label = { Text("New password") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                        isError = errorMessage != null
                     )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-                Button(
-                    onClick = {
-                        if (setupPasswordInput.trim().length < 4) {
-                            errorMessage = "Password must be at least 4 characters"
-                        } else if (setupPasswordInput != setupConfirmInput) {
-                            errorMessage = "Passwords do not match"
-                        } else {
-                            onSetupPassword(setupPasswordInput)
-                            setupPasswordInput = ""
-                            setupConfirmInput = ""
-                            isSetupMode = false
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Set Password")
-                }
-            } else {
-                OutlinedTextField(
-                    value = passwordInput,
-                    onValueChange = { passwordInput = it; errorMessage = null },
-                    label = { Text("Password") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    modifier = Modifier.fillMaxWidth(),
-                    isError = errorMessage != null
-                )
-                if (errorMessage != null) {
-                    Text(
-                        text = errorMessage!!,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = setupConfirmInput,
+                        onValueChange = { setupConfirmInput = it; errorMessage = null },
+                        label = { Text("Confirm password") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                        isError = errorMessage != null
                     )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-                Button(
-                    onClick = {
-                        if (onUnlock(passwordInput)) {
-                            passwordInput = ""
-                            errorMessage = null
-                        } else {
-                            errorMessage = "Incorrect password"
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Unlock")
+                    if (errorMessage != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = errorMessage!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(18.dp))
+                    Button(
+                        onClick = {
+                            if (setupPasswordInput.trim().length < 4) {
+                                errorMessage = "Password must be at least 4 characters"
+                            } else if (setupPasswordInput != setupConfirmInput) {
+                                errorMessage = "Passwords do not match"
+                            } else {
+                                onSetupPassword(setupPasswordInput)
+                                setupPasswordInput = ""
+                                setupConfirmInput = ""
+                                isSetupMode = false
+                            }
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Set Password", fontWeight = FontWeight.SemiBold)
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it; errorMessage = null },
+                        label = { Text("Password") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                        isError = errorMessage != null
+                    )
+                    if (errorMessage != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = errorMessage!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(18.dp))
+                    Button(
+                        onClick = {
+                            if (onUnlock(passwordInput)) {
+                                passwordInput = ""
+                                errorMessage = null
+                            } else {
+                                errorMessage = "Incorrect password"
+                            }
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Unlock", fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
         }

@@ -11,33 +11,59 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 
+import androidx.compose.ui.graphics.Color
+
 private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
+    primary = EmeraldPrimary,
+    onPrimary = EmeraldOnPrimary,
+    primaryContainer = EmeraldContainer,
+    onPrimaryContainer = EmeraldOnContainer,
+    secondary = CyanSecondary,
+    onSecondary = Color.Black,
+    secondaryContainer = CyanContainer,
+    onSecondaryContainer = CyanOnContainer,
+    tertiary = AmberGold,
+    onTertiary = Color.Black,
+    tertiaryContainer = AmberContainer,
+    onTertiaryContainer = AmberOnContainer,
+    background = ObsidianBase,
+    onBackground = TextHighEmphasis,
+    surface = ObsidianSurface,
+    onSurface = TextHighEmphasis,
+    surfaceVariant = ObsidianCard,
+    onSurfaceVariant = TextMediumEmphasis,
+    outline = ObsidianBorder,
+    outlineVariant = ObsidianSubtle
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
+    primary = EmeraldPrimary,
     onPrimary = Color.White,
+    primaryContainer = EmeraldOnContainer,
+    onPrimaryContainer = EmeraldContainer,
+    secondary = CyanSecondary,
     onSecondary = Color.White,
+    secondaryContainer = CyanOnContainer,
+    onSecondaryContainer = CyanContainer,
+    tertiary = AmberGold,
     onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
+    tertiaryContainer = AmberOnContainer,
+    onTertiaryContainer = AmberContainer,
+    background = LightBackground,
+    onBackground = LightTextPrimary,
+    surface = LightSurface,
+    onSurface = LightTextPrimary,
+    surfaceVariant = LightCard,
+    onSurfaceVariant = LightTextSecondary,
+    outline = LightBorder,
+    outlineVariant = Color(0xFFCBD5E1)
 )
 
 @Composable
 fun UrlblockerTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = true,
+    // Dynamic color is available on Android 12+ (defaults to false to preserve ClearView signature theme)
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {

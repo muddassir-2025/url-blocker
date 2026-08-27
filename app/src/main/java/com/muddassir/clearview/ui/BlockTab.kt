@@ -84,27 +84,111 @@ fun BlockTab(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        item {
+            Text(
+                text = "CORE DEFENSE",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+            )
+        }
         item { ProtectionCard(viewModel, context) }
         item { StrictModeCard(viewModel, context) }
         item { BlockShortsCard(viewModel) }
-        item { YouTubeChromeTestCard(viewModel) }
-        item { YouTubeChromeTestKeywordsCard(viewModel) }
+
+        item {
+            Text(
+                text = "CONTENT & SEARCH RESTRICTIONS",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 10.dp, start = 4.dp, bottom = 4.dp)
+            )
+        }
         item { BlockedItemsCard(viewModel) }
+
+        item {
+            Text(
+                text = "NETWORK PRIVACY",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 10.dp, start = 4.dp, bottom = 4.dp)
+            )
+        }
         item { DnsCard(viewModel, context) }
 
         item {
             Text(
-                text = "ADVANCED",
-                style = MaterialTheme.typography.labelMedium,
+                text = "SECURITY & TAMPER CONTROLS",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 8.dp, start = 4.dp)
+                modifier = Modifier.padding(top = 10.dp, start = 4.dp, bottom = 4.dp)
             )
         }
         item { DeviceAdminCard(viewModel, context, deviceAdminLauncher) }
         item { UninstallProtectionCard(viewModel, context) }
         item { AppLockCard(viewModel) }
 
-        item { Spacer(modifier = Modifier.height(8.dp)) }
+        item {
+            Text(
+                text = "ADVANCED & EXPERIMENTAL",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 10.dp, start = 4.dp, bottom = 4.dp)
+            )
+        }
+        item { ExperimentalTestCard(viewModel) }
+
+        item { Spacer(modifier = Modifier.height(16.dp)) }
+    }
+}
+
+@Composable
+private fun ExperimentalTestCard(viewModel: MainViewModel) {
+    var expanded by remember { mutableStateOf(false) }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Experimental & Diagnostics",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = if (expanded) "Tap to collapse test suites" else "Browser verification & test suites",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Filled.Close else Icons.Filled.Add,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            if (expanded) {
+                Spacer(Modifier.height(16.dp))
+                YouTubeChromeTestCard(viewModel)
+                Spacer(Modifier.height(12.dp))
+                YouTubeChromeTestKeywordsCard(viewModel)
+            }
+        }
     }
 }
 

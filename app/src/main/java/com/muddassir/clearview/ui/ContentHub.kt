@@ -13,6 +13,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
@@ -570,6 +571,7 @@ fun isLandscape(): Boolean =
 fun ContentHubTabContent(
     state: ContentHubState,
     isLandscape: Boolean,
+    onOpenShield: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -618,7 +620,16 @@ fun ContentHubTabContent(
                 onPrevious = { state.goToAdjacentVerse(-1) },
                 onNext = { state.goToAdjacentVerse(+1) },
                 islamicDateAdjustment = state.islamicDateAdjustment,
-                onAdjustDate = { state.showIslamicDateSheet = true }
+                onAdjustDate = { state.showIslamicDateSheet = true },
+                onOpenDhikr = { state.showDhikrCounter = true },
+                onOpenTodo = { state.showTodoScreen = true },
+                onOpenPhoneLimit = { state.showPhoneLimitSheet = true },
+                onOpenBookmarks = { state.showBookmarksSheet = true },
+                onOpenLive = { state.selectedTab = ContentTab.LIVE },
+                onOpenShield = onOpenShield,
+                isBookmarked = state.isBookmarked,
+                onToggleBookmark = { state.toggleBookmark(context) },
+                onShareVerse = { state.shareVerse(context) }
             )
 
             state.selectedTab == ContentTab.MEDIA -> MediaTab(
@@ -688,7 +699,13 @@ fun ContentHubTopBar(
         )
 
         state.selectedTab == ContentTab.QURAN -> TopAppBar(
-            title = { Text(stringResource(R.string.quran_verse_header)) },
+            title = {
+                Text(
+                    "ClearView",
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleLarge
+                )
+            },
             navigationIcon = {
                 if (onBack != null) {
                     IconButton(onClick = onBack) {
@@ -707,9 +724,7 @@ fun ContentHubTopBar(
                         contentDescription = stringResource(R.string.quran_search)
                     )
                 }
-                // More options: verse refresh interval + notification toggles and
-                // the feature hub (Dhikr counter, Todo, bookmarks) — no longer
-                // just settings, so it uses the overflow icon.
+                // Settings & feature sheet
                 IconButton(
                     onClick = { state.showSettingsSheet = true },
                     enabled = state.verse != null && !state.verseLoading
@@ -717,19 +732,6 @@ fun ContentHubTopBar(
                     Icon(
                         Icons.Filled.MoreVert,
                         contentDescription = stringResource(R.string.quran_more_options)
-                    )
-                }
-                IconButton(
-                    onClick = { state.toggleBookmark(context) },
-                    enabled = state.verse != null && !state.verseLoading
-                ) {
-                    // Filled + primary-tinted when bookmarked, outlined + muted
-                    // otherwise — the state change is unmistakable at a glance.
-                    Icon(
-                        imageVector = if (state.isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.Bookmark,
-                        contentDescription = stringResource(R.string.quran_bookmark),
-                        tint = if (state.isBookmarked) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 // Notifications: opens the updates panel; badge = unread count.
@@ -784,8 +786,12 @@ fun ContentHubTopBar(
         )
     }
 
-    // Sheets opened from the Quran tab top bar: search, settings, notifications
-    // and the bookmarks manager (the latter is opened from the settings sheet).
+    // Sheets host
+    ContentHubSheetsHost(state = state)
+}
+
+@Composable
+fun ContentHubSheetsHost(state: ContentHubState) {
     if (state.showSearchSheet) {
         QuranSearchScreen(state = state, onDismiss = { state.showSearchSheet = false })
     }
@@ -811,8 +817,6 @@ fun ContentHubTopBar(
             onDismiss = { state.showIslamicDateSheet = false }
         )
     }
-    // Phone Limit: countdown that locks the phone when it expires. Opened from
-    // the settings sheet's "Set Phone Limit" card (Quran tab ⋮ menu).
     if (state.showPhoneLimitSheet) {
         PhoneLimitSheet(onDismiss = { state.showPhoneLimitSheet = false })
     }
@@ -831,13 +835,13 @@ data class ContentHubNavItem(
     val label: String
 )
 
-/** Standard hub navigation items (Quran, Media, Live) with resource labels. */
+/** Standard hub navigation items (Home, Media, Live) with resource labels. */
 @Composable
 fun contentHubNavItems(): List<ContentHubNavItem> = listOf(
     ContentHubNavItem(
         ContentTab.QURAN,
-        { Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null) },
-        stringResource(R.string.quran_tab)
+        { Icon(Icons.Filled.Home, contentDescription = null) },
+        "Home"
     ),
     ContentHubNavItem(
         ContentTab.MEDIA,

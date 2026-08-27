@@ -177,6 +177,7 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
     var snoozing by remember { mutableStateOf<TodoItem?>(null) }
     var dayDialog by remember { mutableStateOf<DayDialogRequest?>(null) }
     var showTargetDialog by remember { mutableStateOf(false) }
+    var showProgressSheet by remember { mutableStateOf(false) }
     var showScoreDialog by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
     // Shareable Progress Card generator (Statistics section header button).
@@ -347,6 +348,14 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
                 fontWeight = FontWeight.Bold
             )
             Spacer(Modifier.weight(1f))
+            IconButton(onClick = { showProgressSheet = true }) {
+                Icon(
+                    Icons.Filled.DateRange,
+                    contentDescription = "View Progress & Analytics",
+                    tint = if (showProgressSheet) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             IconButton(onClick = { showSearch = !showSearch }) {
                 Icon(
                     Icons.Filled.Search,
@@ -405,26 +414,22 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
             }
         }
 
-        // ── Filter chips: Today · Upcoming · History · All · Temporary · Permanent ──
+        // ── Primary tabs: Today · Upcoming · Completed ──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             listOf(
-                TodoFilter.TODAY to R.string.todo_filter_today,
-                TodoFilter.UPCOMING to R.string.todo_filter_upcoming,
-                TodoFilter.HISTORY to R.string.todo_filter_history,
-                TodoFilter.ALL to R.string.todo_filter_all,
-                TodoFilter.TEMPORARY to R.string.todo_filter_temporary,
-                TodoFilter.PERMANENT to R.string.todo_filter_permanent
+                TodoFilter.TODAY to "Today",
+                TodoFilter.UPCOMING to "Upcoming",
+                TodoFilter.HISTORY to "Completed"
             ).forEach { (option, label) ->
                 FilterChip(
                     selected = filter == option,
                     onClick = { filter = option },
-                    label = { Text(stringResource(label)) }
+                    label = { Text(label) }
                 )
             }
         }
@@ -617,47 +622,7 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
                             }
                         }
                     }
-                    item {
-                        Spacer(Modifier.height(8.dp))
-                        HorizontalDivider()
-                        Spacer(Modifier.height(16.dp))
-                    }
-                    item {
-                        WeeklyProgressSection(
-                            stats = weekStats,
-                            today = today,
-                            onDayTap = { dayDialog = DayDialogRequest(it, BarMode.TOTAL) }
-                        )
-                    }
-                    item {
-                        WeeklyScoreSection(stats = weekStats, onClick = { showScoreDialog = true })
-                    }
-                    item { InsightsSection(stats = weekStats) }
-                    item {
-                        StatisticsSection(
-                            stats = weekStats,
-                            items = items,
-                            today = today,
-                            onShareProgress = { showProgressCard = true }
-                        )
-                    }
-                    item {
-                        CalendarSection(
-                            stats = calendarStats,
-                            month = calendarMonth,
-                            today = today,
-                            onPrevMonth = { calendarMonth = calendarMonth.minusMonths(1) },
-                            onNextMonth = { calendarMonth = calendarMonth.plusMonths(1) },
-                            onDayTap = { dayDialog = DayDialogRequest(it, BarMode.TOTAL) }
-                        )
-                    }
-                    item {
-                        WeeklyBarGraph(
-                            stats = weekStats,
-                            onBarTap = { day, mode -> dayDialog = DayDialogRequest(day, mode) }
-                        )
-                    }
-                    item { Spacer(Modifier.height(24.dp)) }
+                    item { Spacer(Modifier.height(32.dp)) }
                 }
             }
 
@@ -669,6 +634,58 @@ private fun TodoScreenContent(onDismiss: () -> Unit) {
                     .padding(20.dp)
             ) {
                 Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.todo_add))
+            }
+        }
+    }
+
+    // ── Secondary Progress & Analytics Sheet ──
+    if (showProgressSheet) {
+        ModalBottomSheet(onDismissRequest = { showProgressSheet = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text = "Productivity & Insights",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+
+                WeeklyProgressSection(
+                    stats = weekStats,
+                    today = today,
+                    onDayTap = { dayDialog = DayDialogRequest(it, BarMode.TOTAL) }
+                )
+
+                WeeklyScoreSection(stats = weekStats, onClick = { showScoreDialog = true })
+
+                InsightsSection(stats = weekStats)
+
+                StatisticsSection(
+                    stats = weekStats,
+                    items = items,
+                    today = today,
+                    onShareProgress = { showProgressCard = true }
+                )
+
+                CalendarSection(
+                    stats = calendarStats,
+                    month = calendarMonth,
+                    today = today,
+                    onPrevMonth = { calendarMonth = calendarMonth.minusMonths(1) },
+                    onNextMonth = { calendarMonth = calendarMonth.plusMonths(1) },
+                    onDayTap = { dayDialog = DayDialogRequest(it, BarMode.TOTAL) }
+                )
+
+                WeeklyBarGraph(
+                    stats = weekStats,
+                    onBarTap = { day, mode -> dayDialog = DayDialogRequest(day, mode) }
+                )
             }
         }
     }
