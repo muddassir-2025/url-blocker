@@ -78,6 +78,7 @@ class WatchProgressStore(context: Context) {
             .remove(POS_PREFIX + videoId)
             .remove(DUR_PREFIX + videoId)
             .apply()
+        bump()
     }
 
     companion object {

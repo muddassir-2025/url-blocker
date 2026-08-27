@@ -135,6 +135,7 @@ private fun customRangeLabel(filter: FeedFilter): String {
 fun encodeFeedFilter(filter: FeedFilter): String =
     JSONObject()
         .put("date", filter.date.name)
+        .put("platform", filter.platform.name)
         .put("content", filter.content.name)
         .put("sort", filter.sort.name)
         .put("watchStatus", filter.watchStatus.name)
@@ -157,6 +158,9 @@ fun decodeFeedFilter(json: String?): FeedFilter? {
         val o = JSONObject(json)
         val date = runCatching { FeedDateFilter.valueOf(o.optString("date", "")) }.getOrNull()
             ?: return null
+        val platform = runCatching {
+            com.muddassir.clearview.media.model.FeedPlatformFilter.valueOf(o.optString("platform", ""))
+        }.getOrNull() ?: com.muddassir.clearview.media.model.FeedPlatformFilter.ALL
         var content = runCatching { FeedContentFilter.valueOf(o.optString("content", "")) }.getOrNull()
             ?: return null
         // The Live content filter was removed from the UI (Filter → Content); a
@@ -187,6 +191,7 @@ fun decodeFeedFilter(json: String?): FeedFilter? {
         }.getOrNull() ?: PlaylistTypeFilter.ALL
         FeedFilter(
             date = date,
+            platform = platform,
             content = content,
             sort = sort,
             watchStatus = watchStatus,

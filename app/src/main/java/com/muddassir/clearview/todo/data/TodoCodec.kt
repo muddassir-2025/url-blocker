@@ -1,6 +1,8 @@
 package com.muddassir.clearview.todo.data
 
 import com.muddassir.clearview.todo.model.ReminderConfig
+import com.muddassir.clearview.todo.model.TodoBehavior
+import com.muddassir.clearview.todo.model.TodoEvent
 import com.muddassir.clearview.todo.model.TodoItem
 import com.muddassir.clearview.todo.model.TodoPriority
 import com.muddassir.clearview.todo.model.TodoType
@@ -72,13 +74,43 @@ object TodoCodec {
                     })
                     .put("missedCleared", item.missedClearedBefore ?: JSONObject.NULL)
                     .put("completedCleared", item.completedClearedBefore ?: JSONObject.NULL)
-                    .put("kind", item.kind.name)
-                    .put("attemptState", item.attemptState.name)
-                    .put("totalDuration", item.totalDurationMinutes ?: JSONObject.NULL)
-                    .put("completedDuration", item.completedDurationMinutes)
-                    .put("history", JSONArray().apply {
-                        item.history.forEach { h ->
-                            put(JSONObject().put("ts", h.timestamp).put("ev", h.event).put("old", h.oldValue ?: JSONObject.NULL).put("new", h.newValue ?: JSONObject.NULL))
+                    .put("behavior", item.behavior.name)
+                    .put("targetDurationMinutes", item.targetDurationMinutes ?: JSONObject.NULL)
+                    .put("isDeleted", item.isDeleted)
+                    .put("events", JSONArray().apply {
+                        item.events.forEach { ev ->
+                            val obj = JSONObject()
+                                .put("type", ev.javaClass.simpleName)
+                                .put("ts", ev.timestampMillis)
+                            when (ev) {
+                                is TodoEvent.Created -> {
+                                    obj.put("title", ev.title)
+                                    obj.put("time", ev.timeMinutes ?: JSONObject.NULL)
+                                    obj.put("duration", ev.durationMinutes ?: JSONObject.NULL)
+                                }
+                                is TodoEvent.Edited -> {
+                                    obj.put("oldTitle", ev.oldTitle ?: JSONObject.NULL)
+                                    obj.put("newTitle", ev.newTitle ?: JSONObject.NULL)
+                                    obj.put("oldTime", ev.oldTimeMinutes ?: JSONObject.NULL)
+                                    obj.put("newTime", ev.newTimeMinutes ?: JSONObject.NULL)
+                                    obj.put("oldDuration", ev.oldDurationMinutes ?: JSONObject.NULL)
+                                    obj.put("newDuration", ev.newDurationMinutes ?: JSONObject.NULL)
+                                }
+                                is TodoEvent.Attempted -> {
+                                    obj.put("epochDay", ev.epochDay)
+                                }
+                                is TodoEvent.Completed -> {
+                                    obj.put("epochDay", ev.epochDay)
+                                }
+                                is TodoEvent.Uncompleted -> {
+                                    obj.put("epochDay", ev.epochDay)
+                                }
+                                is TodoEvent.TimeAdded -> {
+                                    obj.put("epochDay", ev.epochDay)
+                                    obj.put("addedMinutes", ev.addedMinutes)
+                                }
+                            }
+                            put(obj)
                         }
                     })
             )
@@ -164,17 +196,55 @@ object TodoCodec {
             else o.optLong("missedCleared"),
             completedClearedBefore = if (o.isNull("completedCleared")) null
             else o.optLong("completedCleared"),
-            kind = runCatching { com.muddassir.clearview.todo.model.TodoKind.valueOf(o.optString("kind","NORMAL")) }.getOrDefault(com.muddassir.clearview.todo.model.TodoKind.NORMAL),
-            attemptState = runCatching { com.muddassir.clearview.todo.model.AttemptState.valueOf(o.optString("attemptState","NOT_STARTED")) }.getOrDefault(com.muddassir.clearview.todo.model.AttemptState.NOT_STARTED),
-            totalDurationMinutes = if (o.isNull("totalDuration")) null else o.optInt("totalDuration"),
-            completedDurationMinutes = o.optInt("completedDuration",0),
-            history = runCatching {
-                val arr = o.optJSONArray("history") ?: return@runCatching emptyList<com.muddassir.clearview.todo.model.TodoHistoryEntry>()
+            behavior = runCatching {
+                TodoBehavior.valueOf(o.optString("behavior", o.optString("kind", "NORMAL")))
+            }.getOrDefault(TodoBehavior.NORMAL),
+            targetDurationMinutes = if (!o.isNull("targetDurationMinutes")) o.optInt("targetDurationMinutes")
+            else if (!o.isNull("totalDuration")) o.optInt("totalDuration")
+            else null,
+            events = runCatching {
+                val arr = o.optJSONArray("events") ?: o.optJSONArray("history") ?: return@runCatching emptyList<TodoEvent>()
                 (0 until arr.length()).mapNotNull { i ->
-                    val h = arr.getJSONObject(i)
-                    com.muddassir.clearview.todo.model.TodoHistoryEntry(h.optLong("ts"), h.optString("ev"), h.optString("old").takeIf { !h.isNull("old") }, h.optString("new").takeIf { !h.isNull("new") })
+                    val obj = arr.getJSONObject(i)
+                    val ts = obj.optLong("ts", 0L)
+                    when (obj.optString("type", obj.optString("ev", ""))) {
+                        "Created" -> TodoEvent.Created(
+                            timestampMillis = ts,
+                            title = obj.optString("title", o.optString("title", "")),
+                            timeMinutes = if (obj.isNull("time")) null else obj.optInt("time"),
+                            durationMinutes = if (obj.isNull("duration")) null else obj.optInt("duration")
+                        )
+                        "Edited" -> TodoEvent.Edited(
+                            timestampMillis = ts,
+                            oldTitle = if (obj.isNull("oldTitle")) null else obj.optString("oldTitle"),
+                            newTitle = if (obj.isNull("newTitle")) null else obj.optString("newTitle"),
+                            oldTimeMinutes = if (obj.isNull("oldTime")) null else obj.optInt("oldTime"),
+                            newTimeMinutes = if (obj.isNull("newTime")) null else obj.optInt("newTime"),
+                            oldDurationMinutes = if (obj.isNull("oldDuration")) null else obj.optInt("oldDuration"),
+                            newDurationMinutes = if (obj.isNull("newDuration")) null else obj.optInt("newDuration")
+                        )
+                        "Attempted" -> TodoEvent.Attempted(
+                            timestampMillis = ts,
+                            epochDay = obj.optLong("epochDay", 0L)
+                        )
+                        "Completed" -> TodoEvent.Completed(
+                            timestampMillis = ts,
+                            epochDay = obj.optLong("epochDay", 0L)
+                        )
+                        "Uncompleted" -> TodoEvent.Uncompleted(
+                            timestampMillis = ts,
+                            epochDay = obj.optLong("epochDay", 0L)
+                        )
+                        "TimeAdded" -> TodoEvent.TimeAdded(
+                            timestampMillis = ts,
+                            epochDay = obj.optLong("epochDay", 0L),
+                            addedMinutes = obj.optInt("addedMinutes", 0)
+                        )
+                        else -> null
+                    }
                 }
-            }.getOrDefault(emptyList())
+            }.getOrDefault(emptyList()),
+            isDeleted = o.optBoolean("isDeleted", false)
         )
         return item.copy(
             completions = item.completions.filterKeys { day ->
@@ -278,16 +348,28 @@ object TodoCodec {
     // ── Mutations (functional) ──────────────────────────────────────
 
     /** Appends a new todo (id always fresh; completions start empty). */
-    fun added(items: List<TodoItem>, item: TodoItem): List<TodoItem> =
-        items + item.copy(id = item.id.ifBlank { newId() }, completions = emptyMap(), history = item.history + com.muddassir.clearview.todo.model.TodoHistoryEntry(event="Created"))
+    fun added(items: List<TodoItem>, item: TodoItem): List<TodoItem> {
+        val id = item.id.ifBlank { newId() }
+        val creationEvent = TodoEvent.Created(
+            timestampMillis = System.currentTimeMillis(),
+            title = item.title,
+            timeMinutes = item.timeMinutes,
+            durationMinutes = item.targetDurationMinutes
+        )
+        return items + item.copy(
+            id = id,
+            completions = emptyMap(),
+            events = item.events + creationEvent
+        )
+    }
 
-    fun withHistory(item: TodoItem, event: String, old: String? = null, new: String? = null): TodoItem =
-        item.copy(history = item.history + com.muddassir.clearview.todo.model.TodoHistoryEntry(event=event, oldValue=old, newValue=new))
+    fun withEvent(item: TodoItem, event: TodoEvent): TodoItem =
+        item.copy(events = item.events + event)
 
     fun validSnoozeTimes(item: TodoItem, nowMinutes: Int): List<Int> {
         val start = item.timeStartMinutes ?: 0
         val end = item.timeEndMinutes ?: 1439
-        return listOf(15,30,45,60).mapNotNull { d -> (nowMinutes + d).takeIf { it in start..end } }
+        return listOf(15, 30, 45, 60).mapNotNull { d -> (nowMinutes + d).takeIf { it in start..end } }
     }
 
     /**
@@ -326,6 +408,11 @@ object TodoCodec {
                     timeEndMinutes = item.timeEndMinutes,
                     reminder = item.reminder,
                     priority = item.priority,
+                    strictInterval = item.strictInterval,
+                    behavior = item.behavior,
+                    targetDurationMinutes = item.targetDurationMinutes,
+                    events = if (preserveCompletions) existing.events else emptyList(),
+                    isDeleted = item.isDeleted,
                     // Preserved completions are kept ONLY on days the new plan
                     // is still active on — a completion on a day the edit made
                     // inapplicable (e.g. completed today, then moved to

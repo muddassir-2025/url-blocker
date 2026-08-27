@@ -623,4 +623,57 @@ class TodoCodecTest {
         // Reminder times were already filtered to 0..1439; 1440 drops out.
         assertEquals(listOf(9 * 60), decoded.reminder!!.timesMinutes)
     }
+
+    @Test
+    fun `behavior and events round-trip correctly`() {
+        val original = TodoItem(
+            id = "t_behavior",
+            title = "Test Behavior",
+            startDateEpochDay = TODAY.toEpochDay(),
+            behavior = com.muddassir.clearview.todo.model.TodoBehavior.TIME,
+            targetDurationMinutes = 45,
+            isDeleted = false,
+            events = listOf(
+                com.muddassir.clearview.todo.model.TodoEvent.Created(
+                    timestampMillis = 1000L,
+                    title = "Test Behavior",
+                    timeMinutes = 540,
+                    durationMinutes = 45
+                ),
+                com.muddassir.clearview.todo.model.TodoEvent.Edited(
+                    timestampMillis = 2000L,
+                    oldTitle = "Old",
+                    newTitle = "Test Behavior",
+                    oldTimeMinutes = null,
+                    newTimeMinutes = 540,
+                    oldDurationMinutes = 30,
+                    newDurationMinutes = 45
+                ),
+                com.muddassir.clearview.todo.model.TodoEvent.Attempted(
+                    timestampMillis = 3000L,
+                    epochDay = TODAY.toEpochDay()
+                ),
+                com.muddassir.clearview.todo.model.TodoEvent.Completed(
+                    timestampMillis = 4000L,
+                    epochDay = TODAY.toEpochDay()
+                ),
+                com.muddassir.clearview.todo.model.TodoEvent.Uncompleted(
+                    timestampMillis = 5000L,
+                    epochDay = TODAY.toEpochDay()
+                ),
+                com.muddassir.clearview.todo.model.TodoEvent.TimeAdded(
+                    timestampMillis = 6000L,
+                    epochDay = TODAY.toEpochDay(),
+                    addedMinutes = 15
+                )
+            )
+        )
+        val decoded = TodoCodec.decode(TodoCodec.encode(listOf(original))).first()
+        assertEquals(original.behavior, decoded.behavior)
+        assertEquals(original.targetDurationMinutes, decoded.targetDurationMinutes)
+        assertEquals(original.isDeleted, decoded.isDeleted)
+        assertEquals(original.events.size, decoded.events.size)
+        assertEquals(original.events, decoded.events)
+    }
 }
+

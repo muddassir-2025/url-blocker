@@ -105,9 +105,9 @@ fun LiveTab(
     // BOUNDED, so YouTube is never hammered. A DNS-filter block (Restricted
     // Mode) stops retrying and explains itself — retrying cannot help while
     // the filter maps www.youtube.com to Restricted Mode.
-    // Backup for Makkah: when primary fails try AlQuran4k backup
+    // Backup for stream: when primary fails try backup source if available
     val backupStream = remember(selectedId) {
-        if (selectedId == "makkah") LiveStreamConfig.streamById("makkah_backup") else null
+        LiveStreamConfig.backupStreams[selectedId]
     }
     LaunchedEffect(selectedId, retryToken) {
         playerRetryToken = 0

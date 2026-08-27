@@ -29,14 +29,6 @@ object LiveStreamConfig {
             channelUrl = "https://www.youtube.com/channel/UCos52azQNBgW63_9uDJoPDA"
         ),
         LiveStreamSource(
-            id = "makkah_backup",
-            title = "🕋 Makkah Live (Backup)",
-            subtitle = "AlQuran4k القرآن الكريم · Backup",
-            name = "AlQuran4k القرآن الكريم",
-            channelId = "UCfBw_uwZb_oFLyVsjWk6owQ",
-            channelUrl = "https://www.youtube.com/channel/UCfBw_uwZb_oFLyVsjWk6owQ"
-        ),
-        LiveStreamSource(
             id = "madinah",
             title = "🕌 Madinah Live",
             subtitle = "Al-Masjid an-Nabawi · Live from Madinah",
@@ -46,5 +38,18 @@ object LiveStreamConfig {
         )
     )
 
-    fun streamById(id: String): LiveStreamSource? = streams.find { it.id == id }
+    /** Fallback streams used when the primary channel broadcast is unavailable. */
+    val backupStreams: Map<String, LiveStreamSource> = mapOf(
+        "makkah" to LiveStreamSource(
+            id = "makkah_backup",
+            title = "🕋 Makkah Live (Backup)",
+            subtitle = "AlQuran4k القرآن الكريم · Backup",
+            name = "AlQuran4k القرآن الكريم",
+            channelId = "UCfBw_uwZb_oFLyVsjWk6owQ",
+            channelUrl = "https://www.youtube.com/channel/UCfBw_uwZb_oFLyVsjWk6owQ"
+        )
+    )
+
+    fun streamById(id: String): LiveStreamSource? =
+        streams.find { it.id == id } ?: backupStreams[id] ?: backupStreams.values.find { it.id == id }
 }

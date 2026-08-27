@@ -164,6 +164,5 @@ data class ReminderConfig(
     val asAlarm: Boolean = false
 )
 
-// Compat for PR a219822: old keys kind/attemptState/history map to new behavior/events
-typealias TodoKind = TodoBehavior
-typealias TodoHistoryEntry = TodoEvent
+
+
