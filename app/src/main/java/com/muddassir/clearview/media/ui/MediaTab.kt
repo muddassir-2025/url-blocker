@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.text.format.DateUtils
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.layout.ContentScale
@@ -94,6 +95,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -182,7 +184,7 @@ fun MediaTab(
     var libraryRevision by remember { mutableIntStateOf(0) }
 
     var channels by remember { mutableStateOf(repository.getSavedChannels()) }
-    var filterChannelId by remember { mutableStateOf<String?>(null) }
+    var filterChannelId by rememberSaveable { mutableStateOf<String?>(null) }
     var videos by remember { mutableStateOf<List<MediaVideo>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
     var showingCached by remember { mutableStateOf(false) }
@@ -210,12 +212,12 @@ fun MediaTab(
     var downloadsSourceFilter by remember { mutableStateOf(DownloadSourceFilter.ALL) }
     // Feed search: a live title/channel filter applied on top of the current
     // feed (All Feed or a selected channel) — never refetches.
-    var searchActive by remember { mutableStateOf(false) }
-    var searchQuery by remember { mutableStateOf("") }
+    var searchActive by rememberSaveable { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
 
     // ── Imported YouTube playlists (added by URL) ─────────────────
     var playlists by remember { mutableStateOf(repository.getSavedPlaylists()) }
-    var selectedPlaylistId by remember { mutableStateOf<String?>(null) }
+    var selectedPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
     var playlistVideos by remember { mutableStateOf<List<MediaVideo>>(emptyList()) }
     var playlistLoading by remember { mutableStateOf(false) }
     var playlistError by remember { mutableStateOf<String?>(null) }
@@ -233,8 +235,24 @@ fun MediaTab(
     val userPlaylistStore = remember { UserPlaylistStore(context.applicationContext) }
     // Bumped whenever a user playlist is created / renamed / deleted / edited.
     var playlistRevision by remember { mutableIntStateOf(0) }
-    var showPlaylistsSheet by remember { mutableStateOf(false) }
-    var selectedUserPlaylistId by remember { mutableStateOf<String?>(null) }
+    var showPlaylistsSheet by rememberSaveable { mutableStateOf(false) }
+    var selectedUserPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Back handling within the Media tab: returns from channel/playlist back to All feed
+    BackHandler(
+        enabled = filterChannelId != null || selectedPlaylistId != null || selectedUserPlaylistId != null || showPlaylistsSheet || searchActive
+    ) {
+        when {
+            searchActive -> {
+                searchActive = false
+                searchQuery = ""
+            }
+            showPlaylistsSheet -> showPlaylistsSheet = false
+            selectedUserPlaylistId != null -> selectedUserPlaylistId = null
+            selectedPlaylistId != null -> selectedPlaylistId = null
+            filterChannelId != null -> filterChannelId = null
+        }
+    }
     // The feed filter is persisted per context (survives restarts): the All
     // Feed filter when no channel is selected, each channel's own filter when
     // one is, and each playlist's own filter while it's open (imported by URL
