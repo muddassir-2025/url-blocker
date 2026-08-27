@@ -335,7 +335,7 @@ fun MediaTab(
             videos = cached
             showingCached = true
         }
-        val fresh = repository.refreshAllVideos(channels)
+        val fresh = repository.refreshAllVideos(channels, force = refreshToken > 0)
         if (fresh != null) {
             // Merge, don't replace: a channel whose refresh failed this round
             // keeps its cached videos. MediaVideos.merge keeps the FIRST list's

@@ -138,84 +138,98 @@ object LiveStreamResolver {
         cacheStore: LiveStreamCacheStore,
         forceRefresh: Boolean = false
     ): LiveResolveResult = withContext(Dispatchers.IO) {
-        val channelId = source.channelId
+        val result = resolveForChannel(source.channelId, cacheStore, forceRefresh)
+        if (result.videoId != null || result.blockedByFilter) {
+            return@withContext result
+        }
+        
+        if (source.fallbackChannelId != null) {
+            Log.d(TAG, "Primary channel ${source.channelId} failed, trying fallback ${source.fallbackChannelId}")
+            val fallbackResult = resolveForChannel(source.fallbackChannelId, cacheStore, forceRefresh)
+            if (fallbackResult.videoId != null) {
+                // Cache the fallback videoId under the primary channelId so it works seamlessly
+                accept(source.channelId, fallbackResult.videoId, "LIVE_RESOLVED_VIA_FALLBACK", cacheStore)
+                return@withContext fallbackResult
+            }
+        }
+        
+        Log.w(TAG, "LIVE_NOT_ACTIVE channelId=${source.channelId} (no validated live broadcast)")
+        LiveResolveResult(videoId = null)
+    }
+
+    private suspend fun resolveForChannel(
+        channelId: String,
+        cacheStore: LiveStreamCacheStore,
+        forceRefresh: Boolean
+    ): LiveResolveResult {
         val now = System.currentTimeMillis()
         if (!forceRefresh) {
             cache[channelId]?.let { (id, at) ->
                 if (now - at < CACHE_TTL_MS) {
                     Log.d(TAG, "LIVE_CACHE_HIT channelId=$channelId videoId=$id")
-                    return@withContext LiveResolveResult(videoId = id)
+                    return LiveResolveResult(videoId = id)
                 }
             }
         }
 
-        val liveHtml = fetchHtml("https://www.youtube.com/channel/$channelId/live")
+        val liveHtml = fetchLivePage(channelId)
         if (liveHtml == null) {
             Log.w(TAG, "LIVE_FETCH_NULL channelId=$channelId")
-            return@withContext LiveResolveResult(videoId = null)
+            return LiveResolveResult(videoId = null)
         }
         logPageDiagnostics(channelId, liveHtml)
 
-        // Restricted-Mode / DNS-filter signature — fail fast with the reason,
-        // before spending more requests on pages the filter has already
-        // emptied. Tiers 1-3 still run first (cheap: they only re-read the
-        // page already fetched) in case the page is merely odd, not filtered.
+        // Restricted-Mode / DNS-filter signature
         val filtered = looksRestrictedMode(liveHtml)
 
         // Tier 1: player-response live markers.
         extractLiveVideoId(liveHtml)?.let { candidate ->
             if (confirm(candidate, channelId)) {
-                return@withContext accept(channelId, candidate, "LIVE_RESOLVED", cacheStore)
+                return accept(channelId, candidate, "LIVE_RESOLVED", cacheStore)
             }
         }
 
         // Tier 2: canonical watch link.
         canonicalVideoId(liveHtml)?.let { candidate ->
             if (confirm(candidate, channelId)) {
-                return@withContext accept(channelId, candidate, "LIVE_RESOLVED_VIA_CANONICAL", cacheStore)
+                return accept(channelId, candidate, "LIVE_RESOLVED_VIA_CANONICAL", cacheStore)
             }
         }
 
-        // Restricted-Mode / DNS-filter signature — fail fast with the reason.
-        // Tiers 1-2 already found nothing on this page shape, and the /watch
-        // pages under the filter are equally stripped, so further fetches
-        // cannot help: report the block instead of burning requests.
+        // Restricted-Mode / DNS-filter signature
         if (filtered) {
             Log.w(TAG, "LIVE_BLOCKED_BY_FILTER channelId=$channelId (Restricted Mode signature)")
-            return@withContext LiveResolveResult(videoId = null, blockedByFilter = true)
+            return LiveResolveResult(videoId = null, blockedByFilter = true)
         }
 
-        // Tier 3: first videoId in the whole document (reduced variants).
+        // Tier 3: first videoId in the whole document.
         if (liveHtml.contains("ytInitialPlayerResponse")) {
             firstVideoIdInDoc(liveHtml)?.let { candidate ->
                 if (confirm(candidate, channelId)) {
-                    return@withContext accept(channelId, candidate, "LIVE_RESOLVED_VIA_PAGE_ID", cacheStore)
+                    return accept(channelId, candidate, "LIVE_RESOLVED_VIA_PAGE_ID", cacheStore)
                 }
             }
         }
 
-        // Tier 4: channel video data (/streams page) — the first video id it
-        // presents, validated. Lists only the channel's own videos.
+        // Tier 4: channel video data (/streams page)
         val streamsHtml = fetchHtml("https://www.youtube.com/channel/$channelId/streams")
         if (streamsHtml != null) {
             firstVideoIdInDoc(streamsHtml)?.let { candidate ->
                 if (confirm(candidate, channelId)) {
-                    return@withContext accept(channelId, candidate, "LIVE_RESOLVED_VIA_STREAMS", cacheStore)
+                    return accept(channelId, candidate, "LIVE_RESOLVED_VIA_STREAMS", cacheStore)
                 }
             }
         }
 
-        // Tier 5 (last resort): the persisted last-known id — validated
-        // against its /watch page, never blindly played.
+        // Tier 5 (last resort): the persisted last-known id
         cacheStore.lastVideoId(channelId)?.let { known ->
             if (confirm(known, channelId)) {
-                return@withContext accept(channelId, known, "LIVE_RESOLVED_VIA_CACHED", cacheStore)
+                return accept(channelId, known, "LIVE_RESOLVED_VIA_CACHED", cacheStore)
             }
             Log.w(TAG, "LIVE_CACHED_STALE channelId=$channelId videoId=$known")
         }
 
-        Log.w(TAG, "LIVE_NOT_ACTIVE channelId=$channelId (no validated live broadcast)")
-        LiveResolveResult(videoId = null)
+        return LiveResolveResult(videoId = null)
     }
 
     /** Fetches the candidate's /watch page and runs full validation. */

@@ -27,7 +27,9 @@ enum class FeedContentFilter(val label: String) {
     VIDEOS("Videos"),
     SHORTS("Shorts"),
     LIVE("Live"),
-    DOWNLOADS("Downloads")
+    DOWNLOADS("Downloads"),
+    INSTAGRAM_REELS("Instagram Reels"),
+    INSTAGRAM_IMAGES("Instagram Images")
 }
 
 /** Sort order for the All Feed. */

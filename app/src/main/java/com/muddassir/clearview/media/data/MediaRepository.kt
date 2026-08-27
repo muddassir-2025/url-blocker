@@ -19,6 +19,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -35,11 +38,47 @@ import java.net.URLEncoder
  * All IO happens on [Dispatchers.IO]; the channel list reads are SharedPreferences
  * reads (safe on any thread).
  */
+
 class MediaRepository(context: Context) {
 
     private val appContext = context.applicationContext
     private val prefs =
         appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    companion object {
+        private val refreshMutex = Mutex()
+        private val lastRefreshTime = mutableMapOf<String, Long>()
+        private const val MIN_REFRESH_INTERVAL_MS = 60 * 60 * 1000L // 1 hour
+
+        const val TAG = "MediaRepository"
+        const val PREFS_NAME = "media_prefs"
+        const val KEY_CHANNELS = "saved_channels"
+        const val KEY_SELECTED_CHANNEL = "selected_channel"
+        const val KEY_PLAYLISTS = "saved_playlists"
+        const val KEY_MEDIA_NOTIFICATIONS_ENABLED = "media_notifications_enabled"
+        const val KEY_NOTIFIED_VIDEOS = "notified_video_ids"
+        const val KEY_UPDATES_HISTORY = "updates_history"
+        const val KEY_SEEN_UPDATE_IDS = "seen_update_ids"
+        const val KEY_FEED_FILTER = "feed_filter"
+        const val MAX_NOTIFIED_VIDEOS = 200
+        // Safety cap on continuation pages (~100 videos each → up to 10 000
+        // videos, far beyond YouTube's 5 000-video playlist maximum).
+        const val MAX_PLAYLIST_PAGES = 100
+        const val DEFAULT_MEDIA_NOTIFICATIONS_ENABLED = true
+
+        // A DESKTOP UA gets the full server-rendered page (a mobile UA makes
+        // YouTube serve a reduced page without the playlist's ytInitialData,
+        // which silently fell back to the ~15-video RSS feed).
+        const val DESKTOP_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+
+        val DEFAULT_CHANNEL = SavedChannel(
+            channelId = "UC2cX3SmsdWsrRS8t_5zvzEw", // Safina Society (@SafinaSociety)
+            displayName = "Safina Society",
+            sourceRef = "@SafinaSociety"
+        )
+    }
 
     init {
         // Preload the duration resolver's on-disk cache so resolved durations
@@ -330,8 +369,20 @@ class MediaRepository(context: Context) {
      */
     suspend fun refreshVideos(
         channelId: String,
-        enrich: Boolean = true
+        enrich: Boolean = true,
+        force: Boolean = false
     ): List<MediaVideo>? = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (!force) {
+            refreshMutex.withLock {
+                val last = lastRefreshTime[channelId] ?: 0L
+                if (now - last < MIN_REFRESH_INTERVAL_MS) {
+                    val cached = getCachedVideos(channelId)?.first
+                    if (cached != null) return@withContext cached
+                }
+            }
+        }
+        
         val url = "https://www.youtube.com/feeds/videos.xml?channel_id=$channelId"
         var connection: HttpURLConnection? = null
         try {
@@ -383,7 +434,10 @@ class MediaRepository(context: Context) {
             if (baseline.isNotEmpty()) {
                 markVideosNotified(getNotifiedVideoIds() + baseline)
             }
-            if (videos.isNotEmpty()) writeCache(channelId, videos)
+            if (videos.isNotEmpty()) {
+                writeCache(channelId, videos)
+                refreshMutex.withLock { lastRefreshTime[channelId] = System.currentTimeMillis() }
+            }
             videos
         } catch (e: CancellationException) {
             // Never report a cancelled refresh as a channel failure — the caller
@@ -419,19 +473,22 @@ class MediaRepository(context: Context) {
         if (missing.isEmpty()) return videos
         val byId = videos.associateBy { it.videoId }.toMutableMap()
         missing.chunked(concurrency).forEach { batch ->
-            val results = coroutineScope {
+            val results = supervisorScope {
                 batch.map { v ->
                     async {
                         v.videoId to runCatching {
                             VideoDurationResolver.fetchDuration(v.videoId)
                         }.getOrNull()
                     }
-                }.awaitAll()
+                }.map { runCatching { it.await() }.getOrNull() }
             }
-            for ((videoId, seconds) in results) {
-                if (seconds != null && seconds > 0L) {
-                    byId[videoId]?.let { original ->
-                        byId[videoId] = original.copy(durationSeconds = seconds)
+            for (res in results) {
+                if (res != null) {
+                    val (videoId, seconds) = res
+                    if (seconds != null && seconds > 0L) {
+                        byId[videoId]?.let { original ->
+                            byId[videoId] = original.copy(durationSeconds = seconds)
+                        }
                     }
                 }
             }
@@ -627,7 +684,8 @@ class MediaRepository(context: Context) {
     suspend fun refreshAllVideos(
         channels: List<SavedChannel>,
         concurrency: Int = 3,
-        batchDelayMs: Long = 500
+        batchDelayMs: Long = 500,
+        force: Boolean = false
     ): List<MediaVideo>? {
         var anySucceeded = false
         val merged = ArrayList<MediaVideo>()
@@ -642,15 +700,15 @@ class MediaRepository(context: Context) {
             // refresh falls back to the channel's cached feed (read on IO, so
             // the file read never touches the caller's main thread) — the
             // channel isn't dropped from the merged result.
-            val results = coroutineScope {
+            val results = supervisorScope {
                 batch.map { channel ->
                     async {
                         val channelId = channel.channelId
                         withContext(Dispatchers.IO) {
-                            refreshVideos(channelId) ?: getCachedVideos(channelId)?.first
+                            refreshVideos(channelId, force = force) ?: getCachedVideos(channelId)?.first
                         }
                     }
-                }.awaitAll()
+                }.map { runCatching { it.await() }.getOrNull() }
             }
             for (fresh in results) {
                 if (fresh != null) {
@@ -832,11 +890,22 @@ class MediaRepository(context: Context) {
      * to the cache) and an EMPTY list when the playlist is definitively
      * private / has no visible videos (UI shows the friendly message).
      */
-    suspend fun refreshPlaylistVideos(playlistId: String): List<MediaVideo>? =
+    suspend fun refreshPlaylistVideos(playlistId: String, force: Boolean = false): List<MediaVideo>? =
         withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            if (!force) {
+                refreshMutex.withLock {
+                    val last = lastRefreshTime["playlist_$playlistId"] ?: 0L
+                    if (now - last < MIN_REFRESH_INTERVAL_MS) {
+                        val cached = getCachedPlaylistVideos(playlistId)?.first
+                        if (cached != null) return@withContext cached
+                    }
+                }
+            }
             val info = fetchPlaylistInfo(playlistId) ?: return@withContext null
             if (info.videos.isEmpty()) return@withContext emptyList()
             writeVideosFile(playlistCacheFile(playlistId), info.videos)
+            refreshMutex.withLock { lastRefreshTime["playlist_$playlistId"] = System.currentTimeMillis() }
             info.videos
         }
 
@@ -1068,34 +1137,4 @@ class MediaRepository(context: Context) {
         }
     }
 
-    private companion object {
-        const val TAG = "MediaRepository"
-        const val PREFS_NAME = "media_prefs"
-        const val KEY_CHANNELS = "saved_channels"
-        const val KEY_SELECTED_CHANNEL = "selected_channel"
-        const val KEY_PLAYLISTS = "saved_playlists"
-        const val KEY_MEDIA_NOTIFICATIONS_ENABLED = "media_notifications_enabled"
-        const val KEY_NOTIFIED_VIDEOS = "notified_video_ids"
-        const val KEY_UPDATES_HISTORY = "updates_history"
-        const val KEY_SEEN_UPDATE_IDS = "seen_update_ids"
-        const val KEY_FEED_FILTER = "feed_filter"
-        const val MAX_NOTIFIED_VIDEOS = 200
-        // Safety cap on continuation pages (~100 videos each → up to 10 000
-        // videos, far beyond YouTube's 5 000-video playlist maximum).
-        const val MAX_PLAYLIST_PAGES = 100
-        const val DEFAULT_MEDIA_NOTIFICATIONS_ENABLED = true
-
-        // A DESKTOP UA gets the full server-rendered page (a mobile UA makes
-        // YouTube serve a reduced page without the playlist's ytInitialData,
-        // which silently fell back to the ~15-video RSS feed).
-        const val DESKTOP_USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
-
-        val DEFAULT_CHANNEL = SavedChannel(
-            channelId = "UC2cX3SmsdWsrRS8t_5zvzEw", // Safina Society (@SafinaSociety)
-            displayName = "Safina Society",
-            sourceRef = "@SafinaSociety"
-        )
-    }
 }

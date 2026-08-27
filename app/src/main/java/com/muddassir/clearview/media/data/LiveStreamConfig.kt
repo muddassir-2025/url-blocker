@@ -26,7 +26,9 @@ object LiveStreamConfig {
             subtitle = "Masjid al-Haram · Live from Makkah",
             name = "Saudi Qur'an TV",
             channelId = "UCos52azQNBgW63_9uDJoPDA",
-            channelUrl = "https://www.youtube.com/channel/UCos52azQNBgW63_9uDJoPDA"
+            channelUrl = "https://www.youtube.com/channel/UCos52azQNBgW63_9uDJoPDA",
+            fallbackChannelId = "UC4T_b_5-kR6gY_t27W5rD0g",
+            fallbackChannelUrl = "https://www.youtube.com/channel/UC4T_b_5-kR6gY_t27W5rD0g"
         ),
         LiveStreamSource(
             id = "madinah",

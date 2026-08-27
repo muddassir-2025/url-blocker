@@ -58,6 +58,8 @@ fun applyFeedFilter(
             FeedContentFilter.VIDEOS -> !v.isShort
             FeedContentFilter.SHORTS -> v.isShort
             FeedContentFilter.LIVE -> v.isLive
+            FeedContentFilter.INSTAGRAM_REELS -> v.mediaType == MediaVideo.MediaType.INSTAGRAM_REEL
+            FeedContentFilter.INSTAGRAM_IMAGES -> v.mediaType == MediaVideo.MediaType.INSTAGRAM_IMAGE
             // The Downloads filter switches the Media tab to the dedicated
             // Downloads section; the feed list itself never shows here.
             FeedContentFilter.DOWNLOADS -> false

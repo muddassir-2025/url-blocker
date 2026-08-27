@@ -23,5 +23,7 @@ data class LiveStreamSource(
     val subtitle: String,
     val name: String,
     val channelId: String,
-    val channelUrl: String
+    val channelUrl: String,
+    val fallbackChannelId: String? = null,
+    val fallbackChannelUrl: String? = null
 )

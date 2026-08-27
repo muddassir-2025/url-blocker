@@ -48,8 +48,13 @@ data class MediaVideo(
     val isShort: Boolean = false,
     val isLive: Boolean = false,
     val durationSeconds: Long = 0L,
-    val isOfflineAudio: Boolean = false
+    val isOfflineAudio: Boolean = false,
+    val platform: MediaPlatform = MediaPlatform.YOUTUBE,
+    val mediaType: MediaType = MediaType.VIDEO
 ) {
+    enum class MediaPlatform { YOUTUBE, INSTAGRAM }
+    enum class MediaType { VIDEO, SHORT, INSTAGRAM_REEL, INSTAGRAM_IMAGE }
+    
     companion object {
         /**
          * Title-only Short signal: the #shorts hashtag that YouTube appends to
