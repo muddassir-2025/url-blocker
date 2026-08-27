@@ -1839,36 +1839,31 @@ private fun InstagramPlayer(
         } else {
             // Public embed player: renders the public Reel/video directly with playback controls
             // Zero login required, and all external navigation is completely blocked
-            val embedHtml = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-                <style>
-                    * { margin:0; padding:0; box-sizing:border-box; }
-                    html, body { width:100%; height:100%; background:#000; overflow:hidden; display:flex; align-items:center; justify-content:center; }
-                    iframe { width:100%; height:100%; border:none; max-width:540px; }
-                </style>
-            </head>
-            <body>
-                <iframe src="https://www.instagram.com/p/$shortcode/embed/" allowfullscreen="true" frameborder="0"></iframe>
-            </body>
-            </html>
-            """.trimIndent()
-
             AndroidView(
                 factory = { ctx ->
                     WebView(ctx).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.mediaPlaybackRequiresUserGesture = false
+                        settings.useWideViewPort = true
+                        settings.loadWithOverviewMode = true
+                        settings.userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                        setBackgroundColor(android.graphics.Color.BLACK)
                         webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(
                                 view: WebView?,
                                 request: WebResourceRequest?
-                            ): Boolean = true // Never open Chrome or Instagram login
+                            ): Boolean {
+                                val targetUrl = request?.url?.toString() ?: ""
+                                // Allow sub-resources (video streams, images, scripts) and embed pages to load
+                                if (request?.isForMainFrame == false || targetUrl.contains("/embed")) {
+                                    return false
+                                }
+                                // Block top-level navigation away from the embed (never open Chrome or Instagram login)
+                                return true
+                            }
                         }
-                        loadDataWithBaseURL("https://www.instagram.com", embedHtml, "text/html", "UTF-8", null)
+                        loadUrl("https://www.instagram.com/p/$shortcode/embed/")
                     }
                 },
                 modifier = modifier

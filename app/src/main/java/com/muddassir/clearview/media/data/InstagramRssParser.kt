@@ -264,16 +264,13 @@ object InstagramRssParser {
 
     private fun cleanHtmlCaption(html: String): String {
         if (html.isBlank()) return ""
-        return html
+        val stripped = html
             .replace(Regex("""<style[^>]*>.*?</style>""", RegexOption.DOT_MATCHES_ALL), "")
             .replace(Regex("""<script[^>]*>.*?</script>""", RegexOption.DOT_MATCHES_ALL), "")
             .replace(Regex("""<[^>]*>"""), " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&nbsp;", " ")
+        return runCatching {
+            android.text.Html.fromHtml(stripped, android.text.Html.FROM_HTML_MODE_LEGACY).toString()
+        }.getOrDefault(stripped)
             .trim()
             .replace(Regex("""\s+"""), " ")
     }
