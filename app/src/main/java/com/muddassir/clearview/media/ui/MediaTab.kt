@@ -454,7 +454,7 @@ fun MediaTab(
     val channelVideos = remember(baseVideos, filterChannelId, feedIsPlaylist, feedIsUserPlaylist) {
         when {
             feedIsPlaylist || feedIsUserPlaylist -> baseVideos
-            filterChannelId == null -> baseVideos
+            filterChannelId == null -> baseVideos.filter { it.platform != MediaPlatform.INSTAGRAM }
             else -> baseVideos.filter { it.channelId == filterChannelId }
         }
     }
@@ -925,7 +925,8 @@ fun MediaTab(
                                 onHide = {
                                     libraryStore.hideVideo(post)
                                     libraryRevision++
-                                }
+                                },
+                                progressStore = progressStore
                             )
                         }
                     } else {
@@ -983,7 +984,8 @@ fun MediaTab(
                                         onHide = {
                                             libraryStore.hideVideo(video)
                                             libraryRevision++
-                                        }
+                                        },
+                                        progressStore = progressStore
                                     )
                                 } else {
                                     LongVideoCard(
@@ -2224,9 +2226,15 @@ private fun InstagramMediaCard(
     video: MediaVideo,
     onClick: () -> Unit,
     onHide: () -> Unit,
+    progressStore: WatchProgressStore,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val watchRev by WatchProgressStore.revisionFlow.collectAsState()
+    val isWatched = remember(video.videoId, watchRev) {
+        progressStore.isWatched(video.videoId)
+    }
+
     Card(
         onClick = onClick,
         modifier = modifier.fillMaxWidth(),
@@ -2265,24 +2273,55 @@ private fun InstagramMediaCard(
                     }
                 }
 
-                val typeLabel = when (video.instagramType) {
-                    InstagramMediaType.REEL -> "Reel"
-                    InstagramMediaType.VIDEO -> "Video"
-                    InstagramMediaType.CAROUSEL -> "Carousel"
-                    else -> if (video.isShort) "Reel" else "Post"
-                }
-                Surface(
-                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-                    shape = RoundedCornerShape(5.dp),
-                    color = Color.Black.copy(alpha = 0.65f)
-                ) {
-                    Text(
-                        text = typeLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                if (isWatched) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.35f))
                     )
+                    Surface(
+                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.primary
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Filled.Check,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(Modifier.width(3.dp))
+                            Text(
+                                text = "Watched",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                        }
+                    }
+                } else {
+                    val typeLabel = when (video.instagramType) {
+                        InstagramMediaType.REEL -> "Reel"
+                        InstagramMediaType.VIDEO -> "Video"
+                        InstagramMediaType.CAROUSEL -> "Carousel"
+                        else -> if (video.isShort) "Reel" else "Post"
+                    }
+                    Surface(
+                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                        shape = RoundedCornerShape(5.dp),
+                        color = Color.Black.copy(alpha = 0.65f)
+                    ) {
+                        Text(
+                            text = typeLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                 }
 
                 var showMenu by remember { mutableStateOf(false) }
@@ -2306,19 +2345,17 @@ private fun InstagramMediaCard(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false }
                     ) {
-                        if (video.instagramUrl != null) {
-                            DropdownMenuItem(
-                                text = { Text("Open on Instagram") },
-                                onClick = {
-                                    showMenu = false
-                                    try {
-                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(video.instagramUrl)))
-                                    } catch (_: ActivityNotFoundException) {
-                                        Toast.makeText(context, "Can't open link", Toast.LENGTH_SHORT).show()
-                                    }
+                        DropdownMenuItem(
+                            text = { Text(if (isWatched) "Mark as unwatched" else "Mark as watched") },
+                            onClick = {
+                                showMenu = false
+                                if (isWatched) {
+                                    progressStore.remove(video.videoId)
+                                } else {
+                                    progressStore.set(video.videoId, 1.0f)
                                 }
-                            )
-                        }
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text("Hide post") },
                             onClick = {
@@ -3743,14 +3780,15 @@ private fun AddVideoDialog(
     )
 }
 
-/** Two-letter initials for the avatar fallback ("Safina Society" → "SS"). */
+/** Two-letter initials for the avatar fallback ("Safina Society" → "SS", "@maherzain" → "M"). */
 private fun initials(name: String): String {
-    val parts = name.split(' ', '-', '_', '.').filter { it.isNotBlank() }
+    val clean = name.removePrefix("@").trim()
+    val parts = clean.split(' ', '-', '_', '.').filter { it.isNotBlank() }
     return parts
         .mapNotNull { it.firstOrNull()?.uppercaseChar() }
         .take(2)
         .joinToString("")
-        .ifBlank { name.take(1).uppercase() }
+        .ifBlank { clean.take(1).uppercase() }
 }
 
 // ══════════════════════════════════════════════════════════════════════

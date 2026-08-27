@@ -65,7 +65,7 @@ object InstagramRssParser {
         val username = extractUsernameFromTitle(feedTitle, fallbackUsername)
         val channelId = "ig_${username.lowercase()}"
 
-        val avatarUrl = firstImageLogo(channel)
+        val avatarUrl = firstImageLogo(channel)?.takeIf { isRealAvatarUrl(it) }
 
         val itemNodes = channel.getElementsByTagName("item")
         val items = ArrayList<MediaVideo>(itemNodes.length)
@@ -161,7 +161,7 @@ object InstagramRssParser {
         val feedTitle = firstText(root, "title")?.trim().orEmpty()
         val username = extractUsernameFromTitle(feedTitle, fallbackUsername)
         val channelId = "ig_${username.lowercase()}"
-        val avatarUrl = firstText(root, "logo") ?: firstText(root, "icon")
+        val avatarUrl = (firstText(root, "logo") ?: firstText(root, "icon"))?.takeIf { isRealAvatarUrl(it) }
 
         val entryNodes = root.getElementsByTagName("entry")
         val items = ArrayList<MediaVideo>(entryNodes.length)
@@ -299,6 +299,24 @@ object InstagramRssParser {
             }
         }
         return ""
+    }
+
+    fun isRealAvatarUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        val lower = url.lowercase()
+        if (lower.contains("instagrambridge") ||
+            lower.contains("favicon") ||
+            lower.contains("instagram-logo") ||
+            lower.contains("instagram.png") ||
+            lower.contains("logo_600") ||
+            lower.contains("logo.png") ||
+            lower.contains("icon.png") ||
+            lower.contains("apple-touch-icon") ||
+            lower.contains("/static/") ||
+            (!lower.contains("cdninstagram.com") && !lower.contains("fbcdn.net"))) {
+            return false
+        }
+        return true
     }
 
     private fun firstImageLogo(channel: Element): String? {

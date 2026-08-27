@@ -119,7 +119,7 @@ class MediaRepository(context: Context) {
                             channelId = igChannelId,
                             displayName = if (igProfile.fullName.isNotBlank()) igProfile.fullName else "@${igProfile.username}",
                             sourceRef = "@${igProfile.username}",
-                            avatarUrl = igProfile.avatarUrl,
+                            avatarUrl = igProfile.avatarUrl?.takeIf { InstagramRssParser.isRealAvatarUrl(it) },
                             addedAtEpochMillis = System.currentTimeMillis(),
                             platform = MediaPlatform.INSTAGRAM
                         )
@@ -212,17 +212,21 @@ class MediaRepository(context: Context) {
             val arr = JSONArray(json)
             (0 until arr.length()).mapNotNull { i ->
                 val o = arr.getJSONObject(i)
+                val platform = runCatching {
+                    MediaPlatform.valueOf(o.optString("platform", "YOUTUBE"))
+                }.getOrDefault(MediaPlatform.YOUTUBE)
+                val rawAvatar = o.optString("avatarUrl", "").ifBlank { null }
+                val cleanAvatar = if (platform == MediaPlatform.INSTAGRAM && !InstagramRssParser.isRealAvatarUrl(rawAvatar)) null else rawAvatar
+
                 SavedChannel(
                     channelId = o.getString("channelId"),
                     displayName = o.optString("displayName", o.getString("channelId")),
                     sourceRef = o.optString("sourceRef", o.getString("channelId")),
-                    avatarUrl = o.optString("avatarUrl", "").ifBlank { null },
+                    avatarUrl = cleanAvatar,
                     // Missing on channels saved by older builds → 0 → the
                     // worker's subscription guard stays inactive for them.
                     addedAtEpochMillis = o.optLong("addedAt", 0L),
-                    platform = runCatching {
-                        MediaPlatform.valueOf(o.optString("platform", "YOUTUBE"))
-                    }.getOrDefault(MediaPlatform.YOUTUBE),
+                    platform = platform,
                     instagramType = o.optString("instagramType", "").takeIf { it.isNotBlank() }?.let {
                         runCatching { InstagramMediaType.valueOf(it) }.getOrNull()
                     }
@@ -244,7 +248,7 @@ class MediaRepository(context: Context) {
             if (c.avatarUrl == null) {
                 val url = if (c.platform == MediaPlatform.INSTAGRAM) {
                     val user = c.channelId.removePrefix("ig_")
-                    InstagramResolver.fetchProfile(user)?.avatarUrl
+                    InstagramResolver.fetchProfile(user)?.avatarUrl?.takeIf { InstagramRssParser.isRealAvatarUrl(it) }
                 } else {
                     ChannelAvatarResolver.fetchAvatar(c.channelId)
                 }
