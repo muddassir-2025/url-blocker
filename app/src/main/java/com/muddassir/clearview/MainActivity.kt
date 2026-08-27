@@ -150,6 +150,11 @@ open class MainActivity : ComponentActivity() {
                 // Settings).
                 viewModel.checkAccessibilityStatus(this)
                 viewModel.checkDeviceAdminStatus(this)
+                
+                // TEST: Trigger Private DNS to see the exception in logcat
+                android.util.Log.i("DNS_TEST", "Calling setPrivateDnsProvider...")
+                viewModel.setPrivateDnsProvider(this, "family-filter-dns.cleanbrowsing.org")
+                
                 // The user may have just returned from granting the exact-alarm
                 // permission (SCHEDULE_EXACT_ALARM). Re-sync every todo alarm:
                 // the ones scheduled BEFORE the grant were inexact, and a

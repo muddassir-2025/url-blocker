@@ -17,6 +17,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
@@ -757,6 +758,8 @@ private fun BlockedChip(label: String, onDelete: () -> Unit) {
 private fun DnsCard(viewModel: MainViewModel, context: Context) {
     var showSetupSheet by remember { mutableStateOf(false) }
     var showDetails by remember { mutableStateOf(false) }
+    val currentDns = viewModel.getPrivateDnsProvider(context)
+    
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -782,44 +785,35 @@ private fun DnsCard(viewModel: MainViewModel, context: Context) {
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Set a filtered DNS provider to block adult content at the network level — works on ALL apps including Chrome, incognito mode, and Google Images. Cannot be bypassed by installing a new browser.",
+                text = "Set a filtered DNS provider to block adult content at the network level — works on ALL apps including Chrome, incognito mode, and Google Images.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             AnimatedVisibility(visible = showDetails) {
                 FeatureDetailBlock(
                     bullets = listOf(
-                        "Network-level filtering that works on ALL apps — including browsers the accessibility filter doesn't cover.",
-                        "Cannot be bypassed by incognito mode or by installing a new browser.",
-                        "Set your phone's Private DNS to a filtered provider (Cloudflare Family 1.1.1.3 or CleanBrowsing Family Filter) using the guide below.",
-                        "Works alongside ClearView's app-level blocking — both layers together close every gap."
+                        "Network-level filtering that works on ALL apps.",
+                        "Enforced automatically by ClearView using Device Owner policy.",
+                        "Android Settings will be locked so it cannot be bypassed.",
+                        "Works alongside ClearView's app-level blocking."
                     )
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { showSetupSheet = true },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("DNS Setup Guide", fontSize = 12.sp)
-                }
-                OutlinedButton(
-                    onClick = { viewModel.openPrivateDnsSettings(context) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Open DNS Settings", fontSize = 12.sp)
-                }
+            OutlinedButton(
+                onClick = { showSetupSheet = true },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Filled.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Select DNS Provider", fontSize = 12.sp)
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Recommended: Cloudflare 1.1.1.3 (Family) or CleanBrowsing Family Filter",
+                text = if (currentDns != null) "Active: $currentDns" else "No supported DNS active",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                color = if (currentDns != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                fontWeight = if (currentDns != null) FontWeight.Bold else FontWeight.Normal
             )
         }
     }
@@ -833,11 +827,6 @@ private fun DnsCard(viewModel: MainViewModel, context: Context) {
     }
 }
 
-/**
- * In-app DNS setup guide: pick a filtered-DNS provider, copy its hostname,
- * then set it manually in Private DNS settings (open settings → Private DNS
- * → paste the hostname → Save). Pure copy-paste flow — no permissions needed.
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DnsSetupSheet(
@@ -845,20 +834,20 @@ private fun DnsSetupSheet(
     context: Context,
     onDismiss: () -> Unit
 ) {
-    // Acquired once (not per recomposition).
-    val clipboard = remember {
-        context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-    }
+    var activeProvider by remember { mutableStateOf(viewModel.getPrivateDnsProvider(context)) }
 
-    fun copyHostname(hostname: String) {
-        clipboard.setPrimaryClip(
-            android.content.ClipData.newPlainText("DNS hostname", hostname)
-        )
-        Toast.makeText(context, "Copied: $hostname", Toast.LENGTH_SHORT).show()
+    fun selectProvider(hostname: String) {
+        val success = viewModel.setPrivateDnsProvider(context, hostname)
+        if (success) {
+            activeProvider = hostname
+            Toast.makeText(context, "Private DNS set and locked", Toast.LENGTH_SHORT).show()
+            onDismiss()
+        } else {
+            Toast.makeText(context, "Failed to set Private DNS. Check Device Owner status.", Toast.LENGTH_LONG).show()
+        }
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        // Scrollable so small screens / large font scale can't clip the guide.
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -868,12 +857,11 @@ private fun DnsSetupSheet(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "DNS Setup Guide",
+                text = "Select DNS Provider",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
 
-            // Step-by-step: 1 copy → 2 open → 3 paste → 4 save.
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant
@@ -883,15 +871,12 @@ private fun DnsSetupSheet(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = "How to set it up",
+                        text = "Device Owner Enforcement",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "1. Tap a provider below and copy its hostname\n" +
-                            "2. Tap \"Open DNS Settings\"\n" +
-                            "3. Tap Private DNS\n" +
-                            "4. Paste the hostname and tap Save",
+                        text = "Selecting a provider will enforce it system-wide and lock the Android Settings UI to prevent bypass.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -902,27 +887,17 @@ private fun DnsSetupSheet(
                 name = "Cloudflare Family (1.1.1.3)",
                 description = "Blocks malware + adult content. Fast, free, no account.",
                 hostname = viewModel.cloudflareFamilyHostname(),
-                onCopy = { copyHostname(it) }
+                isActive = activeProvider == viewModel.cloudflareFamilyHostname(),
+                onSelect = { selectProvider(it) }
             )
 
             DnsProviderCard(
                 name = "CleanBrowsing Family Filter",
-                description = "Blocks adult content + malware. Strict family filter (185.228.168.168 / 185.228.169.168).",
+                description = "Blocks adult content + malware. Strict family filter.",
                 hostname = viewModel.cleanBrowsingFamilyHostname(),
-                onCopy = { copyHostname(it) }
+                isActive = activeProvider == viewModel.cleanBrowsingFamilyHostname(),
+                onSelect = { selectProvider(it) }
             )
-
-            OutlinedButton(
-                onClick = {
-                    onDismiss()
-                    viewModel.openPrivateDnsSettings(context)
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Open DNS Settings", fontSize = 13.sp)
-            }
         }
     }
 }
@@ -932,18 +907,35 @@ private fun DnsProviderCard(
     name: String,
     description: String,
     hostname: String,
-    onCopy: (String) -> Unit
+    isActive: Boolean,
+    onSelect: (String) -> Unit
 ) {
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        onClick = { if (!isActive) onSelect(hostname) }
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(
-                text = name,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = name,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (isActive) {
+                    Icon(
+                        Icons.Filled.CheckCircle,
+                        contentDescription = "Active",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodySmall,
@@ -957,7 +949,7 @@ private fun DnsProviderCard(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
@@ -967,13 +959,6 @@ private fun DnsProviderCard(
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurface
                     )
-                    IconButton(onClick = { onCopy(hostname) }) {
-                        Icon(
-                            Icons.Outlined.ContentCopy,
-                            contentDescription = "Copy $hostname",
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
                 }
             }
         }

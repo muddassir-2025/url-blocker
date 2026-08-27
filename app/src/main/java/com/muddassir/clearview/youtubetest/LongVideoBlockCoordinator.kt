@@ -21,11 +21,14 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.muddassir.clearview.backend.ChannelBlockRepository
 import com.muddassir.clearview.extractor.ContentExtractor
 import com.muddassir.clearview.matching.ContentSnapshot
 import com.muddassir.clearview.matching.KeywordMatcher
 import com.muddassir.clearview.matching.MatchResult
 import com.muddassir.clearview.repository.BlockRepository
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
@@ -97,7 +100,10 @@ enum class LongVideoBlockState {
 class LongVideoBlockCoordinator(
     private val service: AccessibilityService,
     private val repository: BlockRepository,
-    private val keywordMatcher: KeywordMatcher
+    private val keywordMatcher: KeywordMatcher,
+    /** Optional shared-backend channel blocking. Null keeps the existing
+     *  keyword-only behavior (no network, no behavior change). */
+    private val channelBlockRepository: ChannelBlockRepository? = null
 ) {
 
     companion object {
@@ -138,6 +144,18 @@ class LongVideoBlockCoordinator(
         private const val MAX_TEXT_LEN = 240
         private const val MAX_COMBINED_LEN = 4000
         private const val MAX_DESC_PARTS = 12
+
+        // Channel @handle extraction: a visible node text like "@examplechannel".
+        // Requires at least one alphanumeric so "@.." / "@--" never match.
+        private val CHANNEL_HANDLE_REGEX = Regex("@(?=[A-Za-z0-9._-]*[A-Za-z0-9])[A-Za-z0-9._-]{2,100}")
+
+        // Max length of a text node we consider for channel-handle extraction.
+        // YouTube channel handles are short; anything longer is almost certainly
+        // a title, description or UI string that could mention OTHER channels.
+        private const val MAX_HANDLE_TEXT_LEN = 50
+
+        // Strict regex: the ENTIRE trimmed text must be a single @handle.
+        private val STANDALONE_HANDLE_REGEX = Regex("^@[A-Za-z0-9._-]{2,100}$")
 
         // Browser/accessibility UI strings that must never be treated as the
         // video's title or description content. Matching against these would
@@ -194,8 +212,13 @@ class LongVideoBlockCoordinator(
         )
     }
 
-    /** Extracted watch-page content (title + description/text from the tree). */
-    private class WatchPageContent(val title: String?, val description: String?)
+    /** Extracted watch-page content (title + description/text + channel from the tree). */
+    private class WatchPageContent(
+        val title: String?,
+        val description: String?,
+        /** Channel @handle visible on the watch page ("@examplechannel"), or null. */
+        val channelHandle: String? = null
+    )
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val contentExtractor = ContentExtractor()
@@ -224,6 +247,9 @@ class LongVideoBlockCoordinator(
     private var longVideoMatchedKeyword: String? = null
     private var longVideoClassificationDone = false
     private var longVideoBlocked = false
+    /** True once the async channel-block check ran for this instance (single-shot,
+     *  like the pause guard — a blocked channel is decided once per video). */
+    private var longVideoChannelChecked = false
     /** True once the SINGLE pause action (control click or physical tap) has
      *  been sent for this generation. Cleared only by a new instance. */
     private var longVideoPauseAttempted = false
@@ -435,6 +461,7 @@ class LongVideoBlockCoordinator(
         longVideoMatchedKeyword = null
         longVideoClassificationDone = false
         longVideoBlocked = false
+        longVideoChannelChecked = false
         longVideoPauseAttempted = false
         longVideoPauseConfirmed = false
         pauseObserveSince = 0L
@@ -449,6 +476,12 @@ class LongVideoBlockCoordinator(
         val fromState = longVideoState
         longVideoState = LongVideoBlockState.LONG_CLASSIFYING
         Log.i(TAG, "LONG_VIDEO_STATE $fromState -> LONG_CLASSIFYING videoId=${longVideoId ?: "unknown"}")
+        // Fire-and-forget rules refresh so the channel check uses fresh data.
+        channelBlockRepository?.let { repo ->
+            scope.launch {
+                runCatching { repo.syncRules() }
+            }
+        }
     }
 
     /** Full state cleanup (left watch page / Chrome gone / home button). */
@@ -465,6 +498,7 @@ class LongVideoBlockCoordinator(
         longVideoMatchedKeyword = null
         longVideoClassificationDone = false
         longVideoBlocked = false
+        longVideoChannelChecked = false
         longVideoPauseAttempted = false
         longVideoPauseConfirmed = false
         longVideoOverlayActive = false
@@ -515,8 +549,63 @@ class LongVideoBlockCoordinator(
             transition(LongVideoBlockState.LONG_BLOCKED_NEEDS_PAUSE)
             enforceBlockedVideo(root)
         } else {
-            Log.i(TAG, "LONG_VIDEO_ALLOWED videoId=${longVideoId ?: "unknown"}")
-            transition(LongVideoBlockState.LONG_ALLOWED)
+            // Keyword check passed — the channel check runs INDEPENDENTLY, so
+            // a video with a completely clean title can still be blocked
+            // solely because its channel is blocked.
+            maybeCheckChannel(root, content.channelHandle)
+            if (!longVideoBlocked) {
+                Log.i(TAG, "LONG_VIDEO_ALLOWED videoId=${longVideoId ?: "unknown"}")
+                transition(LongVideoBlockState.LONG_ALLOWED)
+            }
+        }
+    }
+
+    /**
+     * Channel-block check (async, single-shot per instance). Completely
+     * independent of the keyword result: a clean title does NOT rescue a
+     * blocked channel, and a backend failure NEVER blocks a video — the
+     * existing keyword protection simply continues.
+     */
+    private fun maybeCheckChannel(root: AccessibilityNodeInfo, channelHandle: String?) {
+        val repo = channelBlockRepository ?: return
+        if (longVideoChannelChecked) return
+        longVideoChannelChecked = true
+        if (channelHandle.isNullOrBlank()) {
+            Log.i(TAG, "LONG_VIDEO_CHANNEL_SKIP videoId=${longVideoId ?: "unknown"} (no handle in tree)")
+            return
+        }
+        val generation = longVideoGeneration
+        val videoId = longVideoId ?: "unknown"
+        Log.i(TAG, "LONG_VIDEO_CHANNEL_CHECK videoId=$videoId handle=$channelHandle")
+        scope.launch {
+            val blocked = withContext(Dispatchers.IO) {
+                runCatching { repo.isChannelBlocked(handle = channelHandle) }.getOrDefault(false)
+            }
+            // Late callbacks from an older video must never act on the new one.
+            if (generation != longVideoGeneration) {
+                Log.i(TAG, "LONG_VIDEO_CHANNEL_STALE gen=$generation current=$longVideoGeneration — ignored")
+                return@launch
+            }
+            if (blocked) {
+                if (!isBlockedState() && !longVideoBlocked) {
+                    Log.w(TAG, "LONG_VIDEO_CHANNEL_BLOCKED videoId=$videoId handle=$channelHandle")
+                    longVideoBlocked = true
+                    longVideoMatchedKeyword = "channel:$channelHandle"
+                    transition(LongVideoBlockState.LONG_BLOCKED_NEEDS_PAUSE)
+                    // Root may be recycled by the time the network returns;
+                    // fetch a fresh one for enforcement.
+                    val freshRoot = try { service.rootInActiveWindow } catch (e: Exception) { null }
+                    if (freshRoot != null) {
+                        try {
+                            enforceBlockedVideo(freshRoot)
+                        } finally {
+                            try { freshRoot.recycle() } catch (e: Exception) {}
+                        }
+                    }
+                }
+            } else {
+                Log.i(TAG, "LONG_VIDEO_CHANNEL_ALLOWED videoId=$videoId handle=$channelHandle")
+            }
         }
     }
 
@@ -543,6 +632,9 @@ class LongVideoBlockCoordinator(
             Log.w(TAG, "LONG_VIDEO_BLOCKED videoId=${longVideoId ?: "unknown"} keyword=${result.matchedItem}")
             transition(LongVideoBlockState.LONG_BLOCKED_NEEDS_PAUSE)
             enforceBlockedVideo(root)
+        } else {
+            // Same independent channel check as classification (idempotent).
+            maybeCheckChannel(root, content.channelHandle)
         }
     }
 
@@ -574,7 +666,52 @@ class LongVideoBlockCoordinator(
             .take(MAX_COMBINED_LEN)
             .ifBlank { null }
 
-        return WatchPageContent(title, description)
+        // Channel @handle from the tree ("@examplechannel" — the accessibility
+        // tree exposes the handle even when it never exposes the UC… id).
+        //
+        // We must NOT match a @handle inside the video title or description
+        // because those can mention OTHER channels (e.g. a review title saying
+        // "@BlockedChannel is terrible").  Strategy:
+        //   1. Try short standalone texts where the ENTIRE trimmed text is a handle.
+        //   2. Try short texts (< MAX_HANDLE_TEXT_LEN) that contain a handle,
+        //      but skip the video title so a title mention can never cause a false block.
+        //   3. Last resort: any text (original behaviour).
+        val channelHandle = extractChannelHandleFromTexts(texts, title)
+
+        return WatchPageContent(title, description, channelHandle)
+    }
+
+    /**
+     * Extract a channel @handle from the visible-text list with three tiers of
+     * specificity to avoid false positives from title/description mentions:
+     *
+     *  1. **Standalone handle** — the entire trimmed text is exactly an
+     *     @handle (short, no surrounding words). This is the strongest signal.
+     *  2. **Short-text substring** — a short text node (< MAX_HANDLE_TEXT_LEN)
+     *     that contains an @handle, but the video title is excluded so a
+     *     title mention like "@BlockedChannel is terrible" can never match.
+     *  3. **Any-text fallback** — original behaviour (search all texts).
+     */
+    private fun extractChannelHandleFromTexts(texts: List<String>, title: String?): String? {
+        // Tier 1: exact standalone handle (strongest signal).
+        for (t in texts) {
+            val trimmed = t.trim()
+            if (trimmed.length <= MAX_HANDLE_TEXT_LEN && STANDALONE_HANDLE_REGEX.matches(trimmed)) {
+                return trimmed
+            }
+        }
+        // Tier 2: short text containing a handle, but skip the video title
+        // so a title mentioning another channel cannot cause a false block.
+        for (t in texts) {
+            if (t == title) continue
+            if (t.length > MAX_HANDLE_TEXT_LEN) continue
+            val m = CHANNEL_HANDLE_REGEX.find(t) ?: continue
+            return m.value
+        }
+        // Tier 3: any text (original behaviour — last resort).
+        return texts.firstNotNullOfOrNull { t ->
+            CHANNEL_HANDLE_REGEX.find(t)?.value
+        }
     }
 
     /** True for a plausible real video title (not browser/UI chrome). */

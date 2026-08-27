@@ -9,6 +9,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.muddassir.clearview.backend.ChannelBlockRepository
 import com.muddassir.clearview.extractor.ContentExtractor
 import java.util.Locale
 import com.muddassir.clearview.matching.ContentSnapshot
@@ -228,7 +229,10 @@ class UrlBlockerService : AccessibilityService() {
         // matcher (the normal KeywordMatcher is deliberately not used).
         val testKeywordRepository = YoutubeTestKeywordRepository(applicationContext)
         youtubeChromeTest = YouTubeChromeTestCoordinator(this, repository, testKeywordRepository)
-        longVideoBlock = LongVideoBlockCoordinator(this, repository, keywordMatcher)
+        // Shared-backend channel blocking (best-effort; a dead backend keeps
+        // the existing keyword-only protection — never blocks on the network).
+        val channelBlockRepository = ChannelBlockRepository(applicationContext)
+        longVideoBlock = LongVideoBlockCoordinator(this, repository, keywordMatcher, channelBlockRepository)
         Log.i(TAG, "UrlBlockerService created")
     }
 
@@ -968,22 +972,27 @@ class UrlBlockerService : AccessibilityService() {
                                 //    LongVideoBlockCoordinator (pause + dark overlay +
                                 //    "Go to YouTube Home") — the legacy full-block overlay
                                 //    must not fire for the same video or the two flows
-                                //    would fight over it;
-                                //  - a FEED pre-check (matchSource FEED) is Phase 2 and
-                                //    deliberately deferred — it must not pop the legacy
-                                //    full-block overlay on the feed (e.g. right after
-                                //    "Go to YouTube Home" lands on the home feed).
+                                //    would fight over it.
+                                //  - FEED matches are NEVER delegated: the coordinator only
+                                //    handles watch-page content, so a delegated feed match
+                                //    would be silently dropped (thumbnails on the home page,
+                                //    search results, and watch-page recommendations would
+                                //    never be blocked).
                                 // Domain rules, incognito and search-query blocks are
                                 // untouched.
-                                val onYouTubeInChrome = ContentExtractor.isYouTubeDomain(snapshot.url)
+                                // In incognito Chrome the URL is hidden from the
+                                // accessibility tree (snapshot.url == null), but the
+                                // window title still carries " - YouTube".
+                                val onYouTubeInChrome = ContentExtractor.isYouTubeDomain(snapshot.url) ||
+                                    ContentExtractor.isYouTubeTitle(snapshot.title)
                                 val delegateLongVideoBlock = longVideoBlock != null &&
                                     repository.youTubeChromeTest &&
                                     onYouTubeInChrome &&
-                                    ((result.matchSource == MatchSource.TITLE &&
-                                        snapshot.url?.contains("/watch") == true) ||
-                                        result.matchSource == MatchSource.FEED)
+                                    result.matchSource == MatchSource.TITLE &&
+                                    (snapshot.url?.contains("/watch") == true ||
+                                        snapshot.title?.contains(" - YouTube", ignoreCase = true) == true)
                                 if (delegateLongVideoBlock) {
-                                    Log.i(TAG, "LONG_VIDEO_LEGACY_BLOCK_SUPPRESSED url=${snapshot.url} source=${result.matchSource} keyword=${result.matchedItem} — coordinator owns long-video blocking; feed pre-checks deferred")
+                                    Log.i(TAG, "LONG_VIDEO_LEGACY_BLOCK_SUPPRESSED url=${snapshot.url} source=${result.matchSource} keyword=${result.matchedItem} — coordinator owns long-video blocking")
                                 } else {
                                     // ── ALL BLOCKS ARE FULL BLOCKS ──
                                     // Every match — whether from a URL, search query,

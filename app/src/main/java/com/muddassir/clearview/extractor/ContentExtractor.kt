@@ -325,6 +325,17 @@ class ContentExtractor {
         }
 
         /**
+         * True when a Chrome window title looks like a YouTube page.
+         * Chrome appends " - YouTube" to every YouTube tab title
+         * (e.g. "Video Title - YouTube"), even in incognito where the
+         * URL is hidden from the accessibility tree.
+         */
+        fun isYouTubeTitle(title: String?): Boolean {
+            if (title.isNullOrBlank()) return false
+            return title.endsWith(" - YouTube", ignoreCase = true)
+        }
+
+        /**
          * YouTube UI screens whose " - YouTube" window titles are NOT videos
          * (home feed, Shorts, Subscriptions, ...). Shared by
          * [youtubeTitleFromChromeWindowTitle] and [isYouTubeCardText] so a
