@@ -389,12 +389,18 @@ class MediaRepository(context: Context) {
     ): List<MediaVideo>? = withContext(Dispatchers.IO) {
         if (channelId.startsWith("ig_")) {
             val username = channelId.removePrefix("ig_")
-            val profile = InstagramResolver.fetchProfile(username)
+            val cached = getCachedVideos(channelId)?.first ?: emptyList()
+            val profile = try { InstagramResolver.fetchProfile(username) } catch (e: Exception) { null }
             if (profile != null && profile.posts.isNotEmpty()) {
-                writeCache(channelId, profile.posts)
-                return@withContext profile.posts
+                // Merge: fresh items take priority, then cached items not in fresh set
+                val freshIds = profile.posts.map { it.videoId }.toSet()
+                val merged = profile.posts + cached.filter { it.videoId !in freshIds }
+                val sorted = merged.sortedByDescending { it.publishedAtEpochMillis }
+                writeCache(channelId, sorted)
+                return@withContext sorted
             }
-            return@withContext getCachedVideos(channelId)?.first ?: emptyList()
+            // Fetch failed — return cached content (never empty on failure)
+            return@withContext cached.ifEmpty { null }
         }
 
         val url = "https://www.youtube.com/feeds/videos.xml?channel_id=$channelId"
@@ -768,6 +774,7 @@ class MediaRepository(context: Context) {
                     .put("platform", v.platform.name)
                     .put("instagramType", v.instagramType?.name ?: JSONObject.NULL)
                     .put("mediaUrl", v.mediaUrl ?: JSONObject.NULL)
+                    .put("instagramUrl", v.instagramUrl ?: JSONObject.NULL)
             )
         }
         val obj = JSONObject()
@@ -786,6 +793,7 @@ class MediaRepository(context: Context) {
                 val igTypeStr = o.optString("instagramType", "").takeIf { it.isNotBlank() }
                 val igType = igTypeStr?.let { runCatching { InstagramMediaType.valueOf(it) }.getOrNull() }
                 val mediaUrl = o.optString("mediaUrl", "").takeIf { it.isNotBlank() }
+                val instagramUrl = o.optString("instagramUrl", "").takeIf { it.isNotBlank() }
                 MediaVideo(
                     videoId = o.getString("videoId"),
                     title = o.optString("title", ""),
@@ -800,7 +808,8 @@ class MediaRepository(context: Context) {
                     isOfflineAudio = o.optBoolean("isOfflineAudio", false),
                     platform = platform,
                     instagramType = igType,
-                    mediaUrl = mediaUrl
+                    mediaUrl = mediaUrl,
+                    instagramUrl = instagramUrl
                 )
             } catch (e: Exception) {
                 null

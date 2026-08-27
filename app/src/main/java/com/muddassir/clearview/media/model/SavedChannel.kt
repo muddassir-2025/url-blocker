@@ -19,7 +19,7 @@ package com.muddassir.clearview.media.model
  *                      (guard inactive — their behavior is unchanged).
  */
 enum class MediaPlatform { YOUTUBE, INSTAGRAM }
-enum class InstagramMediaType { REEL, IMAGE }
+enum class InstagramMediaType { REEL, IMAGE, VIDEO, CAROUSEL }
 data class SavedChannel(
     val channelId: String,
     val displayName: String,

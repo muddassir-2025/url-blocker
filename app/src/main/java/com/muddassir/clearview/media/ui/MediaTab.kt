@@ -1,9 +1,14 @@
 package com.muddassir.clearview.media.ui
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import android.text.format.DateUtils
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.layout.ContentScale
+import com.muddassir.clearview.media.model.InstagramMediaType
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -884,24 +889,93 @@ fun MediaTab(
                             }
                         }
                     }
-                    if (shorts.isNotEmpty() && !feedIsUserPlaylist) {
-                        item(key = "shorts-header") {
+                    val isInstagramChannel = filterChannelId?.startsWith("ig_") == true ||
+                        (searchResults.isNotEmpty() && searchResults.all { it.platform == MediaPlatform.INSTAGRAM })
+
+                    if (isInstagramChannel && !feedIsUserPlaylist) {
+                        item(key = "instagram-posts-header") {
                             SectionHeader(
-                                title = "Shorts",
+                                title = "Posts",
                                 isLoading = feedLoading,
                                 showingCached = feedCached
                             )
                         }
-                        item(key = "shorts-row") {
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                items(shorts, key = { it.videoId }) { video ->
-                                    ShortCard(
+                        items(searchResults, key = { it.videoId }) { post ->
+                            InstagramMediaCard(
+                                video = post,
+                                onClick = { playLong(post) },
+                                onHide = {
+                                    libraryStore.hideVideo(post)
+                                    libraryRevision++
+                                }
+                            )
+                        }
+                    } else {
+                        if (shorts.isNotEmpty() && !feedIsUserPlaylist) {
+                            item(key = "shorts-header") {
+                                SectionHeader(
+                                    title = "Shorts",
+                                    isLoading = feedLoading,
+                                    showingCached = feedCached
+                                )
+                            }
+                            item(key = "shorts-row") {
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    items(shorts, key = { it.videoId }) { video ->
+                                        ShortCard(
+                                            video = video,
+                                            progressStore = progressStore,
+                                            isManual = libraryStore.isManuallyAdded(video.videoId),
+                                            downloadStatus = AudioDownloads.statusFor(video.videoId),
+                                            isOffline = AudioDownloads.isDownloaded(video.videoId),
+                                            onPlayOffline = { onPlayOffline(video) },
+                                            onClick = { playShort(video) },
+                                            onDownload = {
+                                                AudioDownloads.download(video, AudioDownloads.sourceFor(video))
+                                            },
+                                            onCancelDownload = { AudioDownloads.cancel(video.videoId) },
+                                            onDeleteDownload = { pendingDeleteDownload = video },
+                                            onHide = {
+                                                libraryStore.hideVideo(video)
+                                                libraryRevision++
+                                            },
+                                            onRemoveManual = {
+                                                libraryStore.removeManuallyAdded(video.videoId)
+                                                libraryRevision++
+                                            },
+                                            onAddToPlaylist = { pendingAddToPlaylist = video }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        if (longs.isNotEmpty() && !feedIsUserPlaylist) {
+                            item(key = "videos-header") {
+                                SectionHeader(
+                                    title = "Videos",
+                                    isLoading = feedLoading,
+                                    showingCached = feedCached
+                                )
+                            }
+                            items(longs, key = { it.videoId }) { video ->
+                                if (video.platform == MediaPlatform.INSTAGRAM) {
+                                    InstagramMediaCard(
+                                        video = video,
+                                        onClick = { playLong(video) },
+                                        onHide = {
+                                            libraryStore.hideVideo(video)
+                                            libraryRevision++
+                                        }
+                                    )
+                                } else {
+                                    LongVideoCard(
                                         video = video,
                                         progressStore = progressStore,
                                         isManual = libraryStore.isManuallyAdded(video.videoId),
-                                        downloadStatus = AudioDownloads.statusFor(video.videoId),                                            isOffline = AudioDownloads.isDownloaded(video.videoId),
-                                            onPlayOffline = { onPlayOffline(video) },
-                                            onClick = { playShort(video) },
+                                        downloadStatus = AudioDownloads.statusFor(video.videoId),
+                                        isOffline = AudioDownloads.isDownloaded(video.videoId),
+                                        onPlayOffline = { onPlayOffline(video) },
+                                        onClick = { playLong(video) },
                                         onDownload = {
                                             AudioDownloads.download(video, AudioDownloads.sourceFor(video))
                                         },
@@ -919,40 +993,6 @@ fun MediaTab(
                                     )
                                 }
                             }
-                        }
-                    }
-                    if (longs.isNotEmpty() && !feedIsUserPlaylist) {
-                        item(key = "videos-header") {
-                            SectionHeader(
-                                title = "Videos",
-                                isLoading = feedLoading,
-                                showingCached = feedCached
-                            )
-                        }
-                        items(longs, key = { it.videoId }) { video ->
-                            LongVideoCard(
-                                video = video,
-                                progressStore = progressStore,
-                                isManual = libraryStore.isManuallyAdded(video.videoId),
-                                downloadStatus = AudioDownloads.statusFor(video.videoId),
-                                isOffline = AudioDownloads.isDownloaded(video.videoId),
-                                onPlayOffline = { onPlayOffline(video) },
-                                onClick = { playLong(video) },
-                                onDownload = {
-                                    AudioDownloads.download(video, AudioDownloads.sourceFor(video))
-                                },
-                                onCancelDownload = { AudioDownloads.cancel(video.videoId) },
-                                onDeleteDownload = { pendingDeleteDownload = video },
-                                onHide = {
-                                    libraryStore.hideVideo(video)
-                                    libraryRevision++
-                                },
-                                onRemoveManual = {
-                                    libraryStore.removeManuallyAdded(video.videoId)
-                                    libraryRevision++
-                                },
-                                onAddToPlaylist = { pendingAddToPlaylist = video }
-                            )
                         }
                     }
                     // ── User playlist: the hand-picked ORDER matters, so every
@@ -2158,6 +2198,161 @@ private fun LongVideoCard(
 }
 
 /**
+ * Dedicated card for Instagram mixed media posts (1:1 format, media on top,
+ * Creator, Caption, and Date underneath, with an explicit Open on Instagram action).
+ */
+@Composable
+private fun InstagramMediaCard(
+    video: MediaVideo,
+    onClick: () -> Unit,
+    onHide: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    Card(
+        onClick = onClick,
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+        )
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .background(Color.Black),
+                contentAlignment = Alignment.Center
+            ) {
+                if (video.thumbnailUrl.isNotBlank()) {
+                    RemoteImage(
+                        url = video.thumbnailUrl,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.MusicNote,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier.size(48.dp)
+                        )
+                    }
+                }
+
+                val typeLabel = when (video.instagramType) {
+                    InstagramMediaType.REEL -> "Reel"
+                    InstagramMediaType.VIDEO -> "Video"
+                    InstagramMediaType.CAROUSEL -> "Carousel"
+                    else -> if (video.isShort) "Reel" else "Post"
+                }
+                Surface(
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    shape = RoundedCornerShape(5.dp),
+                    color = Color.Black.copy(alpha = 0.65f)
+                ) {
+                    Text(
+                        text = typeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+
+                var showMenu by remember { mutableStateOf(false) }
+                Box(modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
+                    Surface(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .clickable { showMenu = true },
+                        shape = CircleShape,
+                        color = Color.Black.copy(alpha = 0.45f)
+                    ) {
+                        Icon(
+                            Icons.Filled.MoreVert,
+                            contentDescription = "Post options",
+                            tint = Color.White,
+                            modifier = Modifier.padding(5.dp)
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { showMenu = false }
+                    ) {
+                        if (video.instagramUrl != null) {
+                            DropdownMenuItem(
+                                text = { Text("Open on Instagram") },
+                                onClick = {
+                                    showMenu = false
+                                    try {
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(video.instagramUrl)))
+                                    } catch (_: ActivityNotFoundException) {
+                                        Toast.makeText(context, "Can't open link", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Hide post") },
+                            onClick = {
+                                showMenu = false
+                                onHide()
+                            }
+                        )
+                    }
+                }
+            }
+
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = video.channelName,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (video.title.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = video.title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (video.publishedAtEpochMillis > 0L) {
+                    Spacer(Modifier.height(4.dp))
+                    val relTime = remember(video.publishedAtEpochMillis) {
+                        DateUtils.getRelativeTimeSpanString(
+                            video.publishedAtEpochMillis,
+                            System.currentTimeMillis(),
+                            DateUtils.MINUTE_IN_MILLIS,
+                            DateUtils.FORMAT_ABBREV_RELATIVE
+                        ).toString()
+                    }
+                    Text(
+                        text = relTime,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
  * The All Feed heading row: title + filter button (highlighted when active) +
  * an overflow menu (Hidden videos manager, Add video by URL) + active summary
  * and Reset.
@@ -2520,6 +2715,28 @@ private fun FilterSheet(
                     }
                 }
 
+                if (!isPlaylistContext) {
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        text = "Platform",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    androidx.compose.foundation.layout.FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        com.muddassir.clearview.media.model.FeedPlatformFilter.entries.forEach { option ->
+                            FilterChip(
+                                selected = draft.platform == option,
+                                onClick = { draft = draft.copy(platform = option) },
+                                label = { Text(option.label) }
+                            )
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(16.dp))
                 Text(
                     text = "Content",
@@ -2527,23 +2744,25 @@ private fun FilterSheet(
                     fontWeight = FontWeight.SemiBold
                 )
                 Spacer(Modifier.height(8.dp))
-                // FlowRow of chips (All / Videos / Shorts / Downloads) wraps instead
-                // of overflowing on narrow screens. LIVE is deliberately excluded:
-                // the dedicated Live tab is the only live viewer, so a Live feed
-                // filter is no longer offered here.
+                val contentOptions = when (draft.platform) {
+                    com.muddassir.clearview.media.model.FeedPlatformFilter.YOUTUBE ->
+                        listOf(FeedContentFilter.ALL, FeedContentFilter.VIDEOS, FeedContentFilter.SHORTS, FeedContentFilter.DOWNLOADS)
+                    com.muddassir.clearview.media.model.FeedPlatformFilter.INSTAGRAM ->
+                        listOf(FeedContentFilter.ALL, FeedContentFilter.REELS, FeedContentFilter.IMAGE_POSTS)
+                    else ->
+                        FeedContentFilter.entries.filterNot { it == FeedContentFilter.LIVE }
+                }
                 androidx.compose.foundation.layout.FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    FeedContentFilter.entries
-                        .filterNot { it == FeedContentFilter.LIVE }
-                        .forEach { option ->
-                            FilterChip(
-                                selected = draft.content == option,
-                                onClick = { draft = draft.copy(content = option) },
-                                label = { Text(option.label) }
-                            )
-                        }
+                    contentOptions.forEach { option ->
+                        FilterChip(
+                            selected = draft.content == option,
+                            onClick = { draft = draft.copy(content = option) },
+                            label = { Text(option.label) }
+                        )
+                    }
                 }
             }
 
