@@ -265,14 +265,13 @@ object TodoCodec {
     }
 
     /**
-     * True when a temporary todo's period has ended (it leaves the active
-     * list but its history stays for statistics). Permanent todos are never
-     * archived.
+     * True when a todo is deleted or a temporary todo's period has ended
+     * (it leaves the active list but its history stays for statistics).
      */
     fun isArchived(item: TodoItem, today: LocalDate): Boolean =
-        item.type == TodoType.TEMPORARY &&
+        item.isDeleted || (item.type == TodoType.TEMPORARY &&
             item.endDateEpochDay != null &&
-            today.toEpochDay() > item.endDateEpochDay
+            today.toEpochDay() > item.endDateEpochDay)
 
     /** Non-archived todos (the working set for the active list UI). */
     fun visibleItems(items: List<TodoItem>, today: LocalDate): List<TodoItem> =
@@ -281,6 +280,18 @@ object TodoCodec {
     /** True when [item] has a completion recorded for [day]. */
     fun completedOn(item: TodoItem, day: LocalDate): Boolean =
         item.completions.containsKey(day.toEpochDay())
+
+    /** True when [item] has been marked ATTEMPTED on [day] (and is not yet completed). */
+    fun isAttemptedOn(item: TodoItem, day: LocalDate): Boolean {
+        if (completedOn(item, day)) return false
+        return item.events.filterIsInstance<TodoEvent.Attempted>().any { it.epochDay == day.toEpochDay() }
+    }
+
+    /** Returns total minutes added to [item] on [day]. */
+    fun timeSpentOn(item: TodoItem, day: LocalDate): Int =
+        item.events.filterIsInstance<TodoEvent.TimeAdded>()
+            .filter { it.epochDay == day.toEpochDay() }
+            .sumOf { it.addedMinutes }
 
     /** True when [item] is due on [today] (the only day it can be completed). */
     fun isDueToday(item: TodoItem, today: LocalDate): Boolean = isActiveOn(item, today)
@@ -436,6 +447,10 @@ object TodoCodec {
     fun removed(items: List<TodoItem>, id: String): List<TodoItem> =
         items.filterNot { it.id == id }
 
+    /** Archives the todo by marking it deleted (preserves history). */
+    fun deletedOnly(items: List<TodoItem>, id: String): List<TodoItem> =
+        items.map { if (it.id == id) it.copy(isDeleted = true, updatedAtEpochMillis = System.currentTimeMillis()) else it }
+
     /**
      * Marks [id] completed on [day] — STRICT completion, never a toggle: a
      * day already completed stays completed. Returns the new list. Callers
@@ -448,6 +463,7 @@ object TodoCodec {
             else if (item.completions.containsKey(day.toEpochDay())) item
             else item.copy(
                 completions = item.completions + (day.toEpochDay() to at),
+                events = item.events + TodoEvent.Completed(at, day.toEpochDay()),
                 updatedAtEpochMillis = at
             )
         }
@@ -465,17 +481,40 @@ object TodoCodec {
             if (item.id != id) item
             else {
                 val completions = item.completions.toMutableMap()
+                val newEvents = item.events.toMutableList()
                 if (completions.remove(epoch) != null) {
                     nowCompleted = false
+                    newEvents.add(TodoEvent.Uncompleted(at, epoch))
                 } else {
                     completions[epoch] = at
                     nowCompleted = true
+                    newEvents.add(TodoEvent.Completed(at, epoch))
                 }
-                item.copy(completions = completions, updatedAtEpochMillis = at)
+                item.copy(completions = completions, events = newEvents, updatedAtEpochMillis = at)
             }
         }
         return updated to nowCompleted
     }
+
+    /** Marks [id] as attempted on [day] (for ATTEMPTED behavior). */
+    fun attempted(items: List<TodoItem>, id: String, day: LocalDate, at: Long): List<TodoItem> =
+        items.map { item ->
+            if (item.id != id) item
+            else item.copy(
+                events = item.events + TodoEvent.Attempted(at, day.toEpochDay()),
+                updatedAtEpochMillis = at
+            )
+        }
+
+    /** Adds time to [id] on [day] (for TIME behavior). */
+    fun timeAdded(items: List<TodoItem>, id: String, day: LocalDate, at: Long, addedMinutes: Int): List<TodoItem> =
+        items.map { item ->
+            if (item.id != id) item
+            else item.copy(
+                events = item.events + TodoEvent.TimeAdded(at, day.toEpochDay(), addedMinutes),
+                updatedAtEpochMillis = at
+            )
+        }
 
     // ── Filters ─────────────────────────────────────────────────────
 
