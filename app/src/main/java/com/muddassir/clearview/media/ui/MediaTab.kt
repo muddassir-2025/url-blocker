@@ -117,6 +117,7 @@ import com.muddassir.clearview.media.model.FeedFilter
 import com.muddassir.clearview.media.model.FeedSortOrder
 import com.muddassir.clearview.media.model.FeedSourceFilter
 import com.muddassir.clearview.media.model.FeedWatchStatus
+import com.muddassir.clearview.media.model.MediaPlatform
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.model.PlaylistTypeFilter
 import com.muddassir.clearview.media.model.SavedChannel
@@ -498,6 +499,16 @@ fun MediaTab(
     val shorts = searchResults.filter { it.isShort }
     val longs = searchResults.filterNot { it.isShort }
     val isSearching = searchActive && searchQuery.isNotBlank()
+    val matchingChannels = remember(channels, searchQuery, isSearching) {
+        if (!isSearching) emptyList()
+        else {
+            val q = searchQuery.trim()
+            channels.filter {
+                it.displayName.contains(q, ignoreCase = true) ||
+                    it.sourceRef.contains(q, ignoreCase = true)
+            }
+        }
+    }
 
     // ── Continue Watching: partially watched LONG videos in the current
     // channel context, capped so the section stays compact (Shorts never
@@ -810,9 +821,9 @@ fun MediaTab(
                     ErrorCard(errorMessage!!)
                 !inPlaylistContext && videos.isEmpty() && !isLoading ->
                     ErrorCard("No videos yet for your channels.")
-                !inPlaylistContext && videos.isNotEmpty() && displayed.isNotEmpty() &&
-                    searchResults.isEmpty() && isSearching && !isLoading ->
-                    ErrorCard("No videos match your search.")
+                !inPlaylistContext && (videos.isNotEmpty() || channels.isNotEmpty()) &&
+                    searchResults.isEmpty() && matchingChannels.isEmpty() && isSearching && !isLoading ->
+                    ErrorCard("No videos or channels match your search.")
                 !inPlaylistContext && videos.isNotEmpty() && displayed.isEmpty() && !isLoading ->
                     ErrorCard(
                         if (feedFilter.isActive) "No videos match your filters."
@@ -823,6 +834,26 @@ fun MediaTab(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
                 ) {
+                    // Matching channels in search results
+                    if (matchingChannels.isNotEmpty() && isSearching) {
+                        item(key = "matching-channels-header") {
+                            SectionHeader(
+                                title = "Channels",
+                                isLoading = false,
+                                showingCached = false
+                            )
+                        }
+                        items(matchingChannels, key = { "match-${it.channelId}" }) { ch ->
+                            SearchChannelCard(
+                                channel = ch,
+                                onClick = {
+                                    selectedChannelId = ch.channelId
+                                    searchActive = false
+                                    searchQuery = ""
+                                }
+                            )
+                        }
+                    }
                     // Section headers reflect whichever source loads the feed.
                     val feedLoading = if (feedIsPlaylist) playlistLoading else isLoading
                     val feedCached = !feedIsPlaylist && !feedIsUserPlaylist && showingCached
@@ -1446,13 +1477,16 @@ private fun ChannelAvatar(
         modifier = Modifier.width(64.dp).clickable(onClick = onClick)
     ) {
         Box(modifier = Modifier.size(52.dp)) {
+            val isInstagram = channel.platform == MediaPlatform.INSTAGRAM
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(CircleShape)
                     .border(
-                        width = if (selected) 2.dp else 0.dp,
-                        color = MaterialTheme.colorScheme.primary,
+                        width = if (selected) 2.dp else if (isInstagram) 1.5.dp else 0.dp,
+                        color = if (selected) MaterialTheme.colorScheme.primary
+                                else if (isInstagram) Color(0xFFE1306C)
+                                else Color.Transparent,
                         shape = CircleShape
                     )
             ) {
@@ -1506,6 +1540,77 @@ private fun ChannelAvatar(
             color = if (selected) MaterialTheme.colorScheme.primary
             else MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+@Composable
+private fun SearchChannelCard(
+    channel: SavedChannel,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val isInstagram = channel.platform == MediaPlatform.INSTAGRAM
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .border(
+                        width = if (isInstagram) 1.5.dp else 0.dp,
+                        color = if (isInstagram) Color(0xFFE1306C) else Color.Transparent,
+                        shape = CircleShape
+                    )
+            ) {
+                if (channel.avatarUrl != null) {
+                    RemoteImage(
+                        url = channel.avatarUrl,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.surface),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = initials(channel.displayName),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = channel.displayName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = if (isInstagram) "Instagram Profile" else "YouTube Channel",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = "Open channel",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
