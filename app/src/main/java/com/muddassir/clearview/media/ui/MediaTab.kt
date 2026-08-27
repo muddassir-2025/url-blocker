@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.layout.ContentScale
 import com.muddassir.clearview.media.model.InstagramMediaType
+import com.muddassir.clearview.ui.ContentHubState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -163,6 +164,7 @@ private const val DEVICE_SOURCE_LABEL = "From device"
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MediaTab(
+    hubState: ContentHubState? = null,
     onPlayVideo: (MediaVideo, List<MediaVideo>, Int) -> Unit,
     /** Plays the downloaded audio for [video] instead of the video (offline). */
     onPlayOffline: (MediaVideo) -> Unit = {},
@@ -184,7 +186,20 @@ fun MediaTab(
     var libraryRevision by remember { mutableIntStateOf(0) }
 
     var channels by remember { mutableStateOf(repository.getSavedChannels()) }
-    var filterChannelId by rememberSaveable { mutableStateOf<String?>(null) }
+    val filterChannelIdState = remember(hubState) {
+        object : androidx.compose.runtime.MutableState<String?> {
+            private var _local by mutableStateOf<String?>(hubState?.mediaFilterChannelId)
+            override var value: String?
+                get() = hubState?.mediaFilterChannelId ?: _local
+                set(v) {
+                    _local = v
+                    hubState?.mediaFilterChannelId = v
+                }
+            override fun component1() = value
+            override fun component2(): (String?) -> Unit = { value = it }
+        }
+    }
+    var filterChannelId by filterChannelIdState
     var videos by remember { mutableStateOf<List<MediaVideo>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
     var showingCached by remember { mutableStateOf(false) }
@@ -217,7 +232,20 @@ fun MediaTab(
 
     // ── Imported YouTube playlists (added by URL) ─────────────────
     var playlists by remember { mutableStateOf(repository.getSavedPlaylists()) }
-    var selectedPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedPlaylistIdState = remember(hubState) {
+        object : androidx.compose.runtime.MutableState<String?> {
+            private var _local by mutableStateOf<String?>(hubState?.mediaSelectedPlaylistId)
+            override var value: String?
+                get() = hubState?.mediaSelectedPlaylistId ?: _local
+                set(v) {
+                    _local = v
+                    hubState?.mediaSelectedPlaylistId = v
+                }
+            override fun component1() = value
+            override fun component2(): (String?) -> Unit = { value = it }
+        }
+    }
+    var selectedPlaylistId by selectedPlaylistIdState
     var playlistVideos by remember { mutableStateOf<List<MediaVideo>>(emptyList()) }
     var playlistLoading by remember { mutableStateOf(false) }
     var playlistError by remember { mutableStateOf<String?>(null) }
@@ -236,7 +264,20 @@ fun MediaTab(
     // Bumped whenever a user playlist is created / renamed / deleted / edited.
     var playlistRevision by remember { mutableIntStateOf(0) }
     var showPlaylistsSheet by rememberSaveable { mutableStateOf(false) }
-    var selectedUserPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedUserPlaylistIdState = remember(hubState) {
+        object : androidx.compose.runtime.MutableState<String?> {
+            private var _local by mutableStateOf<String?>(hubState?.mediaSelectedUserPlaylistId)
+            override var value: String?
+                get() = hubState?.mediaSelectedUserPlaylistId ?: _local
+                set(v) {
+                    _local = v
+                    hubState?.mediaSelectedUserPlaylistId = v
+                }
+            override fun component1() = value
+            override fun component2(): (String?) -> Unit = { value = it }
+        }
+    }
+    var selectedUserPlaylistId by selectedUserPlaylistIdState
 
     // Back handling within the Media tab: returns from channel/playlist back to All feed
     BackHandler(

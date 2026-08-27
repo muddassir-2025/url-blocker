@@ -103,6 +103,10 @@ class ContentHubState(appContext: Context) {
     // the index of the currently playing video within it.
     var shortsQueue by mutableStateOf<List<MediaVideo>>(emptyList())
     var shortsIndex by mutableStateOf(-1)
+    // ── Media tab navigation state (survives player open/close) ────
+    var mediaFilterChannelId by mutableStateOf<String?>(null)
+    var mediaSelectedPlaylistId by mutableStateOf<String?>(null)
+    var mediaSelectedUserPlaylistId by mutableStateOf<String?>(null)
     // Previous/Next verse navigation availability (false at the very first /
     // last verse of the Quran, or before the cache is loaded).
     var canGoPrevious by mutableStateOf(false)
@@ -618,6 +622,7 @@ fun ContentHubTabContent(
             )
 
             state.selectedTab == ContentTab.MEDIA -> MediaTab(
+                hubState = state,
                 onPlayVideo = { video, queue, index ->
                     state.playVideo(video, queue, index)
                     if (index < 0) state.markMediaUpdatesSeen()
