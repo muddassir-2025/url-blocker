@@ -242,7 +242,12 @@ class MediaRepository(context: Context) {
         var changed = false
         val updated = channels.map { c ->
             if (c.avatarUrl == null) {
-                val url = ChannelAvatarResolver.fetchAvatar(c.channelId)
+                val url = if (c.platform == MediaPlatform.INSTAGRAM) {
+                    val user = c.channelId.removePrefix("ig_")
+                    InstagramResolver.fetchProfile(user)?.avatarUrl
+                } else {
+                    ChannelAvatarResolver.fetchAvatar(c.channelId)
+                }
                 if (url != null) {
                     changed = true
                     c.copy(avatarUrl = url)

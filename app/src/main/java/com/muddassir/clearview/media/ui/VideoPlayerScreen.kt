@@ -91,6 +91,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.compose.ui.viewinterop.AndroidView
 import com.muddassir.clearview.R
 import com.muddassir.clearview.media.data.MediaLibraryStore
 import com.muddassir.clearview.media.data.UserPlaylistStore
@@ -98,6 +101,8 @@ import com.muddassir.clearview.media.data.VideoProgress
 import com.muddassir.clearview.media.data.WatchProgressStore
 import com.muddassir.clearview.media.download.AudioDownloads
 import com.muddassir.clearview.media.download.DownloadStatus
+import com.muddassir.clearview.media.model.InstagramMediaType
+import com.muddassir.clearview.media.model.MediaPlatform
 import com.muddassir.clearview.media.model.MediaVideo
 import com.muddassir.clearview.media.model.UserPlaylist
 import com.muddassir.clearview.media.util.formatBytes
@@ -478,136 +483,144 @@ fun VideoPlayerScreen(
         // Exactly matches the WebView's bounds so no sibling can cover it.
         // Vertical fullscreen (Shorts style) fills the whole portrait screen;
         // landscape is naturally full screen; otherwise a 16:9 box at the top.
+        val isInstagram = video.platform == MediaPlatform.INSTAGRAM || video.videoId.startsWith("ig_")
         Box(
             modifier = when {
                 isLandscape || fullscreenVertical -> Modifier.fillMaxSize()
                 else -> Modifier.fillMaxWidth().aspectRatio(16f / 9f)
             }
         ) {
-            YoutubePlayer(
-                videoId = video.videoId,
-                retryToken = retryToken,
-                resumeFromSeconds = resumeFromSeconds,
-                playbackRate = playbackRate,
-                seekToken = seekToken,
-                seekToSeconds = seekToSeconds,
-                commandToken = commandToken,
-                command = command,
-                muted = isMuted,
-                modifier = Modifier.fillMaxSize(),
-                onMuteState = { muted -> isMuted = muted },
-                onPlayerState = { s ->
-                    // Late connection: the source is now usable — drop any
-                    // timeout card.
-                    if (s == YtState.PLAYING || s == YtState.PAUSED) {
-                        timedOut = false
-                    }
-                    // sourceStarted flips ONLY on PLAYING: a ready-but-paused
-                    // video (autoplay blocked before it ever started) must keep
-                    // the blurred placeholder + the app's own play overlay
-                    // (Shorts) instead of exposing the embed's grey play
-                    // button. A mid-playback pause still has sourceStarted =
-                    // true, so it never re-blurs.
-                    if (s == YtState.PLAYING) {
-                        sourceStarted = true
-                    }
-                    playerState = s
-                    // Video finished: the whole thing counts as watched. Live
-                    // broadcasts can report ENDED when the user simply leaves
-                    // the player — a live stream has no finite duration to
-                    // complete, so it must never be marked watched. The runtime
-                    // live signal (isLiveNow) catches live streams even when
-                    // the thumbnail-based isLive hint missed them, and
-                    // sawPartialPlayback requires the source to have actually
-                    // played through partial positions first (an elapsed-time
-                    // live stream reads ≈100% from the start, so it never
-                    // satisfies this).
-                    if (s == YtState.ENDED && !isLiveNow &&
-                        sawFiniteDuration && sawPartialPlayback
-                    ) {
-                        progressStore.set(video.videoId, 1f)
-                        progressRevision++
-                    }
-                },
-                onLive = {
-                    // First time THIS source reports live: purge any stale
-                    // progress persisted by older builds (which misclassified
-                    // live streams as watched) so the Watched badge and
-                    // Continue-Watching state clear immediately.
-                    markSourceLive()
-                },
-                onProgress = { currentSeconds, durationSeconds ->
-                    // A finite duration report is the runtime proof this is a
-                    // bounded (non-live) video — live streams never report one
-                    // (they report Infinity or the growing elapsed time, both
-                    // handled here).
-                    if (durationSeconds > 0) {
-                        // Elapsed-time live detection: a broadcast that reports
-                        // the stream's elapsed time as its duration GROWS it on
-                        // every tick, monotonically. Two consecutive growing
-                        // reports = live, even when the Infinity signal never
-                        // fires. Any non-growing report (stable VOD duration, or
-                        // an in-stream ad's one-off duration switch) resets the
-                        // counter, so ads can't trigger a false positive.
-                        if (lastReportedDuration > 0.0) {
-                            if (durationSeconds - lastReportedDuration > 1.0) {
-                                growingReports++
-                                if (growingReports >= 2) {
-                                    markSourceLive()
-                                    return@YoutubePlayer
+            if (isInstagram) {
+                InstagramPlayer(
+                    video = video,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                YoutubePlayer(
+                    videoId = video.videoId,
+                    retryToken = retryToken,
+                    resumeFromSeconds = resumeFromSeconds,
+                    playbackRate = playbackRate,
+                    seekToken = seekToken,
+                    seekToSeconds = seekToSeconds,
+                    commandToken = commandToken,
+                    command = command,
+                    muted = isMuted,
+                    modifier = Modifier.fillMaxSize(),
+                    onMuteState = { muted -> isMuted = muted },
+                    onPlayerState = { s ->
+                        // Late connection: the source is now usable — drop any
+                        // timeout card.
+                        if (s == YtState.PLAYING || s == YtState.PAUSED) {
+                            timedOut = false
+                        }
+                        // sourceStarted flips ONLY on PLAYING: a ready-but-paused
+                        // video (autoplay blocked before it ever started) must keep
+                        // the blurred placeholder + the app's own play overlay
+                        // (Shorts) instead of exposing the embed's grey play
+                        // button. A mid-playback pause still has sourceStarted =
+                        // true, so it never re-blurs.
+                        if (s == YtState.PLAYING) {
+                            sourceStarted = true
+                        }
+                        playerState = s
+                        // Video finished: the whole thing counts as watched. Live
+                        // broadcasts can report ENDED when the user simply leaves
+                        // the player — a live stream has no finite duration to
+                        // complete, so it must never be marked watched. The runtime
+                        // live signal (isLiveNow) catches live streams even when
+                        // the thumbnail-based isLive hint missed them, and
+                        // sawPartialPlayback requires the source to have actually
+                        // played through partial positions first (an elapsed-time
+                        // live stream reads ≈100% from the start, so it never
+                        // satisfies this).
+                        if (s == YtState.ENDED && !isLiveNow &&
+                            sawFiniteDuration && sawPartialPlayback
+                        ) {
+                            progressStore.set(video.videoId, 1f)
+                            progressRevision++
+                        }
+                    },
+                    onLive = {
+                        // First time THIS source reports live: purge any stale
+                        // progress persisted by older builds (which misclassified
+                        // live streams as watched) so the Watched badge and
+                        // Continue-Watching state clear immediately.
+                        markSourceLive()
+                    },
+                    onProgress = { currentSeconds, durationSeconds ->
+                        // A finite duration report is the runtime proof this is a
+                        // bounded (non-live) video — live streams never report one
+                        // (they report Infinity or the growing elapsed time, both
+                        // handled here).
+                        if (durationSeconds > 0) {
+                            // Elapsed-time live detection: a broadcast that reports
+                            // the stream's elapsed time as its duration GROWS it on
+                            // every tick, monotonically. Two consecutive growing
+                            // reports = live, even when the Infinity signal never
+                            // fires. Any non-growing report (stable VOD duration, or
+                            // an in-stream ad's one-off duration switch) resets the
+                            // counter, so ads can't trigger a false positive.
+                            if (lastReportedDuration > 0.0) {
+                                if (durationSeconds - lastReportedDuration > 1.0) {
+                                    growingReports++
+                                    if (growingReports >= 2) {
+                                        markSourceLive()
+                                        return@YoutubePlayer
+                                    }
+                                } else {
+                                    growingReports = 0
                                 }
-                            } else {
-                                growingReports = 0
+                            }
+                            lastReportedDuration = durationSeconds
+                            sawFiniteDuration = true
+                        }
+                        // Live streams are excluded from progress tracking entirely:
+                        // the IFrame API reports a live/unknown duration, which
+                        // would render a fake progress bar and could pin the video
+                        // as watched. Once the stream ends and becomes a VOD it is
+                        // re-parsed as a normal video and tracked normally.
+                        if (!isLiveNow && durationSeconds > 0) {
+                            // While a resume seek is still landing, early reports
+                            // can read ~0 and would overwrite the saved position.
+                            // Skip until the position actually reaches the target.
+                            if (resumeFromSeconds > 3.0 &&
+                                currentSeconds < resumeFromSeconds - 3.0
+                            ) {
+                                return@YoutubePlayer
+                            }
+                            val fraction = (currentSeconds / durationSeconds)
+                                .toFloat().coerceIn(0f, 1f)
+                            if (fraction < 0.98f) sawPartialPlayback = true
+                            // A near-complete fraction is only trusted once the
+                            // source showed genuinely partial playback — an
+                            // elapsed-time live stream reads ≈100% from the very
+                            // first report, so trusting it here would mark the
+                            // stream watched even before the growth check runs.
+                            if (fraction >= 0.98f && !sawPartialPlayback) {
+                                return@YoutubePlayer
+                            }
+                            val now = System.currentTimeMillis()
+                            if (fraction >= 0.98f || now - lastProgressSavedAt >= 5_000L) {
+                                progressStore.setProgress(
+                                    video.videoId,
+                                    fraction,
+                                    currentSeconds.toLong(),
+                                    durationSeconds.toLong()
+                                )
+                                lastProgressSavedAt = now
                             }
                         }
-                        lastReportedDuration = durationSeconds
-                        sawFiniteDuration = true
+                    },
+                    onPlayerError = { code ->
+                        // Log ONCE per error code (the bridge dedups repeats) with the
+                        // video id, then update the UI state once.
+                        Log.w(TAG, "YouTube player error code = $code videoId = ${video.videoId}")
+                        timedOut = false
+                        errorCode = code
                     }
-                    // Live streams are excluded from progress tracking entirely:
-                    // the IFrame API reports a live/unknown duration, which
-                    // would render a fake progress bar and could pin the video
-                    // as watched. Once the stream ends and becomes a VOD it is
-                    // re-parsed as a normal video and tracked normally.
-                    if (!isLiveNow && durationSeconds > 0) {
-                        // While a resume seek is still landing, early reports
-                        // can read ~0 and would overwrite the saved position.
-                        // Skip until the position actually reaches the target.
-                        if (resumeFromSeconds > 3.0 &&
-                            currentSeconds < resumeFromSeconds - 3.0
-                        ) {
-                            return@YoutubePlayer
-                        }
-                        val fraction = (currentSeconds / durationSeconds)
-                            .toFloat().coerceIn(0f, 1f)
-                        if (fraction < 0.98f) sawPartialPlayback = true
-                        // A near-complete fraction is only trusted once the
-                        // source showed genuinely partial playback — an
-                        // elapsed-time live stream reads ≈100% from the very
-                        // first report, so trusting it here would mark the
-                        // stream watched even before the growth check runs.
-                        if (fraction >= 0.98f && !sawPartialPlayback) {
-                            return@YoutubePlayer
-                        }
-                        val now = System.currentTimeMillis()
-                        if (fraction >= 0.98f || now - lastProgressSavedAt >= 5_000L) {
-                            progressStore.setProgress(
-                                video.videoId,
-                                fraction,
-                                currentSeconds.toLong(),
-                                durationSeconds.toLong()
-                            )
-                            lastProgressSavedAt = now
-                        }
-                    }
-                },
-                onPlayerError = { code ->
-                    // Log ONCE per error code (the bridge dedups repeats) with the
-                    // video id, then update the UI state once.
-                    Log.w(TAG, "YouTube player error code = $code videoId = ${video.videoId}")
-                    timedOut = false
-                    errorCode = code
-                }
-            )
+                )
+            }
 
             // ── Shorts vertical swipe navigation (full-screen viewer) ──
             // A transparent layer ABOVE the WebView translates vertical drags
@@ -712,7 +725,7 @@ fun VideoPlayerScreen(
             // state (autoplay blocked before start) is covered too, so the
             // embed's grey play button never shows there either.
             LoadingPlaceholderOverlay(
-                visible = !sourceStarted && (isBuffering || pausedNotStarted),
+                visible = !isInstagram && !sourceStarted && (isBuffering || pausedNotStarted),
                 thumbnailUrl = placeholderThumbnail,
                 onThumbnailLoaded = { if (video.thumbnailUrl == placeholderThumbnail) {
                     currentThumbnailReady = true
@@ -726,7 +739,7 @@ fun VideoPlayerScreen(
             // Shorts — long videos keep the embed's own on-video controls
             // (which are reachable without the swipe layer), so a duplicate
             // overlay button is unnecessary there.
-            if (showPlayOverlay && video.isShort) {
+            if (!isInstagram && showPlayOverlay && video.isShort) {
                 Surface(
                     modifier = Modifier
                         .align(Alignment.Center)
@@ -789,7 +802,7 @@ fun VideoPlayerScreen(
                 }
             }
 
-            if (timedOut) {
+            if (!isInstagram && timedOut) {
                 Column(
                     modifier = Modifier.align(Alignment.Center).padding(24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
@@ -818,7 +831,7 @@ fun VideoPlayerScreen(
                 }
             }
 
-            if (errorCode != null) {
+            if (!isInstagram && errorCode != null) {
                 Column(
                     modifier = Modifier.align(Alignment.Center).padding(24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
@@ -1736,3 +1749,39 @@ private fun errorMessageRes(code: Int): Int = when (code) {
     YtError.INVALID_PARAMETER, YtError.HTML5_PLAYER -> R.string.media_player_error_playback
     else -> R.string.media_player_error_playback
 }
+
+@Composable
+private fun InstagramPlayer(
+    video: MediaVideo,
+    modifier: Modifier = Modifier
+) {
+    val rawId = video.videoId.removePrefix("ig_")
+    val channelUser = video.channelId.removePrefix("ig_")
+    val url = when {
+        rawId.contains("_reels") -> "https://www.instagram.com/$channelUser/reels/"
+        rawId.contains("_posts") -> "https://www.instagram.com/$channelUser/"
+        video.isShort || video.instagramType == InstagramMediaType.REEL -> "https://www.instagram.com/reel/$rawId/embed/"
+        else -> "https://www.instagram.com/p/$rawId/embed/"
+    }
+
+    AndroidView(
+        factory = { ctx ->
+            WebView(ctx).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.mediaPlaybackRequiresUserGesture = false
+                settings.userAgentString =
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+                webViewClient = WebViewClient()
+                loadUrl(url)
+            }
+        },
+        update = { webView ->
+            if (webView.url != url) {
+                webView.loadUrl(url)
+            }
+        },
+        modifier = modifier
+    )
+}
+

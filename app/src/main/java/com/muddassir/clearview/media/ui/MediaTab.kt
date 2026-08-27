@@ -1032,10 +1032,10 @@ fun MediaTab(
     if (showAddDialog) {
         AddChannelDialog(
             repository = repository,
-            onAdded = { channel ->
+            onAdded = { addedList ->
                 showAddDialog = false
                 channels = repository.getSavedChannels()
-                filterChannelId = channel.channelId
+                filterChannelId = addedList.lastOrNull()?.channelId
             },
             onDismiss = { showAddDialog = false }
         )
@@ -3114,7 +3114,7 @@ internal fun downloadMenuAction(
 @Composable
 private fun AddChannelDialog(
     repository: MediaRepository,
-    onAdded: (SavedChannel) -> Unit,
+    onAdded: (List<SavedChannel>) -> Unit,
     onDismiss: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -3124,11 +3124,11 @@ private fun AddChannelDialog(
 
     AlertDialog(
         onDismissRequest = { if (!adding) onDismiss() },
-        title = { Text("Add channel") },
+        title = { Text("Add channel / profile") },
         text = {
             Column {
                 Text(
-                    text = "Paste a channel URL or @handle, e.g. @SafinaSociety",
+                    text = "Paste a YouTube or Instagram @handle or URL, e.g. @SafinaSociety or @maherzainofficial",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -3139,7 +3139,7 @@ private fun AddChannelDialog(
                     singleLine = true,
                     enabled = !adding,
                     isError = error != null,
-                    label = { Text("Channel handle or URL") }
+                    label = { Text("Handle or URL") }
                 )
                 if (error != null) {
                     Spacer(Modifier.height(4.dp))
@@ -3158,7 +3158,7 @@ private fun AddChannelDialog(
                     adding = true
                     scope.launch {
                         when (val result = repository.addChannel(input)) {
-                            is MediaRepository.AddChannelResult.Success -> onAdded(result.channel)
+                            is MediaRepository.AddChannelResult.Success -> onAdded(result.channels)
                             is MediaRepository.AddChannelResult.Error -> {
                                 error = result.message
                                 adding = false
